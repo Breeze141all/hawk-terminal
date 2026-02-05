@@ -1,102 +1,61 @@
 # Flowsurface
 
-[![Crates.io](https://img.shields.io/crates/v/flowsurface)](https://crates.io/crates/flowsurface)
-[![Lint](https://github.com/flowsurface-rs/flowsurface/actions/workflows/lint.yml/badge.svg)](https://github.com/flowsurface-rs/flowsurface/actions/workflows/lint.yml)
-[![Format](https://github.com/flowsurface-rs/flowsurface/actions/workflows/format.yml/badge.svg)](https://github.com/flowsurface-rs/flowsurface/actions/workflows/format.yml)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://github.com/flowsurface-rs/flowsurface/blob/main/LICENSE)
-[![Made with iced](https://iced.rs/badge.svg)](https://github.com/iced-rs/iced)
+Desktop-приложение для крипто-чартинга. Поддерживает Binance, Bybit, Hyperliquid, OKX.
 
-An experimental open-source desktop charting application. Supports Binance, Bybit, Hyperliquid and OKX
+Построено на Rust + [Iced](https://github.com/iced-rs/iced).
 
-<div align="center">
-  <img
-    src="https://github.com/user-attachments/assets/baddc444-e079-48e5-82b2-4f97094eba07"
-    alt="Flowsurface screenshot"
-    style="max-width: 100%; height: auto;"
-  />
-</div>
+## Сборка на macOS
 
-### Key Features
-
--   Multiple chart/panel types:
-    -   **Heatmap (Historical DOM):** Uses live trades and L2 orderbook to create a time-series heatmap chart. Supports customizable price grouping, different time aggregations, fixed or visible range volume profiles.
-    -   **Candlestick:** Traditional kline chart supporting both time-based and custom tick-based intervals.
-    -   **Footprint:** Price grouped and interval aggregated views for trades on top of a candlestick chart. Supports different clustering methods, configurable imbalance and naked-POC studies.
-    -   **Time & Sales:** Scrollable list of live trades.
-    -   **DOM (Depth of Market) / Ladder:** Displays current L2 orderbook alongside recent trade volumes on grouped price levels.
-    -   **Comparison:** Line graph for comparing multiple data sources, normalized by kline `close` prices on a percentage scale
--   Real-time sound effects driven by trade streams
--   Multi window/monitor support
--   Pane linking for quickly switching tickers across multiple panes
--   Persistent layouts and customizable themes with editable color palettes
-
-##### Market data is received directly from exchanges' public REST APIs and WebSockets
-
-#
-
-#### Historical Trades on Footprint Charts:
-
--   By default, it captures and plots live trades in real time via WebSocket.
--   For Binance tickers, you can optionally backfill the visible time range by enabling trade fetching in the settings:
-    -   [data.binance.vision](https://data.binance.vision/): Fast daily bulk downloads (no intraday).
-    -   REST API (e.g., `/fapi/v1/aggTrades`): Slower, paginated intraday fetching (subject to rate limits).
-    -   The Binance connector can use either or both methods to retrieve historical data as needed.
--   Fetching trades for Bybit/Hyperliquid is not supported, as both lack a suitable REST API. OKX is WIP.
-
-## Installation
-
-### Method 1: Prebuilt Binaries
-
-Standalone executables are available for Windows, macOS, and Linux on the [Releases page](https://github.com/flowsurface-rs/flowsurface/releases).
-
-<details>
-<summary><strong>Having trouble running the file? (Permission/Security warnings)</strong></summary>
- 
-Since these binaries are currently unsigned they might get flagged.
-
--   **Windows**: If you see a "Windows protected your PC" pop-up, click **More info** -> **Run anyway**.
--   **macOS**: If you see "Developer cannot be verified", control-click (right-click) the app and select **Open**, or go to _System Settings > Privacy & Security_ to allow it.
-</details>
-
-### Method 2: Build from Source
-
-#### Requirements
-
--   [Rust toolchain](https://www.rust-lang.org/tools/install)
--   [Git version control system](https://git-scm.com/)
--   System dependencies:
-    -   **Linux**:
-        -   Debian/Ubuntu: `sudo apt install build-essential pkg-config libasound2-dev`
-        -   Arch: `sudo pacman -S base-devel alsa-lib`
-        -   Fedora: `sudo dnf install gcc make alsa-lib-devel`
-    -   **macOS**: Install Xcode Command Line Tools: `xcode-select --install`
-    -   **Windows**: No additional dependencies required
-
-#### Option A: `cargo install`
+### 1. Установи Rust
 
 ```bash
-# Install latest globally
-cargo install --git https://github.com/flowsurface-rs/flowsurface flowsurface
-
-# Run
-flowsurface
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-#### Option B: Cloning the repo
+После установки перезапусти терминал или выполни:
 
 ```bash
-# Clone the repository
-git clone https://github.com/flowsurface-rs/flowsurface
+source "$HOME/.cargo/env"
+```
 
-cd flowsurface
+### 2. Установи Xcode Command Line Tools
 
-# Build and run
+```bash
+xcode-select --install
+```
+
+### 3. Клонируй и собери
+
+```bash
+git clone https://github.com/lubluniky/ct-client
+cd ct-client
 cargo build --release
+```
+
+Первая сборка займет несколько минут — скачиваются и компилируются все зависимости.
+
+### 4. Запуск
+
+```bash
 cargo run --release
 ```
 
-### Credits and thanks to
+Бинарник также будет лежать в `target/release/flowsurface`.
 
--   [Kraken Desktop](https://www.kraken.com/desktop) (formerly [Cryptowatch](https://blog.kraken.com/product/cryptowatch-to-sunset-kraken-pro-to-integrate-cryptowatch-features)), the main inspiration that sparked this project
--   [Halloy](https://github.com/squidowl/halloy), an excellent open-source reference for the foundational code design and the project architecture
--   And of course, [iced](https://github.com/iced-rs/iced), the GUI library that makes all of this possible
+## Что умеет
+
+- **Heatmap** — тепловая карта ордербука в реальном времени
+- **Candlestick** — свечной график (time-based и tick-based интервалы)
+- **Footprint** — кластерный анализ сделок
+- **Time & Sales** — лента сделок
+- **DOM / Ladder** — стакан с объемами
+- **Comparison** — сравнение нескольких тикеров на одном графике
+- Звуковые эффекты по потоку сделок
+- Мульти-окна / мульти-монитор
+- Сохранение лейаутов и кастомные темы
+
+Данные приходят напрямую с публичных API бирж (REST + WebSocket).
+
+## Основано на
+
+[flowsurface-rs/flowsurface](https://github.com/flowsurface-rs/flowsurface) — оригинальный проект

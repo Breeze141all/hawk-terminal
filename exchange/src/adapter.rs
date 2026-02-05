@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 pub mod binance;
+pub mod bitcoincounterflow;
 pub mod bybit;
 pub mod hyperliquid;
 pub mod okex;

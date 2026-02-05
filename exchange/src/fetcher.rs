@@ -1,5 +1,5 @@
 use crate::adapter::StreamKind;
-use crate::{Kline, OpenInterest, Trade};
+use crate::{FundingRate, Kline, NetOiDataPoint, OpenInterest, SpotKline, Trade};
 
 use smallvec::SmallVec;
 use std::collections::HashMap;
@@ -28,6 +28,18 @@ pub enum FetchedData {
     },
     OI {
         data: Vec<OpenInterest>,
+        req_id: Option<uuid::Uuid>,
+    },
+    FundingRates {
+        data: Vec<FundingRate>,
+        req_id: Option<uuid::Uuid>,
+    },
+    SpotKlines {
+        data: Vec<SpotKline>,
+        req_id: Option<uuid::Uuid>,
+    },
+    NetOiData {
+        data: Vec<NetOiDataPoint>,
         req_id: Option<uuid::Uuid>,
     },
 }
@@ -119,6 +131,49 @@ pub enum FetchRange {
     Kline(u64, u64),
     OpenInterest(u64, u64),
     Trades(u64, u64),
+    FundingRate(u64, u64),
+    SpotKline(u64, u64),
+    /// Net OI data fetch with days and interval parameters
+    NetOiData {
+        days: u16,
+        interval: NetOiInterval,
+    },
+}
+
+/// Interval for Net OI data API
+#[derive(PartialEq, Debug, Clone, Copy)]
+pub enum NetOiInterval {
+    M15,
+    M30,
+    H1,
+    H2,
+    H4,
+    D1,
+}
+
+impl NetOiInterval {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NetOiInterval::M15 => "15m",
+            NetOiInterval::M30 => "30m",
+            NetOiInterval::H1 => "1h",
+            NetOiInterval::H2 => "2h",
+            NetOiInterval::H4 => "4h",
+            NetOiInterval::D1 => "1d",
+        }
+    }
+
+    pub fn from_timeframe(tf: crate::Timeframe) -> Option<Self> {
+        match tf {
+            crate::Timeframe::M15 => Some(NetOiInterval::M15),
+            crate::Timeframe::M30 => Some(NetOiInterval::M30),
+            crate::Timeframe::H1 => Some(NetOiInterval::H1),
+            crate::Timeframe::H2 => Some(NetOiInterval::H2),
+            crate::Timeframe::H4 => Some(NetOiInterval::H4),
+            crate::Timeframe::D1 => Some(NetOiInterval::D1),
+            _ => None,
+        }
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -141,6 +196,20 @@ impl FetchRequest {
             (FetchRange::OpenInterest(s1, e1), FetchRange::OpenInterest(s2, e2)) => {
                 e1 == e2 && s1 == s2
             }
+            (FetchRange::FundingRate(s1, e1), FetchRange::FundingRate(s2, e2)) => {
+                e1 == e2 && s1 == s2
+            }
+            (FetchRange::SpotKline(s1, e1), FetchRange::SpotKline(s2, e2)) => e1 == e2 && s1 == s2,
+            (
+                FetchRange::NetOiData {
+                    days: d1,
+                    interval: i1,
+                },
+                FetchRange::NetOiData {
+                    days: d2,
+                    interval: i2,
+                },
+            ) => d1 == d2 && i1 == i2,
             _ => false,
         }
     }
@@ -189,4 +258,6 @@ pub enum InfoKind {
     FetchingKlines,
     FetchingTrades(usize),
     FetchingOI,
+    FetchingMarketPulse,
+    FetchingNetOi,
 }

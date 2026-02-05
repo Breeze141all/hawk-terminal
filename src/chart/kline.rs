@@ -12,6 +12,7 @@ use data::chart::{
     KlineChartKind, ViewConfig,
     indicator::{Indicator, KlineIndicator},
     kline::{ClusterKind, FootprintStudy, KlineDataPoint, KlineTrades, NPoc, PointOfControl},
+    liquidation_heatmap::{LiquidationHeatmap, LiquidationHeatmapConfig, interpolate_color},
 };
 use data::util::{abbr_large_numbers, count_decimals};
 use exchange::util::{Price, PriceStep};
@@ -177,6 +178,7 @@ pub struct KlineChart {
     request_handler: RequestHandler,
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
+    liquidation_heatmap: LiquidationHeatmap,
 }
 
 impl KlineChart {
@@ -259,6 +261,17 @@ impl KlineChart {
                     indicators[i] = Some(indi);
                 }
 
+                let mut liquidation_heatmap = LiquidationHeatmap::new(LiquidationHeatmapConfig::default());
+                // Rebuild heatmap from existing klines
+                if let PlotData::TimeBased(ref ts) = data_source {
+                    let kline_data: Vec<_> = ts.datapoints.iter().map(|(time, dp)| {
+                        (*time, dp.kline.open.to_f32(), dp.kline.high.to_f32(),
+                         dp.kline.low.to_f32(), dp.kline.close.to_f32(),
+                         dp.kline.volume.0, dp.kline.volume.1)
+                    }).collect();
+                    liquidation_heatmap.rebuild_from_klines(&kline_data);
+                }
+
                 KlineChart {
                     chart,
                     data_source,
@@ -269,6 +282,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    liquidation_heatmap,
                 }
             }
             Basis::Tick(interval) => {
@@ -317,6 +331,9 @@ impl KlineChart {
                     indicators[i] = Some(indi);
                 }
 
+                // Liquidation heatmap not supported for tick-based charts
+                let liquidation_heatmap = LiquidationHeatmap::new(LiquidationHeatmapConfig::default());
+
                 KlineChart {
                     chart,
                     data_source,
@@ -327,6 +344,7 @@ impl KlineChart {
                     kind: kind.clone(),
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
+                    liquidation_heatmap,
                 }
             }
         }
@@ -670,6 +688,63 @@ impl KlineChart {
 
         if let Some(indi) = self.indicators[KlineIndicator::OpenInterest].as_mut() {
             indi.on_open_interest(oi_data);
+        }
+    }
+
+    pub fn insert_funding_rates(
+        &mut self,
+        req_id: Option<uuid::Uuid>,
+        rates: &[exchange::FundingRate],
+    ) {
+        if let Some(req_id) = req_id {
+            if rates.is_empty() {
+                self.request_handler
+                    .mark_failed(req_id, "No funding rate data received".to_string());
+            } else {
+                self.request_handler.mark_completed(req_id);
+            }
+        }
+
+        if let Some(indi) = self.indicators[KlineIndicator::MarketPulse].as_mut() {
+            indi.on_funding_rates(rates);
+        }
+    }
+
+    pub fn insert_spot_klines(
+        &mut self,
+        req_id: Option<uuid::Uuid>,
+        klines: &[exchange::SpotKline],
+    ) {
+        if let Some(req_id) = req_id {
+            if klines.is_empty() {
+                self.request_handler
+                    .mark_failed(req_id, "No spot kline data received".to_string());
+            } else {
+                self.request_handler.mark_completed(req_id);
+            }
+        }
+
+        if let Some(indi) = self.indicators[KlineIndicator::MarketPulse].as_mut() {
+            indi.on_spot_klines(klines);
+        }
+    }
+
+    pub fn insert_net_oi_data(
+        &mut self,
+        req_id: Option<uuid::Uuid>,
+        data: &[exchange::NetOiDataPoint],
+    ) {
+        if let Some(req_id) = req_id {
+            if data.is_empty() {
+                self.request_handler
+                    .mark_failed(req_id, "No Net OI data received".to_string());
+            } else {
+                self.request_handler.mark_completed(req_id);
+            }
+        }
+
+        if let Some(indi) = self.indicators[KlineIndicator::NetOi].as_mut() {
+            indi.on_net_oi_data(data);
         }
     }
 

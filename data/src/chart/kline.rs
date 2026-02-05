@@ -136,6 +136,8 @@ impl GroupedTrades {
 pub struct KlineTrades {
     pub trades: FxHashMap<Price, GroupedTrades>,
     pub poc: Option<PointOfControl>,
+    cached_first_time: Option<u64>,
+    cached_last_time: Option<u64>,
 }
 
 impl KlineTrades {
@@ -143,15 +145,17 @@ impl KlineTrades {
         Self {
             trades: FxHashMap::default(),
             poc: None,
+            cached_first_time: None,
+            cached_last_time: None,
         }
     }
 
     pub fn first_trade_t(&self) -> Option<u64> {
-        self.trades.values().map(|group| group.first_time).min()
+        self.cached_first_time
     }
 
     pub fn last_trade_t(&self) -> Option<u64> {
-        self.trades.values().map(|group| group.last_time).max()
+        self.cached_last_time
     }
 
     /// Add trade to the bin at the step multiple computed with side-based rounding.
@@ -164,6 +168,11 @@ impl KlineTrades {
             .entry(price)
             .and_modify(|group| group.add_trade(trade))
             .or_insert_with(|| GroupedTrades::new(trade));
+
+        self.cached_first_time =
+            Some(self.cached_first_time.map_or(trade.time, |t| t.min(trade.time)));
+        self.cached_last_time =
+            Some(self.cached_last_time.map_or(trade.time, |t| t.max(trade.time)));
     }
 
     /// Add trade to the bin at the nearest step multiple (side-agnostic).
@@ -176,6 +185,11 @@ impl KlineTrades {
             .entry(price)
             .and_modify(|group| group.add_trade(trade))
             .or_insert_with(|| GroupedTrades::new(trade));
+
+        self.cached_first_time =
+            Some(self.cached_first_time.map_or(trade.time, |t| t.min(trade.time)));
+        self.cached_last_time =
+            Some(self.cached_last_time.map_or(trade.time, |t| t.max(trade.time)));
     }
 
     pub fn max_qty_by<F>(&self, highest: Price, lowest: Price, f: F) -> f32
@@ -227,6 +241,8 @@ impl KlineTrades {
     pub fn clear(&mut self) {
         self.trades.clear();
         self.poc = None;
+        self.cached_first_time = None;
+        self.cached_last_time = None;
     }
 }
 

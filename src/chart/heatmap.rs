@@ -13,7 +13,7 @@ use data::chart::{
     },
     indicator::HeatmapIndicator,
 };
-use data::util::{abbr_large_numbers, count_decimals};
+use data::util::{abbr_large_numbers, count_decimals, format_with_commas};
 use data::{
     aggr::time::{DataPoint, TimeSeries},
     chart::Autoscale,
@@ -33,6 +33,7 @@ use iced::{
 
 use enum_map::EnumMap;
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 const MIN_SCALING: f32 = 0.6;
@@ -48,6 +49,30 @@ const DEFAULT_CELL_WIDTH: f32 = 3.0;
 
 const TOOLTIP_WIDTH: f32 = 198.0;
 const TOOLTIP_HEIGHT: f32 = 66.0;
+
+/// Format filter value for display in input field
+fn format_filter_value(value: f32) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        format_with_commas(value)
+    }
+}
+
+/// Parse filter input string to f32
+pub fn parse_filter_input(input: &str) -> Option<f32> {
+    // Remove common formatting: $, commas, spaces
+    let cleaned: String = input
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+
+    if cleaned.is_empty() {
+        return Some(0.0);
+    }
+
+    cleaned.parse::<f32>().ok().filter(|v| *v >= 0.0)
+}
 const TOOLTIP_PADDING: f32 = 12.0;
 
 const MAX_CIRCLE_RADIUS: f32 = 16.0;
@@ -150,12 +175,20 @@ pub struct HeatmapChart {
     chart: ViewState,
     trades: TimeSeries<HeatmapDataPoint>,
     indicators: EnumMap<HeatmapIndicator, Option<IndicatorData>>,
-    pause_buffer: Vec<(u64, Box<[Trade]>, Depth)>,
+    pause_buffer: Vec<(u64, Box<[Trade]>, Arc<Depth>)>,
     heatmap: HistoricalDepth,
     visual_config: Config,
     study_configurator: study::Configurator<HeatmapStudy>,
     last_tick: Instant,
     pub studies: Vec<HeatmapStudy>,
+    /// Input buffer for trade size filter in settings modal
+    pub trade_size_input: String,
+    /// Input buffer for order size filter in settings modal
+    pub order_size_input: String,
+    /// Last time camera position was updated (for throttling)
+    last_camera_update: Instant,
+    /// Target price for smooth camera following
+    camera_target_price: f32,
 }
 
 impl HeatmapChart {
@@ -192,16 +225,24 @@ impl HeatmapChart {
             4.0,
         );
 
+        let visual_config = config.unwrap_or_default();
+        let trade_size_input = format_filter_value(visual_config.trade_size_filter);
+        let order_size_input = format_filter_value(visual_config.order_size_filter);
+
         HeatmapChart {
             chart: view_state,
             indicators,
             pause_buffer: vec![],
             heatmap,
             trades: TimeSeries::<HeatmapDataPoint>::new(basis, step),
-            visual_config: config.unwrap_or_default(),
+            visual_config,
             study_configurator: study::Configurator::new(),
             studies,
             last_tick: Instant::now(),
+            trade_size_input,
+            order_size_input,
+            last_camera_update: Instant::now(),
+            camera_target_price: 0.0,
         }
     }
 
@@ -209,7 +250,7 @@ impl HeatmapChart {
         &mut self,
         trades_buffer: &[Trade],
         depth_update_t: u64,
-        depth: &Depth,
+        depth: Arc<Depth>,
     ) {
         let chart = &mut self.chart;
 
@@ -223,7 +264,7 @@ impl HeatmapChart {
             self.pause_buffer.push((
                 depth_update_t,
                 trades_buffer.to_vec().into_boxed_slice(),
-                depth.clone(),
+                Arc::clone(&depth),
             ));
 
             return;
@@ -237,7 +278,7 @@ impl HeatmapChart {
             self.cleanup_old_data();
         }
 
-        self.process_datapoint(trades_buffer, depth_update_t, depth);
+        self.process_datapoint(trades_buffer, depth_update_t, &depth);
     }
 
     fn cleanup_old_data(&mut self) {
@@ -275,10 +316,7 @@ impl HeatmapChart {
                 .trades
                 .datapoints
                 .entry(rounded_depth_update)
-                .or_insert_with(|| HeatmapDataPoint {
-                    grouped_trades: Box::new([]),
-                    buy_sell: (0.0, 0.0),
-                });
+                .or_default();
 
             for trade in trades_buffer {
                 entry.add_trade(trade, chart.tick_size);
@@ -290,7 +328,48 @@ impl HeatmapChart {
 
         {
             let mid_price = depth.mid_price().unwrap_or(chart.base_price_y);
-            chart.base_price_y = mid_price.round_to_step(chart.tick_size);
+            let target = mid_price.round_to_step(chart.tick_size);
+            let target_f = target.to_f32();
+
+            // Update target price (what the camera should follow)
+            self.camera_target_price = target_f;
+
+            // Smooth camera movement with throttling + deadzone + lerp
+            // Only apply smoothing if autoscale is enabled (camera follows price)
+            if chart.layout.autoscale.is_some() {
+                let now = Instant::now();
+                let elapsed = now.duration_since(self.last_camera_update);
+
+                // Throttle: only update camera position every 50ms (20fps for camera)
+                if elapsed.as_millis() >= 50 {
+                    self.last_camera_update = now;
+
+                    let current = chart.base_price_y.to_f32();
+                    let diff = self.camera_target_price - current;
+                    let abs_diff = diff.abs();
+
+                    // Calculate visible price range for deadzone
+                    let visible_height = chart.bounds.height / chart.scaling.max(0.001);
+                    let price_per_pixel =
+                        chart.tick_size.to_f32_lossy() / chart.cell_height.max(0.001);
+                    let visible_price_range = (visible_height * price_per_pixel).max(1.0);
+
+                    // Deadzone: 30% of visible range - don't move if price is within this zone
+                    let deadzone = visible_price_range * 0.30;
+
+                    if abs_diff > deadzone {
+                        // Outside deadzone - move with very gentle smoothing
+                        let overshoot = abs_diff - deadzone;
+                        // Very slow: 3-8% per update (at 20fps = 60-160% per second max)
+                        let smoothing = (overshoot / visible_price_range).clamp(0.03, 0.08);
+                        let move_amount = diff.signum() * overshoot * smoothing;
+                        chart.base_price_y = Price::from_f32(current + move_amount);
+                    }
+                    // Inside deadzone - don't move camera at all
+                }
+            } else {
+                chart.base_price_y = target;
+            }
         }
 
         chart.latest_x = rounded_depth_update;
@@ -301,8 +380,38 @@ impl HeatmapChart {
     }
 
     pub fn set_visual_config(&mut self, visual_config: Config) {
+        // Sync input buffers if filter values changed
+        if self.visual_config.trade_size_filter != visual_config.trade_size_filter {
+            self.trade_size_input = format_filter_value(visual_config.trade_size_filter);
+        }
+        if self.visual_config.order_size_filter != visual_config.order_size_filter {
+            self.order_size_input = format_filter_value(visual_config.order_size_filter);
+        }
         self.visual_config = visual_config;
         self.invalidate(Some(Instant::now()));
+    }
+
+    /// Get reference to size filter input state for settings modal
+    pub fn size_filter_inputs(&self) -> (&str, &str) {
+        (&self.trade_size_input, &self.order_size_input)
+    }
+
+    /// Update trade size filter input and apply if valid
+    pub fn set_trade_size_input(&mut self, input: String) {
+        self.trade_size_input = input;
+        if let Some(value) = parse_filter_input(&self.trade_size_input) {
+            self.visual_config.trade_size_filter = value;
+            self.invalidate(Some(Instant::now()));
+        }
+    }
+
+    /// Update order size filter input and apply if valid
+    pub fn set_order_size_input(&mut self, input: String) {
+        self.order_size_input = input;
+        if let Some(value) = parse_filter_input(&self.order_size_input) {
+            self.visual_config.order_size_filter = value;
+            self.invalidate(Some(Instant::now()));
+        }
     }
 
     pub fn set_basis(&mut self, basis: Basis) {

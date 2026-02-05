@@ -15,6 +15,33 @@ const METRICS_HEIGHT_COMPACT: f32 = 8.0;
 const METRICS_HEIGHT_FULL: f32 = 18.0;
 const TRADE_ROW_HEIGHT: f32 = 14.0;
 
+fn format_filter_value(value: f32) -> String {
+    if value == 0.0 {
+        "0".to_string()
+    } else {
+        data::util::format_with_commas(value)
+    }
+}
+
+/// Parse filter input string to f32
+pub fn parse_filter_input(input: &str) -> Option<f32> {
+    let cleaned: String = input
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+
+    if cleaned.is_empty() {
+        return Some(0.0);
+    }
+
+    let value: f32 = cleaned.parse().ok()?;
+    if value.is_finite() && value >= 0.0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 impl super::Panel for TimeAndSales {
     fn scroll(&mut self, delta: f32) {
         self.scroll_offset -= delta;
@@ -80,21 +107,25 @@ pub struct TimeAndSales {
     cache: canvas::Cache,
     last_tick: Instant,
     scroll_offset: f32,
+    pub trade_size_input: String,
 }
 
 impl TimeAndSales {
     pub fn new(config: Option<Config>, ticker_info: TickerInfo) -> Self {
+        let cfg = config.unwrap_or_default();
+        let trade_size_input = format_filter_value(cfg.trade_size_filter);
         Self {
             recent_trades: VecDeque::new(),
             paused_trades_buffer: VecDeque::new(),
             hist_agg: HistAgg::default(),
             is_paused: false,
-            config: config.unwrap_or_default(),
+            config: cfg,
             max_filtered_qty: 0.0,
             ticker_info,
             cache: canvas::Cache::default(),
             last_tick: Instant::now(),
             scroll_offset: 0.0,
+            trade_size_input,
         }
     }
 
@@ -168,6 +199,20 @@ impl TimeAndSales {
             self.last_tick = now;
         }
         None
+    }
+
+    /// Get reference to size filter input state for settings modal
+    pub fn size_filter_input(&self) -> &str {
+        &self.trade_size_input
+    }
+
+    /// Update trade size filter input and apply if valid
+    pub fn set_trade_size_input(&mut self, input: String) {
+        self.trade_size_input = input;
+        if let Some(value) = parse_filter_input(&self.trade_size_input) {
+            self.config.trade_size_filter = value;
+            self.invalidate(Some(Instant::now()));
+        }
     }
 
     fn stacked_bar_height(&self) -> f32 {

@@ -2,7 +2,7 @@ use crate::chart::comparison::ComparisonChart;
 use crate::screen::dashboard::pane::{Event, Message};
 use crate::screen::dashboard::panel::timeandsales;
 use crate::split_column;
-use crate::widget::{classic_slider_row, labeled_slider};
+use crate::widget::classic_slider_row;
 use crate::{style, tooltip, widget::scrollable_content};
 
 use data::chart::heatmap::HeatmapStudy;
@@ -15,13 +15,11 @@ use data::chart::{
 use data::layout::pane::VisualConfig;
 use data::panel::ladder;
 use data::panel::timeandsales::{StackedBar, StackedBarRatio};
-use data::util::format_with_commas;
-
 use iced::widget::{checkbox, space};
 use iced::{
     Alignment, Element, Length,
     widget::{
-        button, column, container, pane_grid, pick_list, radio, row, slider, text,
+        button, column, container, pane_grid, pick_list, radio, row, slider, text, text_input,
         tooltip::Position as TooltipPosition,
     },
 };
@@ -45,47 +43,45 @@ pub fn heatmap_cfg_view<'a>(
     study_config: &'a study::Configurator<HeatmapStudy>,
     studies: &'a [HeatmapStudy],
     basis: data::chart::Basis,
+    trade_size_input: &'a str,
+    order_size_input: &'a str,
 ) -> Element<'a, Message> {
-    let trade_size_slider = {
-        let filter = cfg.trade_size_filter;
-        labeled_slider(
-            "Trade",
-            0.0..=50000.0,
-            filter,
-            move |value| {
-                Message::VisualConfigChanged(
-                    pane,
-                    VisualConfig::Heatmap(heatmap::Config {
-                        trade_size_filter: value,
-                        ..cfg
-                    }),
-                    false,
-                )
-            },
-            |value| format!(">${}", format_with_commas(*value)),
-            Some(500.0),
-        )
+    let id = pane;
+
+    // Trade size filter - text input for manual entry
+    let trade_size_row = {
+        let input = text_input("0", trade_size_input)
+            .on_input(move |s| Message::PaneEvent(id, Event::HeatmapTradeSizeInput(s)))
+            .width(Length::Fixed(100.0))
+            .padding(4)
+            .style(|theme, status| style::validated_text_input(theme, status, true));
+
+        row![
+            text("Trade").width(Length::Fill),
+            text(">$"),
+            input,
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .padding([4, 8])
     };
 
-    let order_size_slider = {
-        let filter = cfg.order_size_filter;
-        labeled_slider(
-            "Order",
-            0.0..=500_000.0,
-            filter,
-            move |value| {
-                Message::VisualConfigChanged(
-                    pane,
-                    VisualConfig::Heatmap(heatmap::Config {
-                        order_size_filter: value,
-                        ..cfg
-                    }),
-                    false,
-                )
-            },
-            |value| format!(">${}", format_with_commas(*value)),
-            Some(5000.0),
-        )
+    // Order size filter - text input for manual entry
+    let order_size_row = {
+        let input = text_input("0", order_size_input)
+            .on_input(move |s| Message::PaneEvent(id, Event::HeatmapOrderSizeInput(s)))
+            .width(Length::Fixed(100.0))
+            .padding(4)
+            .style(|theme, status| style::validated_text_input(theme, status, true));
+
+        row![
+            text("Order").width(Length::Fill),
+            text(">$"),
+            input,
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .padding([4, 8])
     };
 
     let circle_scaling_slider = cfg.trade_size_scale.map(|radius_scale| {
@@ -198,7 +194,7 @@ pub fn heatmap_cfg_view<'a>(
 
     let size_filters_column = column![
         text("Size filters").size(14),
-        column![trade_size_slider, order_size_slider].spacing(8),
+        column![trade_size_row, order_size_row].spacing(4),
     ]
     .spacing(8);
 
@@ -273,28 +269,18 @@ pub fn heatmap_cfg_view<'a>(
 pub fn timesales_cfg_view<'a>(
     cfg: timeandsales::Config,
     pane: pane_grid::Pane,
+    trade_size_input: &'a str,
 ) -> Element<'a, Message> {
     let trade_size_column = {
-        let filter = cfg.trade_size_filter;
-        let slider = labeled_slider(
-            "Trade",
-            0.0..=50000.0,
-            filter,
-            move |value| {
-                Message::VisualConfigChanged(
-                    pane,
-                    VisualConfig::TimeAndSales(timeandsales::Config {
-                        trade_size_filter: value,
-                        ..cfg
-                    }),
-                    false,
-                )
-            },
-            |value| format!(">${}", format_with_commas(*value)),
-            Some(500.0),
-        );
+        let input = text_input("0", trade_size_input)
+            .on_input(move |s| Message::PaneEvent(pane, Event::TimeAndSalesTradeSizeInput(s)))
+            .width(Length::Fixed(100.0));
 
-        column![text("Size filter").size(14), slider].spacing(8)
+        let trade_size_row = row![text("Trade").width(Length::Fill), text(">$"), input]
+            .spacing(4)
+            .align_y(Alignment::Center);
+
+        column![text("Size filter").size(14), trade_size_row].spacing(8)
     };
 
     let retention_minutes = (cfg.trade_retention.as_secs_f32() / 60.0).max(1.0);

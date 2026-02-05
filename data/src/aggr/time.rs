@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::chart::Basis;
 use crate::chart::heatmap::HeatmapDataPoint;
 use crate::chart::kline::{ClusterKind, KlineDataPoint, KlineTrades, NPoc};
+use rustc_hash::FxHashSet;
 
 use exchange::util::{Price, PriceStep};
 use exchange::{Kline, Timeframe, Trade};
@@ -204,14 +205,12 @@ impl TimeSeries<KlineDataPoint> {
             return;
         }
         let aggr_time = self.interval.to_milliseconds();
-        let mut updated_times = Vec::new();
+        let mut updated_times = FxHashSet::default();
 
         buffer.iter().for_each(|trade| {
             let rounded_time = (trade.time / aggr_time) * aggr_time;
 
-            if !updated_times.contains(&rounded_time) {
-                updated_times.push(rounded_time);
-            }
+            updated_times.insert(rounded_time);
 
             let entry = self
                 .datapoints
@@ -243,15 +242,13 @@ impl TimeSeries<KlineDataPoint> {
             return;
         }
         let aggr_time = self.interval.to_milliseconds();
-        let mut updated_times: Vec<u64> = Vec::new();
+        let mut updated_times: FxHashSet<u64> = FxHashSet::default();
 
         for trade in buffer {
             let rounded_time = (trade.time / aggr_time) * aggr_time;
 
             if let Some(entry) = self.datapoints.get_mut(&rounded_time) {
-                if !updated_times.contains(&rounded_time) {
-                    updated_times.push(rounded_time);
-                }
+                updated_times.insert(rounded_time);
                 entry.add_trade(trade, self.tick_size);
             }
         }
@@ -273,28 +270,110 @@ impl TimeSeries<KlineDataPoint> {
     }
 
     pub fn update_poc_status(&mut self) {
-        let updates = self
+        if self.datapoints.is_empty() {
+            return;
+        }
+
+        // O(n) approach: iterate backwards once, tracking cumulative price range
+        // and the first time where each price level was touched.
+        //
+        // Collect keys and bounds first to avoid borrow issues with BTreeMap
+        let entries: Vec<(u64, Price, Price, Option<Price>)> = self
             .datapoints
             .iter()
-            .filter_map(|(&time, dp)| dp.poc_price().map(|price| (time, price)))
-            .collect::<Vec<_>>();
+            .map(|(&time, dp)| {
+                let low = dp.kline.low.round_to_side_step(true, self.tick_size);
+                let high = dp.kline.high.round_to_side_step(false, self.tick_size);
+                (time, low, high, dp.poc_price())
+            })
+            .collect();
 
-        for (current_time, poc_price) in updates {
-            let mut npoc = NPoc::default();
+        let total_points = entries.len();
 
-            for (&next_time, next_dp) in self.datapoints.range((current_time + 1)..) {
-                let next_dp_low = next_dp.kline.low.round_to_side_step(true, self.tick_size);
-                let next_dp_high = next_dp.kline.high.round_to_side_step(false, self.tick_size);
+        // Track cumulative range and when each boundary was established
+        let mut cumulative_low: Option<Price> = None;
+        let mut cumulative_high: Option<Price> = None;
+        let mut low_established_at: usize = total_points;
+        let mut high_established_at: usize = total_points;
 
-                if next_dp_low <= poc_price && next_dp_high >= poc_price {
-                    npoc.filled(next_time);
-                    break;
+        // Collect status updates to apply later
+        let mut status_updates: Vec<(u64, NPoc)> = Vec::new();
+
+        // Process from end to start
+        for i in (0..total_points).rev() {
+            let (time, dp_low, dp_high, poc_price) = entries[i];
+
+            // Check if this datapoint has a POC and determine its status
+            if let Some(poc_price) = poc_price {
+                let npoc = if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high)
+                {
+                    if cum_low <= poc_price && cum_high >= poc_price {
+                        // POC was touched - find the first touch time
+                        let first_touch_time =
+                            if poc_price <= entries[low_established_at].2
+                                && poc_price >= entries[low_established_at].1
+                            {
+                                Some(entries[low_established_at].0)
+                            } else if poc_price <= entries[high_established_at].2
+                                && poc_price >= entries[high_established_at].1
+                            {
+                                Some(entries[high_established_at].0)
+                            } else {
+                                // Fallback: scan forward from i+1 to find first touch
+                                let search_end = high_established_at.max(low_established_at);
+                                entries[(i + 1)..=search_end]
+                                    .iter()
+                                    .find(|(_, low, high, _)| *low <= poc_price && *high >= poc_price)
+                                    .map(|(time, _, _, _)| *time)
+                            };
+
+                        if let Some(touch_time) = first_touch_time {
+                            let mut n = NPoc::default();
+                            n.filled(touch_time);
+                            n
+                        } else {
+                            NPoc::Naked
+                        }
+                    } else {
+                        NPoc::Naked
+                    }
                 } else {
-                    npoc.unfilled();
-                }
+                    // No future candles to check against (this is the last candle)
+                    NPoc::default()
+                };
+
+                status_updates.push((time, npoc));
             }
 
-            if let Some(data_point) = self.datapoints.get_mut(&current_time) {
+            // Update cumulative range to include this candle for the next iteration
+            match cumulative_low {
+                Some(cl) if dp_low < cl => {
+                    cumulative_low = Some(dp_low);
+                    low_established_at = i;
+                }
+                None => {
+                    cumulative_low = Some(dp_low);
+                    low_established_at = i;
+                }
+                _ => {}
+            }
+
+            match cumulative_high {
+                Some(ch) if dp_high > ch => {
+                    cumulative_high = Some(dp_high);
+                    high_established_at = i;
+                }
+                None => {
+                    cumulative_high = Some(dp_high);
+                    high_established_at = i;
+                }
+                _ => {}
+            }
+        }
+
+        // Apply all status updates
+        for (time, npoc) in status_updates {
+            if let Some(data_point) = self.datapoints.get_mut(&time) {
                 data_point.set_poc_status(npoc);
             }
         }

@@ -667,6 +667,39 @@ pub struct OpenInterest {
     pub value: f32,
 }
 
+/// Funding rate data point for perpetual contracts
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FundingRate {
+    pub time: u64,
+    pub rate: f32,
+}
+
+/// Spot kline data for basis calculation (futures - spot spread)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpotKline {
+    pub time: u64,
+    pub close: f32,
+}
+
+/// Market tension data combining multiple metrics for MTM Tension Index
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MarketTensionData {
+    pub time: u64,
+    pub volatility: f32, // High - Low (True Range)
+    pub volume: f32,     // Raw volume
+    pub funding: f32,    // Absolute funding rate
+    pub basis: f32,      // Absolute basis (futures - spot)
+}
+
+/// Net OI data point from external API (bitcoincounterflow.com)
+/// Contains price and open interest for Net Longs/Shorts calculation
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NetOiDataPoint {
+    pub time: u64,
+    pub price: f32,
+    pub open_interest: f64,
+}
+
 fn str_f32_parse(s: &str) -> f32 {
     s.parse::<f32>().unwrap_or_else(|e| {
         log::error!("Failed to parse float: {}, error: {}", s, e);

@@ -94,6 +94,12 @@ pub enum Event {
     StreamModifierChanged(modal::stream::Message),
     ComparisonChartInteraction(super::chart::comparison::Message),
     MiniTickersListInteraction(modal::pane::mini_tickers_list::Message),
+    /// Heatmap trade size filter input changed
+    HeatmapTradeSizeInput(String),
+    /// Heatmap order size filter input changed
+    HeatmapOrderSizeInput(String),
+    /// Time & Sales trade size filter input changed
+    TimeAndSalesTradeSizeInput(String),
 }
 
 pub struct State {
@@ -328,6 +334,63 @@ impl State {
                     panic!("Kline chart wasn't initialized when inserting open interest");
                 };
                 chart.insert_open_interest(req_id, oi);
+            }
+            _ => {
+                log::error!("pane content not candlestick");
+            }
+        }
+    }
+
+    pub fn insert_funding_rates(
+        &mut self,
+        req_id: Option<uuid::Uuid>,
+        rates: &[exchange::FundingRate],
+    ) {
+        match &mut self.content {
+            Content::Kline { chart, .. } => {
+                let Some(chart) = chart else {
+                    log::error!("Kline chart wasn't initialized when inserting funding rates");
+                    return;
+                };
+                chart.insert_funding_rates(req_id, rates);
+            }
+            _ => {
+                log::error!("pane content not candlestick");
+            }
+        }
+    }
+
+    pub fn insert_spot_klines(
+        &mut self,
+        req_id: Option<uuid::Uuid>,
+        klines: &[exchange::SpotKline],
+    ) {
+        match &mut self.content {
+            Content::Kline { chart, .. } => {
+                let Some(chart) = chart else {
+                    log::error!("Kline chart wasn't initialized when inserting spot klines");
+                    return;
+                };
+                chart.insert_spot_klines(req_id, klines);
+            }
+            _ => {
+                log::error!("pane content not candlestick");
+            }
+        }
+    }
+
+    pub fn insert_net_oi_data(
+        &mut self,
+        req_id: Option<uuid::Uuid>,
+        data: &[exchange::NetOiDataPoint],
+    ) {
+        match &mut self.content {
+            Content::Kline { chart, .. } => {
+                let Some(chart) = chart else {
+                    log::error!("Kline chart wasn't initialized when inserting net OI data");
+                    return;
+                };
+                chart.insert_net_oi_data(req_id, data);
             }
             _ => {
                 log::error!("pane content not candlestick");
@@ -601,9 +664,9 @@ impl State {
                     let base = panel::view(panel, timezone).map(move |message| {
                         Message::PaneEvent(id, Event::PanelInteraction(message))
                     });
-
+                    let trade_input = panel.size_filter_input();
                     let settings_modal =
-                        || modal::pane::settings::timesales_cfg_view(panel.config, id);
+                        || modal::pane::settings::timesales_cfg_view(panel.config, id, trade_input);
 
                     self.compose_stack_view(
                         base,
@@ -714,6 +777,7 @@ impl State {
                     let base = chart::view(chart, indicators, timezone).map(move |message| {
                         Message::PaneEvent(id, Event::ChartInteraction(message))
                     });
+                    let (trade_input, order_input) = chart.size_filter_inputs();
                     let settings_modal = || {
                         heatmap_cfg_view(
                             chart.visual_config(),
@@ -721,6 +785,8 @@ impl State {
                             chart.study_configurator(),
                             &chart.studies,
                             basis,
+                            trade_input,
+                            order_input,
                         )
                     };
 
@@ -871,6 +937,12 @@ impl State {
             }
             Status::Loading(exchange::fetcher::InfoKind::FetchingOI) => {
                 stream_info_element = stream_info_element.push(text("Fetching Open Interest..."));
+            }
+            Status::Loading(exchange::fetcher::InfoKind::FetchingMarketPulse) => {
+                stream_info_element = stream_info_element.push(text("Fetching Market Pulse..."));
+            }
+            Status::Loading(exchange::fetcher::InfoKind::FetchingNetOi) => {
+                stream_info_element = stream_info_element.push(text("Fetching Net OI..."));
             }
             Status::Stale(msg) => {
                 stream_info_element = stream_info_element.push(text(msg));
@@ -1253,6 +1325,21 @@ impl State {
                             return Some(Effect::SwitchTickersInGroup(ti));
                         }
                     }
+                }
+            }
+            Event::HeatmapTradeSizeInput(input) => {
+                if let Content::Heatmap { chart: Some(c), .. } = &mut self.content {
+                    c.set_trade_size_input(input);
+                }
+            }
+            Event::HeatmapOrderSizeInput(input) => {
+                if let Content::Heatmap { chart: Some(c), .. } = &mut self.content {
+                    c.set_order_size_input(input);
+                }
+            }
+            Event::TimeAndSalesTradeSizeInput(input) => {
+                if let Content::TimeAndSales(Some(panel)) = &mut self.content {
+                    panel.set_trade_size_input(input);
                 }
             }
         }

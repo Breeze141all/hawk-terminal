@@ -21,10 +21,10 @@ use exchange::{
     Kline, PushFrequency, StreamPairKind, TickMultiplier, TickerInfo, Timeframe, Trade,
     adapter::{
         self, AdapterError, Exchange, PersistStreamKind, ResolvedStream, StreamConfig, StreamKind,
-        StreamTicksize, UniqueStreams, binance, bybit, hyperliquid, okex,
+        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, hyperliquid, okex,
     },
     depth::Depth,
-    fetcher::{FetchRange, FetchedData},
+    fetcher::{FetchRange, FetchedData, NetOiInterval},
 };
 
 use iced::{
@@ -36,7 +36,7 @@ use iced::{
     },
 };
 use iced_futures::futures::TryFutureExt;
-use std::{collections::HashMap, path::PathBuf, time::Instant, vec};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant, vec};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -861,6 +861,33 @@ impl Dashboard {
                     }
                 }
             }
+            FetchedData::FundingRates { data, req_id } => {
+                if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window, pane_id) {
+                    pane_state.status = pane::Status::Ready;
+
+                    if let StreamKind::Kline { .. } = stream_type {
+                        pane_state.insert_funding_rates(req_id, &data);
+                    }
+                }
+            }
+            FetchedData::SpotKlines { data, req_id } => {
+                if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window, pane_id) {
+                    pane_state.status = pane::Status::Ready;
+
+                    if let StreamKind::Kline { .. } = stream_type {
+                        pane_state.insert_spot_klines(req_id, &data);
+                    }
+                }
+            }
+            FetchedData::NetOiData { data, req_id } => {
+                if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window, pane_id) {
+                    pane_state.status = pane::Status::Ready;
+
+                    if let StreamKind::Kline { .. } = stream_type {
+                        pane_state.insert_net_oi_data(req_id, &data);
+                    }
+                }
+            }
         }
 
         Task::none()
@@ -949,7 +976,7 @@ impl Dashboard {
         &mut self,
         stream: &StreamKind,
         depth_update_t: u64,
-        depth: &Depth,
+        depth: &Arc<Depth>,
         trades_buffer: &[Trade],
         main_window: window::Id,
     ) -> Task<Message> {
@@ -961,7 +988,7 @@ impl Dashboard {
                     match &mut pane_state.content {
                         pane::Content::Heatmap { chart, .. } => {
                             if let Some(c) = chart {
-                                c.insert_datapoint(trades_buffer, depth_update_t, depth);
+                                c.insert_datapoint(trades_buffer, depth_update_t, Arc::clone(depth));
                             }
                         }
                         pane::Content::Kline { chart, .. } => {
@@ -1213,6 +1240,82 @@ fn request_fetch(
                 }
             }
         }
+        FetchRange::FundingRate(from, to) => {
+            let kline_stream = {
+                if let Some(s) = stream {
+                    Some((s, pane_id))
+                } else {
+                    state.streams.find_ready_map(|stream| {
+                        if let StreamKind::Kline { .. } = stream {
+                            Some((*stream, pane_id))
+                        } else {
+                            None
+                        }
+                    })
+                }
+            };
+
+            if let Some((stream, pane_uid)) = kline_stream {
+                return funding_fetch_task(
+                    layout_id,
+                    pane_uid,
+                    stream,
+                    Some(req_id),
+                    Some((from, to)),
+                );
+            }
+        }
+        FetchRange::SpotKline(from, to) => {
+            let kline_stream = {
+                if let Some(s) = stream {
+                    Some((s, pane_id))
+                } else {
+                    state.streams.find_ready_map(|stream| {
+                        if let StreamKind::Kline { .. } = stream {
+                            Some((*stream, pane_id))
+                        } else {
+                            None
+                        }
+                    })
+                }
+            };
+
+            if let Some((stream, pane_uid)) = kline_stream {
+                return spot_kline_fetch_task(
+                    layout_id,
+                    pane_uid,
+                    stream,
+                    Some(req_id),
+                    Some((from, to)),
+                );
+            }
+        }
+        FetchRange::NetOiData { days, interval } => {
+            let kline_stream = {
+                if let Some(s) = stream {
+                    Some((s, pane_id))
+                } else {
+                    state.streams.find_ready_map(|stream| {
+                        if let StreamKind::Kline { .. } = stream {
+                            Some((*stream, pane_id))
+                        } else {
+                            None
+                        }
+                    })
+                }
+            };
+
+            if let Some((stream, pane_uid)) = kline_stream {
+                return net_oi_fetch_task(
+                    layout_id,
+                    pane_uid,
+                    stream,
+                    Some(req_id),
+                    days,
+                    interval,
+                );
+            }
+        }
     }
 
     Task::none()
@@ -1264,6 +1367,136 @@ fn oi_fetch_task(
         ),
         _ => Task::none(),
     };
+
+    update_status.chain(fetch_task)
+}
+
+fn funding_fetch_task(
+    layout_id: uuid::Uuid,
+    pane_id: uuid::Uuid,
+    stream: StreamKind,
+    req_id: Option<uuid::Uuid>,
+    range: Option<(u64, u64)>,
+) -> Task<Message> {
+    let update_status = Task::done(Message::ChangePaneStatus(
+        pane_id,
+        pane::Status::Loading(exchange::fetcher::InfoKind::FetchingMarketPulse),
+    ));
+
+    let fetch_task = match stream {
+        StreamKind::Kline { ticker_info, .. } => {
+            let ticker = ticker_info.ticker;
+            Task::perform(
+                binance::fetch_funding_rates(ticker, range, Some(500))
+                    .map_err(|err| format!("{err}")),
+                move |result| match result {
+                    Ok(rates) => {
+                        let data = FetchedData::FundingRates {
+                            data: rates,
+                            req_id,
+                        };
+                        Message::DistributeFetchedData {
+                            layout_id,
+                            pane_id,
+                            data,
+                            stream,
+                        }
+                    }
+                    Err(err) => Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(err)),
+                },
+            )
+        }
+        _ => Task::none(),
+    };
+
+    update_status.chain(fetch_task)
+}
+
+fn spot_kline_fetch_task(
+    layout_id: uuid::Uuid,
+    pane_id: uuid::Uuid,
+    stream: StreamKind,
+    req_id: Option<uuid::Uuid>,
+    range: Option<(u64, u64)>,
+) -> Task<Message> {
+    let update_status = Task::done(Message::ChangePaneStatus(
+        pane_id,
+        pane::Status::Loading(exchange::fetcher::InfoKind::FetchingMarketPulse),
+    ));
+
+    let fetch_task = match stream {
+        StreamKind::Kline {
+            ticker_info,
+            timeframe,
+        } => {
+            // Convert perp ticker to spot symbol
+            if let Some(spot_symbol) = binance::perp_to_spot_symbol(&ticker_info.ticker) {
+                Task::perform(
+                    async move {
+                        binance::fetch_spot_klines(&spot_symbol, timeframe, range, Some(500))
+                            .await
+                            .map_err(|err| format!("{err}"))
+                    },
+                    move |result| match result {
+                        Ok(klines) => {
+                            let data = FetchedData::SpotKlines {
+                                data: klines,
+                                req_id,
+                            };
+                            Message::DistributeFetchedData {
+                                layout_id,
+                                pane_id,
+                                data,
+                                stream,
+                            }
+                        }
+                        Err(err) => {
+                            Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(err))
+                        }
+                    },
+                )
+            } else {
+                Task::none()
+            }
+        }
+        _ => Task::none(),
+    };
+
+    update_status.chain(fetch_task)
+}
+
+fn net_oi_fetch_task(
+    layout_id: uuid::Uuid,
+    pane_id: uuid::Uuid,
+    stream: StreamKind,
+    req_id: Option<uuid::Uuid>,
+    days: u16,
+    interval: NetOiInterval,
+) -> Task<Message> {
+    let update_status = Task::done(Message::ChangePaneStatus(
+        pane_id,
+        pane::Status::Loading(exchange::fetcher::InfoKind::FetchingNetOi),
+    ));
+
+    let fetch_task = Task::perform(
+        async move {
+            bitcoincounterflow::fetch_net_oi_data(days, interval)
+                .await
+                .map_err(|err| format!("{err}"))
+        },
+        move |result| match result {
+            Ok(data) => {
+                let data = FetchedData::NetOiData { data, req_id };
+                Message::DistributeFetchedData {
+                    layout_id,
+                    pane_id,
+                    data,
+                    stream,
+                }
+            }
+            Err(err) => Message::ErrorOccurred(Some(pane_id), DashboardError::Fetch(err)),
+        },
+    );
 
     update_status.chain(fetch_task)
 }

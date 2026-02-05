@@ -6,8 +6,11 @@ use data::chart::kline::KlineDataPoint;
 use exchange::fetcher::FetchRange;
 use exchange::{Kline, Timeframe, Trade};
 
+pub mod market_pulse;
+pub mod net_oi;
 pub mod open_interest;
 pub mod volume;
+pub mod vpin;
 
 pub trait KlineIndicatorImpl {
     /// Clear all caches for a full redraw
@@ -47,6 +50,12 @@ pub trait KlineIndicatorImpl {
     fn on_basis_change(&mut self, _source: &PlotData<KlineDataPoint>) {}
 
     fn on_open_interest(&mut self, _pairs: &[exchange::OpenInterest]) {}
+
+    fn on_funding_rates(&mut self, _rates: &[exchange::FundingRate]) {}
+
+    fn on_spot_klines(&mut self, _klines: &[exchange::SpotKline]) {}
+
+    fn on_net_oi_data(&mut self, _data: &[exchange::NetOiDataPoint]) {}
 }
 
 pub struct FetchCtx<'a> {
@@ -63,5 +72,10 @@ pub fn make_empty(which: KlineIndicator) -> Box<dyn KlineIndicatorImpl> {
         KlineIndicator::OpenInterest => {
             Box::new(super::kline::open_interest::OpenInterestIndicator::new())
         }
+        KlineIndicator::MarketPulse => {
+            Box::new(super::kline::market_pulse::MarketPulseIndicator::new())
+        }
+        KlineIndicator::NetOi => Box::new(super::kline::net_oi::NetOiIndicator::new()),
+        KlineIndicator::Vpin => Box::new(super::kline::vpin::VpinIndicator::new()),
     }
 }

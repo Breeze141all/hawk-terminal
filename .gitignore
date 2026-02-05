@@ -1,4 +1,30 @@
-.DS_Store
+# Build artifacts
 /target
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE / Editor
 /.vscode
+/.idea
+*.swp
+*.swo
+*~
+
+# Logs
 *.log
+
+# Environment / secrets
+.env
+.env.*
+
+# State files (generated at runtime)
+saved-state.json

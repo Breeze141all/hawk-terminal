@@ -5,6 +5,7 @@ use exchange::{adapter::MarketKind, depth::Depth, volume_size_unit};
 
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
 pub const CLEANUP_THRESHOLD: usize = 4800;
@@ -32,9 +33,19 @@ impl Default for Config {
     }
 }
 
+
 pub struct HeatmapDataPoint {
-    pub grouped_trades: Box<[GroupedTrade]>,
+    pub grouped_trades: SmallVec<[GroupedTrade; 16]>,
     pub buy_sell: (f32, f32),
+}
+
+impl Default for HeatmapDataPoint {
+    fn default() -> Self {
+        Self {
+            grouped_trades: SmallVec::new(),
+            buy_sell: (0.0, 0.0),
+        }
+    }
 }
 
 impl DataPoint for HeatmapDataPoint {
@@ -47,8 +58,7 @@ impl DataPoint for HeatmapDataPoint {
         {
             Ok(index) => self.grouped_trades[index].qty += trade.qty,
             Err(index) => {
-                let mut trades = self.grouped_trades.to_vec();
-                trades.insert(
+                self.grouped_trades.insert(
                     index,
                     GroupedTrade {
                         is_sell: trade.is_sell,
@@ -56,7 +66,6 @@ impl DataPoint for HeatmapDataPoint {
                         qty: trade.qty,
                     },
                 );
-                self.grouped_trades = trades.into_boxed_slice();
             }
         }
 
@@ -68,7 +77,7 @@ impl DataPoint for HeatmapDataPoint {
     }
 
     fn clear_trades(&mut self) {
-        self.grouped_trades = Box::new([]);
+        self.grouped_trades.clear();
         self.buy_sell = (0.0, 0.0);
     }
 
@@ -278,7 +287,9 @@ impl HistoricalDepth {
         order_size_filter: f32,
         coalesce_kind: CoalesceKind,
     ) -> Vec<(Price, OrderRun)> {
-        let mut result_runs = Vec::new();
+        // Pre-allocate with estimated capacity: ~2 runs per price level on average
+        let estimated_capacity = self.price_levels.range(lowest..=highest).count() * 2;
+        let mut result_runs = Vec::with_capacity(estimated_capacity);
 
         let threshold_pct = match coalesce_kind {
             CoalesceKind::Average(t) | CoalesceKind::First(t) | CoalesceKind::Max(t) => t,
@@ -289,29 +300,23 @@ impl HistoricalDepth {
         for (price_at_level, runs_at_price_level) in
             self.iter_time_filtered(earliest, latest, highest, lowest)
         {
-            let candidate_runs = runs_at_price_level
-                .iter()
-                .filter(|run_ref| {
-                    if !(run_ref.until_time >= earliest && run_ref.start_time <= latest) {
-                        return false;
-                    }
-                    let order_size = market_type.qty_in_quote_value(
-                        run_ref.qty(),
-                        *price_at_level,
-                        size_in_quote_ccy,
-                    );
-                    order_size > order_size_filter
-                })
-                .collect::<Vec<&OrderRun>>();
-
-            if candidate_runs.is_empty() {
-                continue;
-            }
-
             let mut current_accumulator_opt: Option<CoalescingRun> = None;
 
-            for run_to_process_ref in candidate_runs {
-                let run_to_process = *run_to_process_ref;
+            // Use for loop with continue instead of filter().collect() to avoid allocation
+            for run_ref in runs_at_price_level.iter() {
+                if !(run_ref.until_time >= earliest && run_ref.start_time <= latest) {
+                    continue;
+                }
+                let order_size = market_type.qty_in_quote_value(
+                    run_ref.qty(),
+                    *price_at_level,
+                    size_in_quote_ccy,
+                );
+                if order_size <= order_size_filter {
+                    continue;
+                }
+
+                let run_to_process = *run_ref;
 
                 if let Some(current_accumulator) = current_accumulator_opt.as_mut() {
                     let comparison_base_qty = current_accumulator.comparison_qty(&coalesce_kind);

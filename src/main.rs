@@ -31,6 +31,11 @@ use iced::{
 };
 use std::{borrow::Cow, collections::HashMap, vec};
 
+enum AppScreen {
+    Splash { start: std::time::Instant },
+    Running,
+}
+
 fn main() {
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
 
@@ -54,6 +59,7 @@ fn main() {
 }
 
 struct Flowsurface {
+    screen: AppScreen,
     main_window: window::Window,
     sidebar: dashboard::Sidebar,
     layout_manager: LayoutManager,
@@ -114,6 +120,9 @@ impl Flowsurface {
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
         let mut state = Self {
+            screen: AppScreen::Splash {
+                start: std::time::Instant::now(),
+            },
             main_window: window::Window::new(main_window_id),
             layout_manager: saved_state.layout_manager,
             theme_editor: ThemeEditor::new(saved_state.custom_theme),
@@ -202,6 +211,13 @@ impl Flowsurface {
                 }
             }
             Message::Tick(now) => {
+                if let AppScreen::Splash { start } = self.screen {
+                    if now.duration_since(start).as_secs() >= 3 {
+                        self.screen = AppScreen::Running;
+                    }
+                    return Task::none();
+                }
+
                 let main_window_id = self.main_window.id;
 
                 return self
@@ -531,6 +547,26 @@ impl Flowsurface {
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
+        if matches!(self.screen, AppScreen::Splash { .. }) && id == self.main_window.id {
+            let theme: iced::Theme = self.theme.clone().into();
+            let bg_color = theme.palette().background;
+
+            return container(text("Centurion Client").size(48).font(iced::Font {
+                family: iced::font::Family::Name("Azeret Mono"),
+                weight: iced::font::Weight::Bold,
+                ..Default::default()
+            }))
+            .width(iced::Length::Fill)
+            .height(iced::Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .style(move |_| container::Style {
+                background: Some(bg_color.into()),
+                ..Default::default()
+            })
+            .into();
+        }
+
         let dashboard = self.active_dashboard();
         let sidebar_pos = self.sidebar.position();
 

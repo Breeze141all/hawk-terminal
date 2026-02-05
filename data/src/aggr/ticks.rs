@@ -2,6 +2,7 @@ use crate::aggr;
 use crate::chart::kline::{ClusterKind, KlineTrades, NPoc};
 use exchange::util::{Price, PriceStep};
 use exchange::{Kline, Trade};
+use rustc_hash::FxHashSet;
 
 use std::collections::BTreeMap;
 
@@ -128,25 +129,23 @@ impl TickAggr {
     }
 
     pub fn insert_trades(&mut self, buffer: &[Trade]) {
-        let mut updated_indices = Vec::new();
+        let mut updated_indices = FxHashSet::default();
 
         for trade in buffer {
             if self.datapoints.is_empty() {
                 self.datapoints
                     .push(TickAccumulation::new(trade, self.tick_size));
-                updated_indices.push(0);
+                updated_indices.insert(0);
             } else {
                 let last_idx = self.datapoints.len() - 1;
 
                 if self.datapoints[last_idx].is_full(self.interval) {
                     self.datapoints
                         .push(TickAccumulation::new(trade, self.tick_size));
-                    updated_indices.push(self.datapoints.len() - 1);
+                    updated_indices.insert(self.datapoints.len() - 1);
                 } else {
                     self.datapoints[last_idx].update_with_trade(trade, self.tick_size);
-                    if !updated_indices.contains(&last_idx) {
-                        updated_indices.push(last_idx);
-                    }
+                    updated_indices.insert(last_idx);
                 }
             }
         }
@@ -161,38 +160,114 @@ impl TickAggr {
     }
 
     pub fn update_poc_status(&mut self) {
-        let updates = self
+        let total_points = self.datapoints.len();
+        if total_points == 0 {
+            return;
+        }
+
+        // O(n) approach: iterate backwards once, tracking cumulative price range
+        // and the first index where each price level was touched.
+        //
+        // For each datapoint (from end to start), we track the cumulative high/low
+        // range seen so far. When we encounter a POC, we check if it falls within
+        // that range. If so, we need to find when it was first touched.
+        //
+        // We maintain a "first touch index" by tracking when prices first entered
+        // the cumulative range as we scan backwards.
+
+        // First, precompute low/high for each datapoint
+        let bounds: Vec<(Price, Price)> = self
             .datapoints
             .iter()
-            .enumerate()
-            .filter_map(|(idx, dp)| dp.poc_price().map(|price| (idx, price)))
-            .collect::<Vec<_>>();
+            .map(|dp| {
+                let low = dp.kline.low.round_to_side_step(true, self.tick_size);
+                let high = dp.kline.high.round_to_side_step(false, self.tick_size);
+                (low, high)
+            })
+            .collect();
 
-        let total_points = self.datapoints.len();
+        // Track cumulative range and when each boundary was established
+        let mut cumulative_low: Option<Price> = None;
+        let mut cumulative_high: Option<Price> = None;
+        let mut low_established_at: usize = total_points;
+        let mut high_established_at: usize = total_points;
 
-        for (current_idx, poc_price) in updates {
-            let mut npoc = NPoc::default();
+        // Process from end to start
+        for i in (0..total_points).rev() {
+            let (dp_low, dp_high) = bounds[i];
 
-            for next_idx in (current_idx + 1)..total_points {
-                let next_dp = &self.datapoints[next_idx];
+            // Update cumulative range (looking at i+1 onwards, i.e., "future" candles)
+            // We check the POC at index i against the range from i+1 to end
 
-                let next_dp_low = next_dp.kline.low.round_to_side_step(true, self.tick_size);
-                let next_dp_high = next_dp.kline.high.round_to_side_step(false, self.tick_size);
+            // Check if this datapoint has a POC and determine its status
+            if let Some(poc_price) = self.datapoints[i].poc_price() {
+                let npoc = if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high)
+                {
+                    if cum_low <= poc_price && cum_high >= poc_price {
+                        // POC was touched - find the first touch index
+                        // The first touch is the earliest index where the price was covered
+                        let first_touch = if poc_price <= bounds[low_established_at].1
+                            && poc_price >= bounds[low_established_at].0
+                        {
+                            low_established_at
+                        } else if poc_price <= bounds[high_established_at].1
+                            && poc_price >= bounds[high_established_at].0
+                        {
+                            high_established_at
+                        } else {
+                            // Need to find first touch by scanning forward from i+1
+                            // This is a fallback for edge cases
+                            let search_end = high_established_at.max(low_established_at);
+                            bounds[(i + 1)..=search_end]
+                                .iter()
+                                .enumerate()
+                                .find(|(_, (low, high))| *low <= poc_price && *high >= poc_price)
+                                .map_or(total_points, |(offset, _)| i + 1 + offset)
+                        };
 
-                if next_dp_low <= poc_price && next_dp_high >= poc_price {
-                    // on render we reverse the order of the points
-                    // as it is easier to just take the idx=0 as latest candle for coords
-                    let reversed_idx = (total_points - 1) - next_idx;
-                    npoc.filled(reversed_idx as u64);
-                    break;
+                        if first_touch < total_points {
+                            // Convert to reversed index for rendering
+                            let reversed_idx = (total_points - 1) - first_touch;
+                            let mut n = NPoc::default();
+                            n.filled(reversed_idx as u64);
+                            n
+                        } else {
+                            NPoc::Naked
+                        }
+                    } else {
+                        NPoc::Naked
+                    }
                 } else {
-                    npoc.unfilled();
-                }
+                    // No future candles to check against (this is the last candle)
+                    NPoc::default()
+                };
+
+                self.datapoints[i].set_poc_status(npoc);
             }
 
-            if current_idx < total_points {
-                let data_point = &mut self.datapoints[current_idx];
-                data_point.set_poc_status(npoc);
+            // Now update cumulative range to include this candle for the next iteration
+            match cumulative_low {
+                Some(cl) if dp_low < cl => {
+                    cumulative_low = Some(dp_low);
+                    low_established_at = i;
+                }
+                None => {
+                    cumulative_low = Some(dp_low);
+                    low_established_at = i;
+                }
+                _ => {}
+            }
+
+            match cumulative_high {
+                Some(ch) if dp_high > ch => {
+                    cumulative_high = Some(dp_high);
+                    high_established_at = i;
+                }
+                None => {
+                    cumulative_high = Some(dp_high);
+                    high_established_at = i;
+                }
+                _ => {}
             }
         }
     }

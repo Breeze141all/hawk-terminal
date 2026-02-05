@@ -1,7 +1,7 @@
 use super::{
     super::{
-        Exchange, Kline, MarketKind, OpenInterest, Price, PushFrequency, SizeUnit, StreamKind,
-        Ticker, TickerInfo, TickerStats, Timeframe, Trade,
+        Exchange, FundingRate, Kline, MarketKind, OpenInterest, Price, PushFrequency, SizeUnit,
+        SpotKline, StreamKind, Ticker, TickerInfo, TickerStats, Timeframe, Trade,
         adapter::StreamTicksize,
         connect::{State, connect_ws},
         de_string_to_f32,
@@ -20,7 +20,7 @@ use iced_futures::{
     stream,
 };
 use serde::Deserialize;
-use sonic_rs::{FastStr, to_object_iter_unchecked};
+use sonic_rs::{FastStr, JsonContainerTrait, JsonValueTrait, to_object_iter_unchecked};
 use tokio::sync::Mutex;
 
 use std::{collections::HashMap, io::BufReader, path::PathBuf, sync::LazyLock, time::Duration};
@@ -1492,5 +1492,120 @@ pub async fn get_hist_trades(
         Err(e) => Err(AdapterError::ParseError(format!(
             "Failed to open compressed file: {e}"
         ))),
+    }
+}
+
+// === Funding Rate API ===
+
+#[derive(Debug, Deserialize)]
+struct DeFundingRate {
+    #[serde(rename = "fundingTime")]
+    funding_time: u64,
+    #[serde(rename = "fundingRate", deserialize_with = "de_string_to_f32")]
+    funding_rate: f32,
+}
+
+/// Fetch historical funding rates for a perpetual contract
+/// Endpoint: GET /fapi/v1/fundingRate (Linear) or /dapi/v1/fundingRate (Inverse)
+pub async fn fetch_funding_rates(
+    ticker: Ticker,
+    range: Option<(u64, u64)>,
+    limit: Option<u32>,
+) -> Result<Vec<FundingRate>, AdapterError> {
+    let (ticker_str, market) = ticker.to_full_symbol_and_type();
+
+    let (base_url, weight) = match market {
+        MarketKind::LinearPerps => (LINEAR_PERP_DOMAIN.to_string() + "/fapi/v1/fundingRate", 1),
+        MarketKind::InversePerps => (INVERSE_PERP_DOMAIN.to_string() + "/dapi/v1/fundingRate", 1),
+        _ => {
+            return Err(AdapterError::InvalidRequest(
+                "Funding rates only available for perpetual contracts".to_string(),
+            ));
+        }
+    };
+
+    let mut url = format!("{base_url}?symbol={ticker_str}");
+
+    if let Some((start, end)) = range {
+        url.push_str(&format!("&startTime={start}&endTime={end}"));
+    }
+
+    let limit = limit.unwrap_or(500).min(1000);
+    url.push_str(&format!("&limit={limit}"));
+
+    let limiter = limiter_from_market_type(market);
+    let text = crate::limiter::http_request_with_limiter(&url, limiter, weight, None, None).await?;
+
+    let de_rates: Vec<DeFundingRate> = serde_json::from_str(&text).map_err(|e| {
+        log::error!("Failed to parse funding rates from {}: {}", url, e);
+        AdapterError::ParseError(format!("Failed to parse funding rates: {e}"))
+    })?;
+
+    let funding_rates = de_rates
+        .into_iter()
+        .map(|r| FundingRate {
+            time: r.funding_time,
+            rate: r.funding_rate,
+        })
+        .collect();
+
+    Ok(funding_rates)
+}
+
+// === Spot Klines API (for Basis Calculation) ===
+
+/// Fetch spot klines for basis calculation (futures - spot spread)
+/// Endpoint: GET /api/v3/klines
+pub async fn fetch_spot_klines(
+    symbol: &str,
+    timeframe: Timeframe,
+    range: Option<(u64, u64)>,
+    limit: Option<u32>,
+) -> Result<Vec<SpotKline>, AdapterError> {
+    let tf_str = timeframe.to_string();
+    let mut url = format!(
+        "{}/api/v3/klines?symbol={}&interval={}",
+        SPOT_DOMAIN, symbol, tf_str
+    );
+
+    if let Some((start, end)) = range {
+        url.push_str(&format!("&startTime={start}&endTime={end}"));
+    }
+
+    let limit = limit.unwrap_or(500).min(1000);
+    url.push_str(&format!("&limit={limit}"));
+
+    let text =
+        crate::limiter::http_request_with_limiter(&url, &SPOT_LIMITER, 2, None, None).await?;
+
+    let raw_klines: Vec<sonic_rs::Value> = sonic_rs::from_str(&text).map_err(|e| {
+        log::error!("Failed to parse spot klines from {}: {}", url, e);
+        AdapterError::ParseError(format!("Failed to parse spot klines: {e}"))
+    })?;
+
+    let spot_klines = raw_klines
+        .into_iter()
+        .filter_map(|arr| {
+            let arr = arr.as_array()?;
+            let time = arr.first()?.as_u64()?;
+            let close = arr.get(4)?.as_str()?.parse::<f32>().ok()?;
+            Some(SpotKline { time, close })
+        })
+        .collect();
+
+    Ok(spot_klines)
+}
+
+/// Get spot symbol from perpetual ticker (e.g., BTCUSDT perp -> BTCUSDT spot)
+pub fn perp_to_spot_symbol(ticker: &Ticker) -> Option<String> {
+    let (symbol, market) = ticker.to_full_symbol_and_type();
+
+    match market {
+        MarketKind::LinearPerps => Some(symbol),
+        MarketKind::InversePerps => {
+            // Inverse perps like BTCUSD_PERP -> BTCUSDT for spot
+            symbol.split('_').next().map(|s| format!("{}T", s))
+        }
+        MarketKind::Spot => Some(symbol),
     }
 }
