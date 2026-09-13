@@ -100,6 +100,10 @@ pub enum Event {
     HeatmapOrderSizeInput(String),
     /// Time & Sales trade size filter input changed
     TimeAndSalesTradeSizeInput(String),
+    /// TPO settings / kind changed
+    TpoKindChanged(data::chart::KlineChartKind),
+    /// Footprint bottom volume toggle
+    FootprintShowBottomVolumeToggled(bool),
 }
 
 pub struct State {
@@ -250,6 +254,37 @@ impl State {
                                 .ticker_info
                                 .exchange()
                                 .stream_ticksize(None, TickMultiplier(50));
+                            let temp = PaneSetup {
+                                depth_aggr,
+                                ..derived_plan
+                            };
+                            vec![depth_stream(&temp)]
+                        },
+                    );
+
+                    (content, streams)
+                }
+                ContentKind::TpoChart => {
+                    let content = {
+                        let base_ticker = tickers[0];
+                        Content::new_kline(
+                            kind,
+                            &self.content,
+                            derived_plan.ticker_info,
+                            &self.settings,
+                            base_ticker.min_ticksize.into(),
+                        )
+                    };
+
+                    let streams = by_basis_default(
+                        derived_plan.basis,
+                        Timeframe::M30,
+                        |tf| vec![kline_stream(derived_plan.ticker_info, tf)],
+                        || {
+                            let depth_aggr = derived_plan
+                                .ticker_info
+                                .exchange()
+                                .stream_ticksize(None, TickMultiplier(10));
                             let temp = PaneSetup {
                                 depth_aggr,
                                 ..derived_plan
@@ -871,6 +906,94 @@ impl State {
 
                             stream_info_element = stream_info_element.push(modifiers);
                         }
+                        data::chart::KlineChartKind::Tpo {
+                            show_candles,
+                            show_letters,
+                            show_ib,
+                            show_va,
+                            show_poc,
+                            show_single_prints,
+                            tick_step,
+                            period,
+                            clusters,
+                            split_sessions,
+                        } => {
+                            let selected_basis = self
+                                .settings
+                                .selected_basis
+                                .unwrap_or(Timeframe::M30.into());
+                            let kind = ModifierKind::Candlestick(selected_basis);
+
+                            let sc = *show_candles;
+                            let sl = *show_letters;
+                            let sib = *show_ib;
+                            let sva = *show_va;
+                            let spoc = *show_poc;
+                            let ssp = *show_single_prints;
+                            let st = *tick_step;
+                            let cur_period = *period;
+                            let cur_clusters = clusters.clone();
+                            let cur_split_sessions = split_sessions.clone();
+
+                            // 1. ViewMode Toggle: [Pure TPO] vs [Combined]
+                            let s_sessions_toggle = cur_split_sessions.clone();
+                            let view_mode_btn =
+                                button(text(if sc { "Combined" } else { "Pure TPO" }))
+                                    .style(move |theme, status| {
+                                        style::button::modifier(theme, status, false)
+                                    })
+                                    .on_press(Message::PaneEvent(
+                                        id,
+                                        Event::TpoKindChanged(data::chart::KlineChartKind::Tpo {
+                                            show_candles: !sc,
+                                            show_letters: sl,
+                                            show_ib: sib,
+                                            show_va: sva,
+                                            show_poc: spoc,
+                                            show_single_prints: ssp,
+                                            tick_step: st,
+                                            period: cur_period,
+                                            clusters: cur_clusters.clone(),
+                                            split_sessions: s_sessions_toggle,
+                                        }),
+                                    ));
+
+                            // 2. Period Selector PickList (unlocked in both Pure TPO and Combined)
+                            let clusters_for_period = cur_clusters.clone();
+                            let s_sessions_period = cur_split_sessions.clone();
+                            let period_element: Element<'a, Message> = pick_list(
+                                data::chart::tpo::SessionPeriod::ALL,
+                                Some(cur_period),
+                                move |new_p| {
+                                    Message::PaneEvent(
+                                        id,
+                                        Event::TpoKindChanged(data::chart::KlineChartKind::Tpo {
+                                            show_candles: sc,
+                                            show_letters: sl,
+                                            show_ib: sib,
+                                            show_va: sva,
+                                            show_poc: spoc,
+                                            show_single_prints: ssp,
+                                            tick_step: st,
+                                            period: new_p,
+                                            clusters: clusters_for_period.clone(),
+                                            split_sessions: s_sessions_period.clone(),
+                                        }),
+                                    )
+                                },
+                            )
+                            .into();
+
+                            let modifiers = row![
+                                basis_modifier(id, selected_basis, modifier, kind),
+                                view_mode_btn,
+                                period_element,
+                            ]
+                            .align_y(Alignment::Center)
+                            .spacing(4);
+
+                            stream_info_element = stream_info_element.push(modifiers);
+                        }
                     }
 
                     let base = chart::view(chart, indicators, timezone).map(move |message| {
@@ -883,6 +1006,7 @@ impl State {
                             chart_kind,
                             id,
                             chart.basis(),
+                            indicators,
                         )
                     };
 
@@ -912,6 +1036,7 @@ impl State {
                         data::chart::KlineChartKind::Footprint { .. } => {
                             ContentKind::FootprintChart
                         }
+                        data::chart::KlineChartKind::Tpo { .. } => ContentKind::TpoChart,
                     };
                     let base = uninitialized_base(content_kind);
                     self.compose_stack_view(
@@ -1021,9 +1146,27 @@ impl State {
                 Content::Heatmap { chart: Some(c), .. } => {
                     super::chart::update(c, &msg);
                 }
-                Content::Kline { chart: Some(c), .. } => {
-                    super::chart::update(c, &msg);
-                }
+                Content::Kline {
+                    chart: Some(c),
+                    kind,
+                    ..
+                } => match &msg {
+                    chart::Message::MergeSessions(s1, s2) => {
+                        c.merge_tpo_sessions(*s1, *s2);
+                        *kind = c.kind.clone();
+                    }
+                    chart::Message::SplitCluster(s) => {
+                        c.split_tpo_cluster(*s);
+                        *kind = c.kind.clone();
+                    }
+                    chart::Message::ToggleSplitBrackets(s) => {
+                        c.toggle_split_brackets(*s);
+                        *kind = c.kind.clone();
+                    }
+                    _ => {
+                        super::chart::update(c, &msg);
+                    }
+                },
                 _ => {}
             },
             Event::PanelInteraction(msg) => match &mut self.content {
@@ -1057,6 +1200,24 @@ impl State {
                     && let Some(c) = chart
                 {
                     c.set_cluster_scaling(scaling);
+                    *kind = c.kind.clone();
+                }
+            }
+            Event::TpoKindChanged(new_kind) => {
+                if let Content::Kline {
+                    chart, kind: cur, ..
+                } = &mut self.content
+                    && let Some(c) = chart
+                {
+                    c.set_tpo_kind(new_kind.clone());
+                    *cur = new_kind;
+                }
+            }
+            Event::FootprintShowBottomVolumeToggled(show) => {
+                if let Content::Kline { chart, kind, .. } = &mut self.content
+                    && let Some(c) = chart
+                {
+                    c.set_footprint_show_bottom_volume(show);
                     *kind = c.kind.clone();
                 }
             }
@@ -1543,6 +1704,10 @@ impl State {
         self.streams.matches_stream(stream)
     }
 
+    pub fn matches_trades(&self, stream: &StreamKind) -> bool {
+        self.streams.matches_trades(stream)
+    }
+
     fn show_modal_with_focus(&mut self, requested_modal: Modal) -> Option<Effect> {
         let should_toggle_close = match (&self.modal, &requested_modal) {
             (Some(Modal::StreamModifier(open)), Modal::StreamModifier(req)) => {
@@ -1661,6 +1826,7 @@ impl Default for State {
 }
 
 #[derive(Default)]
+#[allow(clippy::large_enum_variant)]
 pub enum Content {
     #[default]
     Starter,
@@ -1762,6 +1928,10 @@ impl Content {
             (None, None, None)
         };
 
+        let prev_was_footprint = prev_kind_opt
+            .as_ref()
+            .is_some_and(|k| matches!(k, data::chart::KlineChartKind::Footprint { .. }));
+
         let (default_tf, determined_chart_kind) = match content_kind {
             ContentKind::FootprintChart => (
                 Timeframe::M5,
@@ -1771,9 +1941,27 @@ impl Content {
                         clusters: data::chart::kline::ClusterKind::default(),
                         scaling: data::chart::kline::ClusterScaling::default(),
                         studies: vec![],
+                        show_bottom_volume: false,
                     }),
             ),
             ContentKind::CandlestickChart => (Timeframe::M15, data::chart::KlineChartKind::Candles),
+            ContentKind::TpoChart => (
+                Timeframe::M30,
+                prev_kind_opt
+                    .filter(|k| matches!(k, data::chart::KlineChartKind::Tpo { .. }))
+                    .unwrap_or(data::chart::KlineChartKind::Tpo {
+                        show_candles: true,
+                        show_letters: true,
+                        show_ib: true,
+                        show_va: true,
+                        show_poc: true,
+                        show_single_prints: true,
+                        tick_step: Default::default(),
+                        period: Default::default(),
+                        clusters: Vec::new(),
+                        split_sessions: Vec::new(),
+                    }),
+            ),
             _ => unreachable!("invalid content kind for kline chart"),
         };
 
@@ -1781,35 +1969,43 @@ impl Content {
 
         let enabled_indicators = {
             let available = KlineIndicator::for_market(ticker_info.market_type());
-            prev_indis.map_or_else(
-                || vec![KlineIndicator::Volume],
-                |indis| {
-                    indis
-                        .into_iter()
-                        .filter(|i| available.contains(i))
-                        .collect()
-                },
-            )
+            let is_footprint = matches!(content_kind, ContentKind::FootprintChart);
+
+            if is_footprint && !prev_was_footprint {
+                vec![]
+            } else {
+                prev_indis.map_or_else(
+                    || {
+                        if is_footprint {
+                            vec![]
+                        } else {
+                            vec![KlineIndicator::Volume]
+                        }
+                    },
+                    |indis| {
+                        indis
+                            .into_iter()
+                            .filter(|i| available.contains(i))
+                            .collect()
+                    },
+                )
+            }
         };
 
-        let splits = {
+        let splits = if enabled_indicators.is_empty() {
+            vec![]
+        } else {
             let main_chart_split: f32 = 0.8;
             let mut splits_vec = vec![main_chart_split];
+            let num_indicators = enabled_indicators.len();
 
-            if !enabled_indicators.is_empty() {
-                let num_indicators = enabled_indicators.len();
+            let indicator_total_height_ratio = 1.0 - main_chart_split;
+            let height_per_indicator_pane = indicator_total_height_ratio / num_indicators as f32;
 
-                if num_indicators > 0 {
-                    let indicator_total_height_ratio = 1.0 - main_chart_split;
-                    let height_per_indicator_pane =
-                        indicator_total_height_ratio / num_indicators as f32;
-
-                    let mut current_split_pos = main_chart_split;
-                    for _ in 0..(num_indicators - 1) {
-                        current_split_pos += height_per_indicator_pane;
-                        splits_vec.push(current_split_pos);
-                    }
-                }
+            let mut current_split_pos = main_chart_split;
+            for _ in 0..(num_indicators - 1) {
+                current_split_pos += height_per_indicator_pane;
+                splits_vec.push(current_split_pos);
             }
             splits_vec
         };
@@ -1852,13 +2048,34 @@ impl Content {
                     autoscale: Some(data::chart::Autoscale::FitToVisible),
                 },
             },
-            ContentKind::FootprintChart => Content::Kline {
+            ContentKind::TpoChart => Content::Kline {
                 chart: None,
                 indicators: vec![KlineIndicator::Volume],
+                kind: data::chart::KlineChartKind::Tpo {
+                    show_candles: true,
+                    show_letters: true,
+                    show_ib: true,
+                    show_va: true,
+                    show_poc: true,
+                    show_single_prints: true,
+                    tick_step: Default::default(),
+                    period: Default::default(),
+                    clusters: Vec::new(),
+                    split_sessions: Vec::new(),
+                },
+                layout: ViewConfig {
+                    splits: vec![],
+                    autoscale: Some(data::chart::Autoscale::FitToVisible),
+                },
+            },
+            ContentKind::FootprintChart => Content::Kline {
+                chart: None,
+                indicators: vec![],
                 kind: data::chart::KlineChartKind::Footprint {
                     clusters: data::chart::kline::ClusterKind::default(),
                     scaling: data::chart::kline::ClusterScaling::default(),
                     studies: vec![],
+                    show_bottom_volume: false,
                 },
                 layout: ViewConfig {
                     splits: vec![],
@@ -2024,6 +2241,7 @@ impl Content {
             Content::Kline { kind, .. } => match kind {
                 data::chart::KlineChartKind::Footprint { .. } => ContentKind::FootprintChart,
                 data::chart::KlineChartKind::Candles => ContentKind::CandlestickChart,
+                data::chart::KlineChartKind::Tpo { .. } => ContentKind::TpoChart,
             },
             Content::TimeAndSales(_) => ContentKind::TimeAndSales,
             Content::Ladder(_) => ContentKind::Ladder,

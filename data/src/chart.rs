@@ -3,6 +3,8 @@ pub mod heatmap;
 pub mod indicator;
 pub mod kline;
 pub mod liquidation_heatmap;
+pub mod tpo;
+pub mod vwap;
 
 use exchange::Timeframe;
 use serde::{Deserialize, Serialize};
@@ -12,7 +14,7 @@ use super::aggr::{
     ticks::TickAggr,
     time::{DataPoint, TimeSeries},
 };
-pub use kline::KlineChartKind;
+pub use kline::{KlineChartKind, ViewMode};
 
 pub enum PlotData<D: DataPoint> {
     TimeBased(TimeSeries<D>),

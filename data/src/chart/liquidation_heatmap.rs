@@ -317,16 +317,22 @@ impl LiquidationHeatmap {
         // Process each leverage
         for &base_leverage in &self.config.leverages.clone() {
             // Positive leverage = long positions, liquidation creates resistance
-            let liq_price_resistance =
-                Self::calculate_liquidation_price(long_source, base_leverage, self.config.leverage_buffer);
+            let liq_price_resistance = Self::calculate_liquidation_price(
+                long_source,
+                base_leverage,
+                self.config.leverage_buffer,
+            );
             let cell_id_res = self.round_to_cell(liq_price_resistance, cell_size, true);
 
             // Add or update resistance cell
             self.add_or_update_cell(cell_id_res, cell_size, sell_ratio, true, time);
 
             // Negative leverage = short positions, liquidation creates support
-            let liq_price_support =
-                Self::calculate_liquidation_price(short_source, -base_leverage, self.config.leverage_buffer);
+            let liq_price_support = Self::calculate_liquidation_price(
+                short_source,
+                -base_leverage,
+                self.config.leverage_buffer,
+            );
             let cell_id_sup = self.round_to_cell(liq_price_support, cell_size, false);
 
             // Add or update support cell
@@ -344,7 +350,7 @@ impl LiquidationHeatmap {
         cell_size: f32,
         ratio: f32,
         is_resistance: bool,
-        time: u64,
+        _time: u64,
     ) {
         let cell_price = cell_id as f32 * cell_size;
         let half_cell = cell_size / 2.0;
@@ -377,7 +383,8 @@ impl LiquidationHeatmap {
             .cells
             .iter()
             .filter(|(_, cell)| {
-                let cell_price = cell.bottom.to_f32() + (cell.top.to_f32() - cell.bottom.to_f32()) / 2.0;
+                let cell_price =
+                    cell.bottom.to_f32() + (cell.top.to_f32() - cell.bottom.to_f32()) / 2.0;
 
                 // Check if price touched the zone
                 if cell.is_resistance && high >= cell_price {
@@ -430,7 +437,8 @@ impl LiquidationHeatmap {
                 }
 
                 if max_distance > 0.0 {
-                    let cell_price = cell.bottom.to_f32() + (cell.top.to_f32() - cell.bottom.to_f32()) / 2.0;
+                    let cell_price =
+                        cell.bottom.to_f32() + (cell.top.to_f32() - cell.bottom.to_f32()) / 2.0;
                     let distance_pct = ((cell_price - current_price) / current_price).abs() * 100.0;
                     if distance_pct > max_distance {
                         return false;
@@ -447,7 +455,9 @@ impl LiquidationHeatmap {
             let b_price = b.bottom.to_f32() + (b.top.to_f32() - b.bottom.to_f32()) / 2.0;
             let a_dist = (a_price - current_price).abs();
             let b_dist = (b_price - current_price).abs();
-            a_dist.partial_cmp(&b_dist).unwrap_or(std::cmp::Ordering::Equal)
+            a_dist
+                .partial_cmp(&b_dist)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         visible.truncate(limit);
@@ -468,11 +478,11 @@ impl LiquidationHeatmap {
 pub fn interpolate_color(ratio: f32) -> (f32, f32, f32, f32) {
     // Color palette from specification (in 0-1 range)
     let colors: [(f32, f32, f32, f32); 5] = [
-        (66.0 / 255.0, 3.0 / 255.0, 81.0 / 255.0, 0.0),      // 0.0 - transparent purple
-        (63.0 / 255.0, 56.0 / 255.0, 113.0 / 255.0, 0.5),    // 0.25 - dark blue
-        (38.0 / 255.0, 130.0 / 255.0, 140.0 / 255.0, 0.65),  // 0.5 - teal
-        (76.0 / 255.0, 152.0 / 255.0, 134.0 / 255.0, 0.8),   // 0.75 - green
-        (240.0 / 255.0, 218.0 / 255.0, 24.0 / 255.0, 0.95),  // 1.0 - yellow
+        (66.0 / 255.0, 3.0 / 255.0, 81.0 / 255.0, 0.0), // 0.0 - transparent purple
+        (63.0 / 255.0, 56.0 / 255.0, 113.0 / 255.0, 0.5), // 0.25 - dark blue
+        (38.0 / 255.0, 130.0 / 255.0, 140.0 / 255.0, 0.65), // 0.5 - teal
+        (76.0 / 255.0, 152.0 / 255.0, 134.0 / 255.0, 0.8), // 0.75 - green
+        (240.0 / 255.0, 218.0 / 255.0, 24.0 / 255.0, 0.95), // 1.0 - yellow
     ];
 
     let ratio = ratio.clamp(0.0, 1.0);
@@ -518,10 +528,10 @@ mod tests {
 
     #[test]
     fn test_color_interpolation() {
-        let (r, g, b, a) = interpolate_color(0.0);
+        let (_r, _g, _b, a) = interpolate_color(0.0);
         assert!(a < 0.1); // Should be nearly transparent
 
-        let (r, g, b, a) = interpolate_color(1.0);
+        let (r, _g, _b, a) = interpolate_color(1.0);
         assert!(a > 0.9); // Should be nearly opaque
         assert!(r > 0.8); // Should be yellow-ish
     }

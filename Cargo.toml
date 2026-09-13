@@ -9,6 +9,14 @@ edition.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+[lib]
+name = "flowsurface"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flowsurface"
+path = "src/main.rs"
+
 [workspace.package]
 edition = "2024"
 repository = "https://github.com/flowsurface-rs/flowsurface"

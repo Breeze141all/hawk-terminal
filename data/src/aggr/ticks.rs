@@ -201,7 +201,8 @@ impl TickAggr {
 
             // Check if this datapoint has a POC and determine its status
             if let Some(poc_price) = self.datapoints[i].poc_price() {
-                let npoc = if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high)
+                let npoc = if let (Some(cum_low), Some(cum_high)) =
+                    (cumulative_low, cumulative_high)
                 {
                     if cum_low <= poc_price && cum_high >= poc_price {
                         // POC was touched - find the first touch index

@@ -40,11 +40,11 @@ pub struct VpinConfig {
 impl Default for VpinConfig {
     fn default() -> Self {
         Self {
-            num_buckets: 20,       // Balance between sensitivity and noise
+            num_buckets: 20, // Balance between sensitivity and noise
             threshold: 0.40,
             auto_calibrate: true,
             calibration_lookback: 50,
-            ema_periods: 5,        // Smooth out noise
+            ema_periods: 5, // Smooth out noise
         }
     }
 }
@@ -264,7 +264,10 @@ impl VpinIndicator {
         // This makes the indicator more visually responsive
         let values_only: Vec<f32> = smoothed_values.iter().map(|(_, v)| *v).collect();
         let min_vpin = values_only.iter().cloned().fold(f32::INFINITY, f32::min);
-        let max_vpin = values_only.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let max_vpin = values_only
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
         let range = (max_vpin - min_vpin).max(0.01);
 
         for (timestamp, smoothed_vpin) in smoothed_values {
@@ -347,7 +350,8 @@ impl KlineIndicatorImpl for VpinIndicator {
         match source {
             PlotData::TimeBased(ts) => {
                 for (&time, dp) in &ts.datapoints {
-                    self.kline_data.insert(time, (dp.kline.volume.0, dp.kline.volume.1));
+                    self.kline_data
+                        .insert(time, (dp.kline.volume.0, dp.kline.volume.1));
                 }
             }
             PlotData::TickBased(ta) => {
@@ -363,7 +367,8 @@ impl KlineIndicatorImpl for VpinIndicator {
 
     fn on_insert_klines(&mut self, klines: &[Kline]) {
         for kline in klines {
-            self.kline_data.insert(kline.time, (kline.volume.0, kline.volume.1));
+            self.kline_data
+                .insert(kline.time, (kline.volume.0, kline.volume.1));
         }
         self.recalculate();
     }

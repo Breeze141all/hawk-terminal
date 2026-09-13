@@ -42,6 +42,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant, vec};
 pub enum Message {
     Pane(window::Id, pane::Message),
     ChangePaneStatus(uuid::Uuid, pane::Status),
+    TradeFetchBatchDone(uuid::Uuid, u64, u64),
     SavePopoutSpecs(HashMap<window::Id, WindowSpec>),
     ErrorOccurred(Option<uuid::Uuid>, DashboardError),
     Notification(Toast),
@@ -191,6 +192,12 @@ impl Dashboard {
                     if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, id) {
                         state.status = pane::Status::Ready;
                         state.notifications.push(Toast::error(err.to_string()));
+                        if let pane::Content::Kline {
+                            chart: Some(chart), ..
+                        } = &mut state.content
+                        {
+                            chart.reset_fetching_trades();
+                        }
                     }
                 }
                 _ => {
@@ -380,7 +387,32 @@ impl Dashboard {
             },
             Message::ChangePaneStatus(pane_id, status) => {
                 if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id) {
+                    let is_ready = matches!(status, pane::Status::Ready);
                     pane_state.status = status;
+                    if is_ready
+                        && let pane::Content::Kline {
+                            chart: Some(chart), ..
+                        } = &mut pane_state.content
+                        && !chart.is_fetching_trades()
+                    {
+                        chart.reset_fetching_trades();
+                    }
+                }
+            }
+            Message::TradeFetchBatchDone(pane_id, from_time, to_time) => {
+                if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id) {
+                    if let pane::Content::Kline {
+                        chart: Some(chart), ..
+                    } = &mut pane_state.content
+                    {
+                        chart.mark_trades_fetched(from_time, to_time);
+                        chart.finish_one_trade_fetch();
+                        if !chart.is_fetching_trades() {
+                            pane_state.status = pane::Status::Ready;
+                        }
+                    } else {
+                        pane_state.status = pane::Status::Ready;
+                    }
                 }
             }
             Message::DistributeFetchedData {
@@ -816,27 +848,11 @@ impl Dashboard {
         stream_type: StreamKind,
     ) -> Task<Message> {
         match data {
-            FetchedData::Trades { batch, until_time } => {
-                let last_trade_time = batch.last().map_or(0, |trade| trade.time);
-
-                if last_trade_time < until_time {
-                    if let Err(reason) =
-                        self.insert_fetched_trades(main_window, pane_id, &batch, false)
-                    {
-                        return self.handle_error(Some(pane_id), &reason, main_window);
-                    }
-                } else {
-                    let filtered_batch = batch
-                        .iter()
-                        .filter(|trade| trade.time <= until_time)
-                        .copied()
-                        .collect::<Vec<_>>();
-
-                    if let Err(reason) =
-                        self.insert_fetched_trades(main_window, pane_id, &filtered_batch, true)
-                    {
-                        return self.handle_error(Some(pane_id), &reason, main_window);
-                    }
+            FetchedData::Trades { batch, .. } => {
+                if !batch.is_empty()
+                    && let Err(reason) = self.insert_fetched_trades(main_window, pane_id, &batch)
+                {
+                    return self.handle_error(Some(pane_id), &reason, main_window);
                 }
             }
             FetchedData::Klines { data, req_id } => {
@@ -898,7 +914,6 @@ impl Dashboard {
         main_window: window::Id,
         pane_id: uuid::Uuid,
         trades: &[Trade],
-        is_batches_done: bool,
     ) -> Result<(), DashboardError> {
         let pane_state = self
             .get_mut_pane_state_by_uuid(main_window, pane_id)
@@ -922,11 +937,7 @@ impl Dashboard {
         match &mut pane_state.content {
             pane::Content::Kline { chart, .. } => {
                 if let Some(c) = chart {
-                    c.insert_raw_trades(trades.to_owned(), is_batches_done);
-
-                    if is_batches_done {
-                        pane_state.status = pane::Status::Ready;
-                    }
+                    c.insert_raw_trades(trades.to_owned());
                     Ok(())
                 } else {
                     Err(DashboardError::Unknown(
@@ -984,31 +995,26 @@ impl Dashboard {
 
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, pane_state)| {
-                if pane_state.matches_stream(stream) {
+                let exact_match = pane_state.matches_stream(stream);
+                let trade_match = pane_state.matches_trades(stream);
+
+                if exact_match || (trade_match && !trades_buffer.is_empty()) {
                     match &mut pane_state.content {
-                        pane::Content::Heatmap { chart, .. } => {
-                            if let Some(c) = chart {
-                                c.insert_datapoint(trades_buffer, depth_update_t, Arc::clone(depth));
-                            }
+                        pane::Content::Heatmap { chart: Some(c), .. } if exact_match => {
+                            c.insert_datapoint(trades_buffer, depth_update_t, Arc::clone(depth));
                         }
-                        pane::Content::Kline { chart, .. } => {
-                            if let Some(c) = chart {
-                                c.insert_trades_buffer(trades_buffer);
-                            }
+                        pane::Content::Kline { chart: Some(c), .. }
+                            if !trades_buffer.is_empty() =>
+                        {
+                            c.insert_trades_buffer(trades_buffer);
                         }
-                        pane::Content::TimeAndSales(panel) => {
-                            if let Some(p) = panel {
-                                p.insert_buffer(trades_buffer);
-                            }
+                        pane::Content::TimeAndSales(Some(p)) if !trades_buffer.is_empty() => {
+                            p.insert_buffer(trades_buffer);
                         }
-                        pane::Content::Ladder(panel) => {
-                            if let Some(panel) = panel {
-                                panel.insert_buffers(depth_update_t, depth, trades_buffer);
-                            }
+                        pane::Content::Ladder(Some(panel)) if exact_match => {
+                            panel.insert_buffers(depth_update_t, depth, trades_buffer);
                         }
-                        _ => {
-                            log::error!("No chart found for the stream: {stream:?}");
-                        }
+                        _ => {}
                     }
                     found_match = true;
                 }
@@ -1221,7 +1227,7 @@ fn request_fetch(
                             }
                         },
                         move |result| match result {
-                            Ok(()) => Message::ChangePaneStatus(pane_id, pane::Status::Ready),
+                            Ok(()) => Message::TradeFetchBatchDone(pane_id, from_time, to_time),
                             Err(err) => Message::ErrorOccurred(
                                 Some(pane_id),
                                 DashboardError::Fetch(err.to_string()),
@@ -1233,7 +1239,7 @@ fn request_fetch(
                     if let pane::Content::Kline { chart, .. } = &mut state.content
                         && let Some(c) = chart
                     {
-                        c.set_handle(handle.abort_on_drop());
+                        c.add_trade_fetch_handle(handle.abort_on_drop());
                     }
 
                     return task;
@@ -1555,14 +1561,16 @@ pub fn fetch_trades_batched(
 
         while latest_trade_t < to_time {
             match binance::fetch_trades(ticker_info, latest_trade_t, data_path.clone()).await {
-                Ok(batch) => {
-                    if batch.is_empty() {
-                        break;
+                Ok((batch, next_trade_t)) => {
+                    let has_trades = !batch.is_empty();
+                    if has_trades {
+                        let () = progress.send(batch).await;
                     }
 
-                    latest_trade_t = batch.last().map_or(latest_trade_t, |trade| trade.time);
-
-                    let () = progress.send(batch).await;
+                    if next_trade_t <= latest_trade_t {
+                        break;
+                    }
+                    latest_trade_t = next_trade_t;
                 }
                 Err(err) => return Err(err),
             }

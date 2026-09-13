@@ -127,7 +127,7 @@ impl KlineIndicatorImpl for OpenInterestIndicator {
         let is_supported =
             Self::is_supported_exchange(exchange) && Self::is_supported_timeframe(ctx.timeframe);
 
-        if !is_supported {
+        if !is_supported || ctx.kline_latest == 0 || ctx.visible_earliest == 0 {
             return None;
         }
 

@@ -957,7 +957,7 @@ pub async fn fetch_klines(
         }
         num_intervals
     } else {
-        let num_intervals = 400;
+        let num_intervals = 1000;
         url.push_str(&format!("&limit={num_intervals}",));
         num_intervals
     };
@@ -1306,7 +1306,7 @@ pub async fn fetch_trades(
     ticker_info: TickerInfo,
     from_time: u64,
     data_path: PathBuf,
-) -> Result<Vec<Trade>, AdapterError> {
+) -> Result<(Vec<Trade>, u64), AdapterError> {
     let today_midnight = chrono::Utc::now()
         .date_naive()
         .and_hms_opt(0, 0, 0)
@@ -1314,28 +1314,64 @@ pub async fn fetch_trades(
         .and_utc();
 
     if from_time as i64 >= today_midnight.timestamp_millis() {
-        return fetch_intraday_trades(ticker_info, from_time).await;
+        let trades = fetch_intraday_trades(ticker_info, from_time).await?;
+        let next_from = trades
+            .last()
+            .map(|t| t.time.saturating_add(1))
+            .unwrap_or(from_time);
+        return Ok((trades, next_from));
     }
 
     let from_date = chrono::DateTime::from_timestamp_millis(from_time as i64)
         .ok_or_else(|| AdapterError::ParseError("Invalid timestamp".into()))?
         .date_naive();
 
-    match get_hist_trades(ticker_info, from_date, data_path).await {
-        Ok(trades) => Ok(trades),
+    let next_day_start = from_date
+        .succ_opt()
+        .unwrap_or(from_date)
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+
+    let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
+    let max_days: i64 = if symbol.to_uppercase().starts_with("BTC") {
+        130
+    } else {
+        30
+    };
+    let cutoff_date = chrono::Utc::now().date_naive() - chrono::Duration::days(max_days);
+    if from_date < cutoff_date {
+        return Ok((Vec::new(), next_day_start));
+    }
+
+    match get_hist_trades(ticker_info, from_date, data_path.clone()).await {
+        Ok(trades) => Ok((trades, next_day_start)),
         Err(e) => {
             log::warn!(
-                "Historical trades fetch failed: {}, falling back to intraday fetch",
+                "Historical trades fetch failed for {}: {}, falling back to intraday fetch if recent",
+                from_date,
                 e
             );
-            fetch_intraday_trades(ticker_info, from_time).await
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            if from_time >= now_ms.saturating_sub(48 * 3600 * 1000) {
+                let trades = fetch_intraday_trades(ticker_info, from_time).await?;
+                let next_from = trades
+                    .last()
+                    .map(|t| t.time.saturating_add(1))
+                    .unwrap_or(next_day_start);
+                Ok((trades, next_from))
+            } else {
+                Ok((Vec::new(), next_day_start))
+            }
         }
     }
 }
 
-pub async fn fetch_intraday_trades(
+pub async fn fetch_intraday_trades_raw(
     ticker_info: TickerInfo,
     from: u64,
+    to: Option<u64>,
 ) -> Result<Vec<Trade>, AdapterError> {
     let ticker = ticker_info.ticker;
     let (symbol_str, market_type) = ticker.to_full_symbol_and_type();
@@ -1346,8 +1382,10 @@ pub async fn fetch_intraday_trades(
         MarketKind::InversePerps => (INVERSE_PERP_DOMAIN.to_string() + "/dapi/v1/aggTrades", 20),
     };
 
-    let mut url = format!("{base_url}?symbol={symbol_str}&limit=1000",);
-    url.push_str(&format!("&startTime={from}"));
+    let mut url = format!("{base_url}?symbol={symbol_str}&limit=1000&startTime={from}");
+    if let Some(to_time) = to {
+        url.push_str(&format!("&endTime={to_time}"));
+    }
 
     let limiter = limiter_from_market_type(market_type);
     let text = crate::limiter::http_request_with_limiter(&url, limiter, weight, None, None).await?;
@@ -1374,6 +1412,13 @@ pub async fn fetch_intraday_trades(
     };
 
     Ok(trades)
+}
+
+pub async fn fetch_intraday_trades(
+    ticker_info: TickerInfo,
+    from: u64,
+) -> Result<Vec<Trade>, AdapterError> {
+    fetch_intraday_trades_raw(ticker_info, from, None).await
 }
 
 pub async fn get_hist_trades(
@@ -1427,12 +1472,26 @@ pub async fn get_hist_trades(
 
         let body = resp.bytes().await.map_err(AdapterError::FetchError)?;
 
-        std::fs::write(&base_zip_path, &body).map_err(|e| {
+        let temp_zip_path = base_zip_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_zip_path, &body).map_err(|e| {
             AdapterError::ParseError(format!("Failed to write zip file: {e}, {base_zip_path:?}"))
         })?;
+        if base_zip_path.exists() {
+            let _ = std::fs::remove_file(&base_zip_path);
+        }
+        if let Err(e) = std::fs::rename(&temp_zip_path, &base_zip_path) {
+            log::warn!("Failed to rename {temp_zip_path:?} to {base_zip_path:?}: {e}");
+        }
     }
 
-    match std::fs::File::open(&base_zip_path) {
+    let target_path = if base_zip_path.exists() {
+        &base_zip_path
+    } else {
+        // Fall back to any tmp file if rename failed
+        &base_zip_path
+    };
+
+    match std::fs::File::open(target_path) {
         Ok(file) => {
             let mut archive = zip::ZipArchive::new(file)
                 .map_err(|e| AdapterError::ParseError(format!("Failed to unzip file: {e}")))?;
@@ -1475,18 +1534,6 @@ pub async fn get_hist_trades(
                     })
                 }));
             }
-
-            if let Some(latest_trade) = trades.last() {
-                match fetch_intraday_trades(ticker_info, latest_trade.time).await {
-                    Ok(intraday_trades) => {
-                        trades.extend(intraday_trades);
-                    }
-                    Err(e) => {
-                        log::error!("Failed to fetch intraday trades: {}", e);
-                    }
-                }
-            }
-
             Ok(trades)
         }
         Err(e) => Err(AdapterError::ParseError(format!(
@@ -1527,7 +1574,11 @@ pub async fn fetch_funding_rates(
     let mut url = format!("{base_url}?symbol={ticker_str}");
 
     if let Some((start, end)) = range {
-        url.push_str(&format!("&startTime={start}&endTime={end}"));
+        if start > 0 && end > start {
+            url.push_str(&format!("&startTime={start}&endTime={end}"));
+        } else if start > 0 {
+            url.push_str(&format!("&startTime={start}"));
+        }
     }
 
     let limit = limit.unwrap_or(500).min(1000);
@@ -1535,6 +1586,24 @@ pub async fn fetch_funding_rates(
 
     let limiter = limiter_from_market_type(market);
     let text = crate::limiter::http_request_with_limiter(&url, limiter, weight, None, None).await?;
+
+    if text.trim_start().starts_with('{')
+        && let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        let msg = err_val
+            .get("msg")
+            .or_else(|| err_val.get("errorData"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Binance error");
+        let code = err_val
+            .get("code")
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        log::error!("Binance funding rates error: code={code}, msg={msg} (url: {url})");
+        return Err(AdapterError::ParseError(format!(
+            "Binance API error: {code} - {msg}"
+        )));
+    }
 
     let de_rates: Vec<DeFundingRate> = serde_json::from_str(&text).map_err(|e| {
         log::error!("Failed to parse funding rates from {}: {}", url, e);
@@ -1569,7 +1638,11 @@ pub async fn fetch_spot_klines(
     );
 
     if let Some((start, end)) = range {
-        url.push_str(&format!("&startTime={start}&endTime={end}"));
+        if start > 0 && end > start {
+            url.push_str(&format!("&startTime={start}&endTime={end}"));
+        } else if start > 0 {
+            url.push_str(&format!("&startTime={start}"));
+        }
     }
 
     let limit = limit.unwrap_or(500).min(1000);
@@ -1577,6 +1650,24 @@ pub async fn fetch_spot_klines(
 
     let text =
         crate::limiter::http_request_with_limiter(&url, &SPOT_LIMITER, 2, None, None).await?;
+
+    if text.trim_start().starts_with('{')
+        && let Ok(err_val) = serde_json::from_str::<serde_json::Value>(&text)
+    {
+        let msg = err_val
+            .get("msg")
+            .or_else(|| err_val.get("errorData"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown Binance error");
+        let code = err_val
+            .get("code")
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        log::error!("Binance spot klines error: code={code}, msg={msg} (url: {url})");
+        return Err(AdapterError::ParseError(format!(
+            "Binance API error: {code} - {msg}"
+        )));
+    }
 
     let raw_klines: Vec<sonic_rs::Value> = sonic_rs::from_str(&text).map_err(|e| {
         log::error!("Failed to parse spot klines from {}: {}", url, e);

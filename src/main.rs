@@ -5,6 +5,7 @@ mod chart;
 mod layout;
 mod logger;
 mod modal;
+pub mod profile;
 mod screen;
 mod style;
 mod widget;

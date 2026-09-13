@@ -17,6 +17,8 @@ pub enum KlineIndicator {
     MarketPulse,
     NetOi,
     Vpin,
+    Vwap,
+    Tpo,
 }
 
 impl Indicator for KlineIndicator {
@@ -32,15 +34,28 @@ impl KlineIndicator {
     // Indicator togglers on UI menus depend on these arrays.
     // Every variant needs to be in either SPOT, PERPS or both.
     /// Indicators that can be used with spot market tickers
-    const FOR_SPOT: [KlineIndicator; 2] = [KlineIndicator::Volume, KlineIndicator::Vpin];
+    const FOR_SPOT: [KlineIndicator; 4] = [
+        KlineIndicator::Volume,
+        KlineIndicator::Vpin,
+        KlineIndicator::Vwap,
+        KlineIndicator::Tpo,
+    ];
     /// Indicators that can be used with perpetual swap market tickers
-    const FOR_PERPS: [KlineIndicator; 5] = [
+    const FOR_PERPS: [KlineIndicator; 7] = [
         KlineIndicator::Volume,
         KlineIndicator::OpenInterest,
         KlineIndicator::MarketPulse,
         KlineIndicator::NetOi,
         KlineIndicator::Vpin,
+        KlineIndicator::Vwap,
+        KlineIndicator::Tpo,
     ];
+
+    /// Returns true if this indicator requires an independent sub-panel in the layout.
+    /// Overlays like TPO return false because they render directly on the price chart canvas.
+    pub const fn is_panel(&self) -> bool {
+        !matches!(self, KlineIndicator::Tpo)
+    }
 }
 
 impl Display for KlineIndicator {
@@ -51,6 +66,8 @@ impl Display for KlineIndicator {
             KlineIndicator::MarketPulse => write!(f, "Market Pulse"),
             KlineIndicator::NetOi => write!(f, "Net OI"),
             KlineIndicator::Vpin => write!(f, "VPIN"),
+            KlineIndicator::Vwap => write!(f, "VWAP"),
+            KlineIndicator::Tpo => write!(f, "TPO Profile"),
         }
     }
 }

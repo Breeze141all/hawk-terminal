@@ -9,7 +9,7 @@ use crate::widget::multi_split::{DRAG_SIZE, MultiSplit};
 use crate::widget::tooltip;
 use data::chart::{Autoscale, Basis, PlotData, ViewConfig, indicator::Indicator};
 use exchange::TickerInfo;
-use exchange::fetcher::{FetchRange, FetchRequests, FetchSpec, RequestHandler};
+use exchange::fetcher::{FetchRange, FetchRequests, FetchSpec, ReqError, RequestHandler};
 use exchange::util::{Price, PriceStep};
 use scale::linear::PriceInfoLabel;
 use scale::{AxisLabelsX, AxisLabelsY};
@@ -21,7 +21,7 @@ use iced::{
     widget::{button, center, column, container, mouse_area, row, rule, text},
 };
 
-const ZOOM_SENSITIVITY: f32 = 30.0;
+const ZOOM_SENSITIVITY: f32 = 12.0;
 const TEXT_SIZE: f32 = 12.0;
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -57,6 +57,9 @@ pub enum Message {
     BoundsChanged(Rectangle),
     SplitDragged(usize, f32),
     DoubleClick(AxisScaleClicked),
+    MergeSessions(i64, i64),
+    SplitCluster(i64),
+    ToggleSplitBrackets(i64),
 }
 
 pub trait Chart: PlotConstants + canvas::Program<Message> {
@@ -177,7 +180,7 @@ fn canvas_interaction<T: Chart>(
                     if let Some(Autoscale::FitToVisible) = state.layout.autoscale {
                         return Some(
                             canvas::Action::publish(Message::XScaling(
-                                y / 2.0,
+                                *y,
                                 cursor_to_center.x,
                                 false,
                             ))
@@ -212,7 +215,7 @@ fn canvas_interaction<T: Chart>(
                     if should_adjust_cell_width {
                         return Some(
                             canvas::Action::publish(Message::XScaling(
-                                y / 2.0,
+                                *y,
                                 cursor_to_center.x,
                                 true,
                             ))
@@ -357,10 +360,8 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
             let is_fit_to_visible_zoom =
                 !is_wheel_scroll && matches!(state.layout.autoscale, Some(Autoscale::FitToVisible));
 
-            let zoom_factor = if is_fit_to_visible_zoom {
+            let zoom_factor = if is_fit_to_visible_zoom || *is_wheel_scroll {
                 ZOOM_SENSITIVITY / 1.5
-            } else if *is_wheel_scroll {
-                ZOOM_SENSITIVITY
             } else {
                 ZOOM_SENSITIVITY * 3.0
             };
@@ -441,7 +442,7 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
                 let (old_scaling, old_translation_y) = { (state.scaling, state.translation.y) };
 
                 let zoom_factor = if *is_wheel_scroll {
-                    ZOOM_SENSITIVITY
+                    ZOOM_SENSITIVITY / 1.5
                 } else {
                     ZOOM_SENSITIVITY * 3.0
                 };
@@ -486,6 +487,9 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
             }
         }
         Message::CrosshairMoved => return chart.invalidate_crosshair(),
+        Message::MergeSessions(_, _)
+        | Message::SplitCluster(_)
+        | Message::ToggleSplitBrackets(_) => return,
     }
     chart.invalidate_all();
 }
@@ -586,7 +590,20 @@ pub fn view<'a, T: Chart>(
                 .chain(indicators)
                 .collect::<Vec<_>>();
 
-            MultiSplit::new(panels, &state.layout.splits, |index, position| {
+            let needed_splits = panels.len().saturating_sub(1);
+            let splits_cow: std::borrow::Cow<'a, [f32]> =
+                if state.layout.splits.len() == needed_splits {
+                    std::borrow::Cow::Borrowed(&state.layout.splits)
+                } else {
+                    let main_split = state.layout.splits.first().copied().unwrap_or(0.8);
+                    std::borrow::Cow::Owned(data::util::calc_panel_splits(
+                        main_split,
+                        needed_splits,
+                        None,
+                    ))
+                };
+
+            MultiSplit::new(panels, splits_cow, |index, position| {
                 Message::SplitDragged(index, position)
             })
             .into()
@@ -729,7 +746,7 @@ impl ViewState {
         }
     }
 
-    fn price_range(&self, region: &Rectangle) -> (Price, Price) {
+    pub(crate) fn price_range(&self, region: &Rectangle) -> (Price, Price) {
         let highest = self.y_to_price(region.y);
         let lowest = self.y_to_price(region.y + region.height);
 
@@ -781,7 +798,7 @@ impl ViewState {
         ticks * self.cell_height
     }
 
-    fn y_to_price(&self, y: f32) -> Price {
+    pub(crate) fn y_to_price(&self, y: f32) -> Price {
         if self.tick_size.units == 0 {
             let one = Self::price_unit() as f32;
             let delta_units = ((y / self.cell_height) * one).round() as i64;
@@ -1138,10 +1155,9 @@ fn request_fetch(handler: &mut RequestHandler, range: FetchRange) -> Option<Acti
             let fetch = FetchRequests::from([fetch_spec]);
             Some(Action::RequestFetch(fetch))
         }
-        Ok(None) => None,
+        Ok(None) | Err(ReqError::Overlaps) => None,
         Err(reason) => {
-            log::error!("Failed to request {:?}: {}", range, reason);
-            // TODO: handle this more explicitly, maybe by returning Action::ErrorOccurred
+            log::warn!("Failed to request {:?}: {}", range, reason);
             None
         }
     }

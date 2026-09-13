@@ -317,6 +317,14 @@ impl KlineIndicatorImpl for MarketPulseIndicator {
             return None;
         }
 
+        // Secondary data requires loaded futures klines and valid timerange
+        if ctx.kline_latest == 0
+            || self.futures_closes.is_empty()
+            || ctx.prefetch_earliest >= ctx.kline_latest
+        {
+            return None;
+        }
+
         // First priority: funding rates
         if self.funding_rates.is_empty() {
             return Some(FetchRange::FundingRate(
@@ -326,7 +334,7 @@ impl KlineIndicatorImpl for MarketPulseIndicator {
         }
 
         // Second priority: spot klines for basis calculation
-        if self.spot_klines.is_empty() && !self.futures_closes.is_empty() {
+        if self.spot_klines.is_empty() {
             return Some(FetchRange::SpotKline(
                 ctx.prefetch_earliest,
                 ctx.kline_latest,

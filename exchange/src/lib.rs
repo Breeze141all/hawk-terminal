@@ -573,7 +573,7 @@ impl TickerInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct Trade {
     pub time: u64,
     #[serde(deserialize_with = "bool_from_int")]
@@ -638,10 +638,13 @@ where
     D: Deserializer<'de>,
 {
     let value = Value::deserialize(deserializer)?;
+    if let Some(b) = value.as_bool() {
+        return Ok(b);
+    }
     match value.as_i64() {
         Some(0) => Ok(false),
         Some(1) => Ok(true),
-        _ => Err(serde::de::Error::custom("expected 0 or 1")),
+        _ => Err(serde::de::Error::custom("expected bool or 0/1")),
     }
 }
 
@@ -763,4 +766,79 @@ impl TickMultiplier {
 fn round_to_decimal_places(value: f32, places: u32) -> f32 {
     let factor = 10.0f32.powi(places as i32);
     (value * factor).round() / factor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trade_serde_roundtrip() {
+        let trade = Trade {
+            time: 1726210800000,
+            is_sell: true,
+            price: util::Price {
+                units: 5800000000000,
+            },
+            qty: 1.25,
+        };
+
+        let json = serde_json::to_string(&trade).expect("serialize trade");
+        let de: Trade = serde_json::from_str(&json).expect("deserialize trade");
+        assert_eq!(de.time, trade.time);
+        assert_eq!(de.is_sell, trade.is_sell);
+        assert_eq!(de.price.units, trade.price.units);
+        assert_eq!(de.qty, trade.qty);
+
+        let sonic_bytes = sonic_rs::to_vec(&trade).expect("sonic serialize");
+        let sonic_de: Trade = sonic_rs::from_slice(&sonic_bytes).expect("sonic deserialize");
+        assert_eq!(sonic_de.time, trade.time);
+        assert_eq!(sonic_de.is_sell, trade.is_sell);
+        assert_eq!(sonic_de.price.units, trade.price.units);
+        assert_eq!(sonic_de.qty, trade.qty);
+    }
+
+    #[tokio::test]
+    async fn test_get_hist_trades_sep12() {
+        let ticker = Ticker::new("btcusdt", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo {
+            ticker,
+            min_ticksize: util::MinTicksize { power: -1 },
+            min_qty: util::MinQtySize { power: -3 },
+            contract_size: None,
+        };
+        let data_path = std::path::PathBuf::from(
+            r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+        );
+        if !data_path.exists() {
+            return;
+        }
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let trades = adapter::binance::get_hist_trades(ticker_info, date, data_path.clone()).await;
+        match &trades {
+            Ok(t) => println!(
+                "Parsed {} trades, first: {:?}, last: {:?}",
+                t.len(),
+                t.first(),
+                t.last()
+            ),
+            Err(e) => println!("Error: {:?}", e),
+        }
+        assert!(trades.is_ok());
+
+        // Now test fetch_trades at 00:00:00 on Sep 12
+        let t0 = 1789171200000u64; // 2026-09-12 00:00:00
+        let res = adapter::binance::fetch_trades(ticker_info, t0, data_path).await;
+        match &res {
+            Ok((t, next_t)) => println!(
+                "fetch_trades Sep 12: {} trades, next_t: {}, first: {:?}, last: {:?}",
+                t.len(),
+                next_t,
+                t.first(),
+                t.last()
+            ),
+            Err(e) => println!("fetch_trades error: {:?}", e),
+        }
+        assert!(res.is_ok());
+    }
 }

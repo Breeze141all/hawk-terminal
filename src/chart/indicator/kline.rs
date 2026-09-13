@@ -9,8 +9,10 @@ use exchange::{Kline, Timeframe, Trade};
 pub mod market_pulse;
 pub mod net_oi;
 pub mod open_interest;
+pub mod tpo;
 pub mod volume;
 pub mod vpin;
+pub mod vwap;
 
 pub trait KlineIndicatorImpl {
     /// Clear all caches for a full redraw
@@ -77,5 +79,7 @@ pub fn make_empty(which: KlineIndicator) -> Box<dyn KlineIndicatorImpl> {
         }
         KlineIndicator::NetOi => Box::new(super::kline::net_oi::NetOiIndicator::new()),
         KlineIndicator::Vpin => Box::new(super::kline::vpin::VpinIndicator::new()),
+        KlineIndicator::Vwap => Box::new(super::kline::vwap::VwapIndicator::new()),
+        KlineIndicator::Tpo => Box::new(super::kline::tpo::TpoIndicator::new()),
     }
 }

@@ -1,6 +1,5 @@
 use super::Message;
 use crate::style;
-use data::config::theme::{darken, lighten};
 pub use data::panel::timeandsales::Config;
 use data::panel::timeandsales::{HistAgg, StackedBar, StackedBarRatio, TradeDisplay, TradeEntry};
 use exchange::{TickerInfo, Trade, volume_size_unit};
@@ -281,9 +280,21 @@ impl TimeAndSales {
                 .map(|e| e.display.qty)
                 .fold(0.0, f32::max);
 
+            let filtered_count = self
+                .recent_trades
+                .iter()
+                .filter(|t| {
+                    let trade_size = market_type.qty_in_quote_value(
+                        t.display.qty,
+                        t.display.price,
+                        size_in_quote_ccy,
+                    );
+                    trade_size >= size_filter
+                })
+                .count();
+
             let stacked_bar_h = self.stacked_bar_height();
-            let total_content_height =
-                (self.recent_trades.len() as f32 * TRADE_ROW_HEIGHT) + stacked_bar_h;
+            let total_content_height = (filtered_count as f32 * TRADE_ROW_HEIGHT) + stacked_bar_h;
             let max_scroll_offset = (total_content_height - TRADE_ROW_HEIGHT).max(0.0);
             self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll_offset);
         }
@@ -486,13 +497,9 @@ impl canvas::Program<Message> for TimeAndSales {
             let row_height = TRADE_ROW_HEIGHT;
             let row_width = bounds.width;
 
-            let row_scroll_offset = (self.scroll_offset - stacked_bar_h).max(0.0);
-            let start_index = (row_scroll_offset / row_height).floor() as usize;
-            let visible_rows = (bounds.height / row_height).ceil() as usize;
-
             let size_in_quote_ccy = volume_size_unit() == exchange::SizeUnit::Quote;
 
-            let trades_to_draw = self
+            let filtered_trades: Vec<&TradeEntry> = self
                 .recent_trades
                 .iter()
                 .filter(|t| {
@@ -503,6 +510,19 @@ impl canvas::Program<Message> for TimeAndSales {
                     );
                     trade_size >= self.config.trade_size_filter
                 })
+                .collect();
+
+            let max_qty = filtered_trades
+                .iter()
+                .map(|e| e.display.qty)
+                .fold(0.0, f32::max);
+
+            let row_scroll_offset = (self.scroll_offset - stacked_bar_h).max(0.0);
+            let start_index = (row_scroll_offset / row_height).floor() as usize;
+            let visible_rows = (bounds.height / row_height).ceil() as usize;
+
+            let trades_to_draw = filtered_trades
+                .into_iter()
                 .rev()
                 .skip(start_index)
                 .take(visible_rows + 2);
@@ -527,29 +547,28 @@ impl canvas::Program<Message> for TimeAndSales {
                     continue;
                 }
 
-                let bg_color = if trade.is_sell {
-                    palette.danger.weak.color
+                let (trade_color, bg_color) = if trade.is_sell {
+                    (palette.danger.base.color, palette.danger.base.color)
                 } else {
-                    palette.success.weak.color
+                    (palette.success.base.color, palette.success.base.color)
                 };
 
-                let bg_color_alpha = if self.max_filtered_qty > 0.0 {
-                    (trade.qty / self.max_filtered_qty).clamp(0.02, 1.0)
+                let relative_ratio = if max_qty > 0.0 {
+                    (trade.qty / max_qty).clamp(0.0, 1.0)
                 } else {
-                    0.02
+                    0.0
                 };
+                let bg_color_alpha = (0.04 + 0.30 * relative_ratio).min(0.40);
 
-                let mut text_color = if palette.is_dark {
-                    lighten(bg_color, bg_color_alpha.max(0.1))
-                } else {
-                    darken(bg_color, (bg_color_alpha * 0.8).max(0.1))
-                };
+                let mut text_color = trade_color;
+                let mut time_color = palette.background.strong.text.scale_alpha(0.70);
 
                 if is_scroll_paused
                     && y_position
                         < (stacked_bar_h.max(METRICS_HEIGHT_COMPACT)) + (TRADE_ROW_HEIGHT * 0.8)
                 {
-                    text_color = text_color.scale_alpha(0.1);
+                    text_color = text_color.scale_alpha(0.15);
+                    time_color = time_color.scale_alpha(0.15);
                 }
 
                 frame.fill_rectangle(
@@ -561,7 +580,7 @@ impl canvas::Program<Message> for TimeAndSales {
                         width: row_width,
                         height: row_height,
                     },
-                    bg_color.scale_alpha(bg_color_alpha.min(0.9)),
+                    bg_color.scale_alpha(bg_color_alpha),
                 );
 
                 let trade_time = create_text(
@@ -571,7 +590,7 @@ impl canvas::Program<Message> for TimeAndSales {
                         y: y_position,
                     },
                     Alignment::Start,
-                    text_color,
+                    time_color,
                 );
                 frame.fill_text(trade_time);
 

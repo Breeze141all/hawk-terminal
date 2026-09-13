@@ -191,10 +191,11 @@ pub enum ContentKind {
     ComparisonChart,
     TimeAndSales,
     Ladder,
+    TpoChart,
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 7] = [
+    pub const ALL: [ContentKind; 8] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
         ContentKind::FootprintChart,
@@ -202,6 +203,7 @@ impl ContentKind {
         ContentKind::ComparisonChart,
         ContentKind::TimeAndSales,
         ContentKind::Ladder,
+        ContentKind::TpoChart,
     ];
 }
 
@@ -215,6 +217,7 @@ impl std::fmt::Display for ContentKind {
             ContentKind::ComparisonChart => "Comparison Chart",
             ContentKind::TimeAndSales => "Time&Sales",
             ContentKind::Ladder => "DOM/Ladder",
+            ContentKind::TpoChart => "TPO / Market Profile",
         };
         write!(f, "{s}")
     }
@@ -259,6 +262,7 @@ impl PaneSetup {
             ContentKind::FootprintChart => {
                 Some(current_basis.unwrap_or(Basis::Time(Timeframe::M5)))
             }
+            ContentKind::TpoChart => Some(current_basis.unwrap_or(Basis::Time(Timeframe::M30))),
             ContentKind::CandlestickChart | ContentKind::ComparisonChart => {
                 Some(current_basis.unwrap_or(Basis::Time(Timeframe::M15)))
             }
@@ -281,6 +285,7 @@ impl PaneSetup {
             ContentKind::FootprintChart => {
                 Some(current_tick_multiplier.unwrap_or(TickMultiplier(50)))
             }
+            ContentKind::TpoChart => Some(current_tick_multiplier.unwrap_or(TickMultiplier(10))),
             ContentKind::CandlestickChart
             | ContentKind::ComparisonChart
             | ContentKind::TimeAndSales

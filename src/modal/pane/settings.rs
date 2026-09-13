@@ -10,6 +10,7 @@ use data::chart::kline::FootprintStudy;
 use data::chart::{
     KlineChartKind,
     heatmap::{self, CoalesceKind},
+    indicator::{KlineIndicator, UiIndicator},
     kline::ClusterKind,
 };
 use data::layout::pane::VisualConfig;
@@ -56,14 +57,10 @@ pub fn heatmap_cfg_view<'a>(
             .padding(4)
             .style(|theme, status| style::validated_text_input(theme, status, true));
 
-        row![
-            text("Trade").width(Length::Fill),
-            text(">$"),
-            input,
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center)
-        .padding([4, 8])
+        row![text("Trade").width(Length::Fill), text(">$"), input,]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .padding([4, 8])
     };
 
     // Order size filter - text input for manual entry
@@ -74,14 +71,10 @@ pub fn heatmap_cfg_view<'a>(
             .padding(4)
             .style(|theme, status| style::validated_text_input(theme, status, true));
 
-        row![
-            text("Order").width(Length::Fill),
-            text(">$"),
-            input,
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center)
-        .padding([4, 8])
+        row![text("Order").width(Length::Fill), text(">$"), input,]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .padding([4, 8])
     };
 
     let circle_scaling_slider = cfg.trade_size_scale.map(|radius_scale| {
@@ -448,15 +441,250 @@ pub fn kline_cfg_view<'a>(
     kind: &'a KlineChartKind,
     pane: pane_grid::Pane,
     basis: data::chart::Basis,
+    indicators: &'a [KlineIndicator],
 ) -> Element<'a, Message> {
     let content = match kind {
         KlineChartKind::Candles => column![text(
             "This chart type doesn't have any configurations, WIP..."
         )],
+        KlineChartKind::Tpo {
+            show_candles,
+            show_letters,
+            show_ib,
+            show_va,
+            show_poc,
+            show_single_prints,
+            tick_step,
+            period,
+            clusters,
+            split_sessions,
+        } => {
+            let sc = *show_candles;
+            let sl = *show_letters;
+            let sib = *show_ib;
+            let sva = *show_va;
+            let spoc = *show_poc;
+            let ssp = *show_single_prints;
+            let st = *tick_step;
+            let cp = *period;
+            let cur_clusters = clusters.clone();
+            let cur_split_sessions = split_sessions.clone();
+
+            let cl1 = cur_clusters.clone();
+            let sp1 = cur_split_sessions.clone();
+            let c_candles = checkbox(sc)
+                .label("Show Candlesticks")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: val,
+                            show_letters: sl,
+                            show_ib: sib,
+                            show_va: sva,
+                            show_poc: spoc,
+                            show_single_prints: ssp,
+                            tick_step: st,
+                            period: cp,
+                            clusters: cl1.clone(),
+                            split_sessions: sp1.clone(),
+                        }),
+                    )
+                });
+
+            let cl2 = cur_clusters.clone();
+            let sp2 = cur_split_sessions.clone();
+            let c_letters = checkbox(sl)
+                .label("Show Bracket Letters")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: val,
+                            show_ib: sib,
+                            show_va: sva,
+                            show_poc: spoc,
+                            show_single_prints: ssp,
+                            tick_step: st,
+                            period: cp,
+                            clusters: cl2.clone(),
+                            split_sessions: sp2.clone(),
+                        }),
+                    )
+                });
+
+            let cl3 = cur_clusters.clone();
+            let sp3 = cur_split_sessions.clone();
+            let c_poc = checkbox(spoc)
+                .label("Show POC (Point of Control)")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: sl,
+                            show_ib: sib,
+                            show_va: sva,
+                            show_poc: val,
+                            show_single_prints: ssp,
+                            tick_step: st,
+                            period: cp,
+                            clusters: cl3.clone(),
+                            split_sessions: sp3.clone(),
+                        }),
+                    )
+                });
+
+            let cl4 = cur_clusters.clone();
+            let sp4 = cur_split_sessions.clone();
+            let c_va = checkbox(sva)
+                .label("Show Value Area (70% CBOT)")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: sl,
+                            show_ib: sib,
+                            show_va: val,
+                            show_poc: spoc,
+                            show_single_prints: ssp,
+                            tick_step: st,
+                            period: cp,
+                            clusters: cl4.clone(),
+                            split_sessions: sp4.clone(),
+                        }),
+                    )
+                });
+
+            let cl5 = cur_clusters.clone();
+            let sp5 = cur_split_sessions.clone();
+            let c_ib = checkbox(sib)
+                .label("Show Initial Balance (IB)")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: sl,
+                            show_ib: val,
+                            show_va: sva,
+                            show_poc: spoc,
+                            show_single_prints: ssp,
+                            tick_step: st,
+                            period: cp,
+                            clusters: cl5.clone(),
+                            split_sessions: sp5.clone(),
+                        }),
+                    )
+                });
+
+            let cl6 = cur_clusters.clone();
+            let sp6 = cur_split_sessions.clone();
+            let c_sp = checkbox(ssp)
+                .label("Show Single Prints & Tails")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: sl,
+                            show_ib: sib,
+                            show_va: sva,
+                            show_poc: spoc,
+                            show_single_prints: val,
+                            tick_step: st,
+                            period: cp,
+                            clusters: cl6.clone(),
+                            split_sessions: sp6.clone(),
+                        }),
+                    )
+                });
+
+            let cl7 = cur_clusters.clone();
+            let sp7 = cur_split_sessions.clone();
+            let step_picklist = pick_list(
+                data::chart::kline::TpoTickStep::ALL,
+                Some(st),
+                move |new_step| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: sl,
+                            show_ib: sib,
+                            show_va: sva,
+                            show_poc: spoc,
+                            show_single_prints: ssp,
+                            tick_step: new_step,
+                            period: cp,
+                            clusters: cl7.clone(),
+                            split_sessions: sp7.clone(),
+                        }),
+                    )
+                },
+            );
+
+            let step_row = row![text("Tick Step:").width(Length::Fill), step_picklist,]
+                .align_y(Alignment::Center)
+                .spacing(8);
+
+            let cl8 = cur_clusters.clone();
+            let sp8 = cur_split_sessions.clone();
+            let period_picklist = pick_list(
+                data::chart::tpo::SessionPeriod::ALL,
+                Some(cp),
+                move |new_period| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::TpoKindChanged(KlineChartKind::Tpo {
+                            show_candles: sc,
+                            show_letters: sl,
+                            show_ib: sib,
+                            show_va: sva,
+                            show_poc: spoc,
+                            show_single_prints: ssp,
+                            tick_step: st,
+                            period: new_period,
+                            clusters: cl8.clone(),
+                            split_sessions: sp8.clone(),
+                        }),
+                    )
+                },
+            );
+            let period_row: Element<'a, Message> = row![
+                text("Aggregation Period:").width(Length::Fill),
+                period_picklist,
+            ]
+            .align_y(Alignment::Center)
+            .spacing(8)
+            .into();
+
+            let clusters_row =
+                row![text(format!("Clusters: {} active", cur_clusters.len())).width(Length::Fill),]
+                    .align_y(Alignment::Center)
+                    .spacing(8);
+
+            column![
+                text("TPO / Market Profile Settings").size(14),
+                period_row,
+                step_row,
+                clusters_row,
+                c_candles,
+                c_letters,
+                c_poc,
+                c_va,
+                c_ib,
+                c_sp,
+            ]
+            .spacing(10)
+        }
         KlineChartKind::Footprint {
             clusters,
             scaling,
             studies,
+            show_bottom_volume,
         } => {
             let cluster_picklist =
                 pick_list(ClusterKind::ALL, Some(clusters), move |new_cluster_kind| {
@@ -501,10 +729,33 @@ pub fn kline_cfg_view<'a>(
                 )
             });
 
+            let show_bottom_vol = *show_bottom_volume;
+            let bottom_volume_checkbox = checkbox(show_bottom_vol)
+                .label("Show Bottom Volume")
+                .on_toggle(move |val| {
+                    Message::PaneEvent(pane, Event::FootprintShowBottomVolumeToggled(val))
+                });
+
+            let has_volume = indicators.contains(&KlineIndicator::Volume);
+            let volume_panel_checkbox =
+                checkbox(has_volume)
+                    .label("Show Volume Panel")
+                    .on_toggle(move |_| {
+                        Message::PaneEvent(
+                            pane,
+                            Event::ToggleIndicator(UiIndicator::Kline(KlineIndicator::Volume)),
+                        )
+                    });
+
             split_column![
                 column![text("Cluster type").size(14), cluster_picklist].spacing(8),
                 column![text("Cluster scaling").size(14), scaling].spacing(8),
                 column![text("Studies").size(14), study_cfg].spacing(8),
+                column![
+                    text("Panels & Overlays").size(14),
+                    bottom_volume_checkbox,
+                    volume_panel_checkbox,
+                ].spacing(8),
                 row![
                     space::horizontal(),
                     sync_all_button(pane, VisualConfig::Kline(cfg))
@@ -620,7 +871,7 @@ pub mod study {
     use data::chart::kline::FootprintStudy;
     use iced::{
         Element, padding,
-        widget::{button, checkbox, column, container, row, slider, space, text},
+        widget::{button, checkbox, column, container, pick_list, row, slider, space, text},
     };
 
     #[derive(Debug, Clone, Copy)]
@@ -641,7 +892,7 @@ pub mod study {
 
     impl Study for FootprintStudy {
         fn is_same_type(&self, other: &Self) -> bool {
-            std::mem::discriminant(self) == std::mem::discriminant(other)
+            FootprintStudy::is_same_type(self, other)
         }
 
         fn all() -> Vec<Self> {
@@ -743,6 +994,110 @@ pub mod study {
                     };
 
                     split_column![qty_threshold, color_scaling, ignore_zeros_checkbox]
+                        .padding(4)
+                        .into()
+                }
+                FootprintStudy::ClusterSearch {
+                    id,
+                    min_volume,
+                    min_delta,
+                    side,
+                    style,
+                    color,
+                } => {
+                    let vol_slider = {
+                        let info = text(format!("Min Volume: {:.0}", min_volume));
+                        let s = slider(0.0_f32..=5000.0, min_volume, move |v| {
+                            on_change(FootprintStudy::ClusterSearch {
+                                id,
+                                min_volume: v,
+                                min_delta,
+                                side,
+                                style,
+                                color,
+                            })
+                        })
+                        .step(25.0);
+                        column![info, s].padding(8).spacing(4)
+                    };
+
+                    let delta_slider = {
+                        let info = text(format!("Min |Delta|: {:.0}", min_delta));
+                        let s = slider(0.0_f32..=2500.0, min_delta, move |v| {
+                            on_change(FootprintStudy::ClusterSearch {
+                                id,
+                                min_volume,
+                                min_delta: v,
+                                side,
+                                style,
+                                color,
+                            })
+                        })
+                        .step(25.0);
+                        column![info, s].padding(8).spacing(4)
+                    };
+
+                    let side_picks = pick_list(
+                        data::chart::kline::ClusterSearchSide::ALL,
+                        Some(side),
+                        move |new_side| {
+                            on_change(FootprintStudy::ClusterSearch {
+                                id,
+                                min_volume,
+                                min_delta,
+                                side: new_side,
+                                style,
+                                color,
+                            })
+                        },
+                    );
+
+                    let side_row = row![text("Side:").width(iced::Length::Fill), side_picks,]
+                        .align_y(iced::Alignment::Center)
+                        .spacing(8)
+                        .padding(8);
+
+                    let style_picks = pick_list(
+                        data::chart::kline::HighlightStyle::ALL,
+                        Some(style),
+                        move |new_style| {
+                            on_change(FootprintStudy::ClusterSearch {
+                                id,
+                                min_volume,
+                                min_delta,
+                                side,
+                                style: new_style,
+                                color,
+                            })
+                        },
+                    );
+
+                    let style_row = row![text("Style:").width(iced::Length::Fill), style_picks,]
+                        .align_y(iced::Alignment::Center)
+                        .spacing(8)
+                        .padding(8);
+
+                    let color_picks = pick_list(
+                        data::chart::kline::HighlightColor::ALL,
+                        Some(color),
+                        move |new_color| {
+                            on_change(FootprintStudy::ClusterSearch {
+                                id,
+                                min_volume,
+                                min_delta,
+                                side,
+                                style,
+                                color: new_color,
+                            })
+                        },
+                    );
+
+                    let color_row = row![text("Color:").width(iced::Length::Fill), color_picks,]
+                        .align_y(iced::Alignment::Center)
+                        .spacing(8)
+                        .padding(8);
+
+                    split_column![vol_slider, delta_slider, side_row, style_row, color_row]
                         .padding(4)
                         .into()
                 }

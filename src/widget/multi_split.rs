@@ -23,9 +23,11 @@ struct State {
     hovering_index: Option<usize>,
 }
 
+use std::borrow::Cow;
+
 pub struct MultiSplit<'a, Message> {
     panels: Vec<Element<'a, Message>>,
-    splits: &'a Vec<f32>,
+    splits: Cow<'a, [f32]>,
     resize: fn(usize, f32) -> Message,
 }
 
@@ -43,21 +45,18 @@ where
 {
     pub fn new(
         panels: Vec<Element<'a, Message>>,
-        splits: &'a Vec<f32>,
+        splits: impl Into<Cow<'a, [f32]>>,
         resize: fn(usize, f32) -> Message,
     ) -> Self {
-        assert!(panels.len() >= 2, "MultiSplit needs at least 2 panels");
-        assert_eq!(
-            panels.len() - 1,
-            splits.len(),
-            "Number of splits must be one less than number of panels"
-        );
+        let splits = splits.into();
+        let expected_splits = panels.len().saturating_sub(1);
+        let valid_splits_count = splits.len().min(expected_splits);
 
         let mut elements = Vec::with_capacity(panels.len() * 2 - 1);
         for (i, panel) in panels.into_iter().enumerate() {
             elements.push(panel);
 
-            if i < splits.len() {
+            if i < valid_splits_count {
                 elements.push(rule::horizontal(DRAG_SIZE).style(style::split_ruler).into());
             }
         }
@@ -107,7 +106,7 @@ impl<Message> Widget<Message, Theme, Renderer> for MultiSplit<'_, Message> {
                 let height = if is_last {
                     max_limits.height - current_y
                 } else {
-                    let split_position = self.splits[panel_index];
+                    let split_position = self.splits.get(panel_index).copied().unwrap_or(0.8);
                     let split_y = max_limits.height * split_position;
 
                     split_y - current_y - (DRAG_SIZE * 0.5)
@@ -238,11 +237,11 @@ impl<Message> Widget<Message, Theme, Renderer> for MultiSplit<'_, Message> {
                         }
                     }
                 }
-                mouse::Event::ButtonReleased(mouse::Button::Left) => {
-                    if state.dragging_index.is_some() {
-                        state.dragging_index = None;
-                        shell.capture_event();
-                    }
+                mouse::Event::ButtonReleased(mouse::Button::Left)
+                    if state.dragging_index.is_some() =>
+                {
+                    state.dragging_index = None;
+                    shell.capture_event();
                 }
                 _ => {}
             }

@@ -31,6 +31,16 @@ impl ResolvedStream {
         }
     }
 
+    pub fn matches_trades(&self, stream: &StreamKind) -> bool {
+        match self {
+            ResolvedStream::Ready(existing) => {
+                let target = stream.ticker_info();
+                existing.iter().any(|s| s.ticker_info() == target)
+            }
+            _ => false,
+        }
+    }
+
     pub fn ready_iter_mut(&mut self) -> Option<impl Iterator<Item = &mut StreamKind>> {
         match self {
             ResolvedStream::Ready(streams) => Some(streams.iter_mut()),

@@ -192,6 +192,7 @@ impl TimeSeries<KlineDataPoint> {
                 .or_insert_with(|| KlineDataPoint {
                     kline: *kline,
                     footprint: KlineTrades::new(),
+                    trades_fetched: false,
                 });
 
             entry.kline = *kline;
@@ -225,6 +226,7 @@ impl TimeSeries<KlineDataPoint> {
                         volume: (0.0, 0.0),
                     },
                     footprint: KlineTrades::new(),
+                    trades_fetched: true,
                 });
 
             entry.add_trade(trade, self.tick_size);
@@ -243,12 +245,86 @@ impl TimeSeries<KlineDataPoint> {
         }
         let aggr_time = self.interval.to_milliseconds();
         let mut updated_times: FxHashSet<u64> = FxHashSet::default();
+        let min_trade_time = buffer.first().map(|t| t.time).unwrap_or(0);
+        let max_trade_time = buffer.last().map(|t| t.time).unwrap_or(0);
 
         for trade in buffer {
             let rounded_time = (trade.time / aggr_time) * aggr_time;
 
             if let Some(entry) = self.datapoints.get_mut(&rounded_time) {
                 updated_times.insert(rounded_time);
+                entry
+                    .footprint
+                    .add_trade_to_nearest_bin(trade, self.tick_size);
+            }
+        }
+
+        if aggr_time > 0 && max_trade_time >= min_trade_time && min_trade_time > 0 {
+            let start_bucket = (min_trade_time / aggr_time) * aggr_time;
+            let end_bucket = (max_trade_time / aggr_time) * aggr_time;
+            for (_, dp) in self.datapoints.range_mut(start_bucket..=end_bucket) {
+                dp.trades_fetched = true;
+            }
+        }
+
+        for time in updated_times {
+            if let Some(data_point) = self.datapoints.get_mut(&time) {
+                data_point.calculate_poc();
+            }
+        }
+    }
+
+    pub fn mark_trades_fetched(&mut self, from_time: u64, to_time: u64) {
+        if from_time > to_time {
+            return;
+        }
+        let aggr_time = self.interval.to_milliseconds();
+        if aggr_time == 0 {
+            return;
+        }
+        let rounded_from = (from_time / aggr_time) * aggr_time;
+        if rounded_from > to_time {
+            return;
+        }
+
+        for (&time, dp) in self.datapoints.range_mut(rounded_from..=to_time) {
+            if time.saturating_add(aggr_time) > from_time {
+                dp.trades_fetched = true;
+            }
+        }
+    }
+
+    pub fn insert_realtime_trades(&mut self, buffer: &[Trade]) {
+        if buffer.is_empty() {
+            return;
+        }
+        let aggr_time = self.interval.to_milliseconds();
+        let mut updated_times: FxHashSet<u64> = FxHashSet::default();
+        let latest_ts = self.latest_timestamp();
+
+        for trade in buffer {
+            let rounded_time = (trade.time / aggr_time) * aggr_time;
+
+            if let Some(entry) = self.datapoints.get_mut(&rounded_time) {
+                updated_times.insert(rounded_time);
+                entry.add_trade(trade, self.tick_size);
+            } else if latest_ts.is_none_or(|latest| rounded_time >= latest) {
+                updated_times.insert(rounded_time);
+                let entry = self
+                    .datapoints
+                    .entry(rounded_time)
+                    .or_insert_with(|| KlineDataPoint {
+                        kline: Kline {
+                            time: rounded_time,
+                            open: trade.price,
+                            high: trade.price,
+                            low: trade.price,
+                            close: trade.price,
+                            volume: (0.0, 0.0),
+                        },
+                        footprint: KlineTrades::new(),
+                        trades_fetched: true,
+                    });
                 entry.add_trade(trade, self.tick_size);
             }
         }
@@ -305,27 +381,27 @@ impl TimeSeries<KlineDataPoint> {
 
             // Check if this datapoint has a POC and determine its status
             if let Some(poc_price) = poc_price {
-                let npoc = if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high)
+                let npoc = if let (Some(cum_low), Some(cum_high)) =
+                    (cumulative_low, cumulative_high)
                 {
                     if cum_low <= poc_price && cum_high >= poc_price {
                         // POC was touched - find the first touch time
-                        let first_touch_time =
-                            if poc_price <= entries[low_established_at].2
-                                && poc_price >= entries[low_established_at].1
-                            {
-                                Some(entries[low_established_at].0)
-                            } else if poc_price <= entries[high_established_at].2
-                                && poc_price >= entries[high_established_at].1
-                            {
-                                Some(entries[high_established_at].0)
-                            } else {
-                                // Fallback: scan forward from i+1 to find first touch
-                                let search_end = high_established_at.max(low_established_at);
-                                entries[(i + 1)..=search_end]
-                                    .iter()
-                                    .find(|(_, low, high, _)| *low <= poc_price && *high >= poc_price)
-                                    .map(|(time, _, _, _)| *time)
-                            };
+                        let first_touch_time = if poc_price <= entries[low_established_at].2
+                            && poc_price >= entries[low_established_at].1
+                        {
+                            Some(entries[low_established_at].0)
+                        } else if poc_price <= entries[high_established_at].2
+                            && poc_price >= entries[high_established_at].1
+                        {
+                            Some(entries[high_established_at].0)
+                        } else {
+                            // Fallback: scan forward from i+1 to find first touch
+                            let search_end = high_established_at.max(low_established_at);
+                            entries[(i + 1)..=search_end]
+                                .iter()
+                                .find(|(_, low, high, _)| *low <= poc_price && *high >= poc_price)
+                                .map(|(time, _, _, _)| *time)
+                        };
 
                         if let Some(touch_time) = first_touch_time {
                             let mut n = NPoc::default();
@@ -384,56 +460,77 @@ impl TimeSeries<KlineDataPoint> {
         visible_earliest: u64,
         visible_latest: u64,
     ) -> Option<(u64, u64)> {
-        if self.datapoints.is_empty() {
+        if self.datapoints.is_empty() || visible_earliest >= visible_latest {
             return None;
         }
 
-        self.find_trade_gap()
-            .and_then(|(last_t_before_gap, first_t_after_gap)| {
-                if last_t_before_gap.is_none() && first_t_after_gap.is_none() {
-                    return None;
-                }
-                let (data_earliest, data_latest) = self.timerange();
-
-                let fetch_from = last_t_before_gap
-                    .map_or(data_earliest, |t| t.saturating_add(1))
-                    .max(visible_earliest);
-                let fetch_to = first_t_after_gap
-                    .map_or(data_latest, |t| t.saturating_sub(1))
-                    .min(visible_latest);
-
-                if fetch_from < fetch_to {
-                    Some((fetch_from, fetch_to))
-                } else {
-                    None
-                }
-            })
-    }
-
-    fn find_trade_gap(&self) -> Option<(Option<u64>, Option<u64>)> {
-        let empty_kline_time = self
-            .datapoints
-            .iter()
-            .rev()
-            .find(|(_, dp)| dp.footprint.trades.is_empty())
-            .map(|(&time, _)| time);
-
-        if let Some(target_time) = empty_kline_time {
-            let last_t_before_gap = self
-                .datapoints
-                .range(..target_time)
-                .rev()
-                .find_map(|(_, dp)| dp.last_trade_time());
-
-            let first_t_after_gap = self
-                .datapoints
-                .range(target_time + 1..)
-                .find_map(|(_, dp)| dp.first_trade_time());
-
-            Some((last_t_before_gap, first_t_after_gap))
-        } else {
-            None
+        let interval_ms = self.interval.to_milliseconds();
+        if interval_ms == 0 {
+            return None;
         }
+
+        // 1. Priority 1: Unfetched candles within the visible range [visible_earliest, visible_latest]
+        let mut visible_unfetched = self
+            .datapoints
+            .range(visible_earliest..=visible_latest)
+            .filter(|(_, dp)| !dp.trades_fetched && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0)
+            .map(|(&t, _)| t);
+
+        if let Some(first_unfetched) = visible_unfetched.next() {
+            let last_unfetched = visible_unfetched.next_back().unwrap_or(first_unfetched);
+            let fetch_from = first_unfetched.max(visible_earliest);
+            let fetch_to = last_unfetched
+                .saturating_add(interval_ms)
+                .min(visible_latest);
+
+            if fetch_from < fetch_to {
+                return Some((fetch_from, fetch_to));
+            } else if fetch_from <= visible_latest {
+                return Some((fetch_from, visible_latest.max(fetch_from + 1)));
+            }
+        }
+
+        // 2. Priority 2: Prefetch earlier candles preceding the visible range
+        let prefetch_earliest = visible_earliest.saturating_sub(7 * 24 * 3600 * 1000);
+        let mut past_unfetched = self
+            .datapoints
+            .range(prefetch_earliest..visible_earliest)
+            .filter(|(_, dp)| !dp.trades_fetched && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0)
+            .map(|(&t, _)| t);
+
+        if let Some(first_unfetched) = past_unfetched.next() {
+            let last_unfetched = past_unfetched.next_back().unwrap_or(first_unfetched);
+            let fetch_from = first_unfetched.max(prefetch_earliest);
+            let fetch_to = last_unfetched
+                .saturating_add(interval_ms)
+                .min(visible_earliest);
+
+            if fetch_from < fetch_to {
+                return Some((fetch_from, fetch_to));
+            }
+        }
+
+        // 3. Priority 3: Prefetch candles succeeding the visible range
+        let prefetch_latest = visible_latest.saturating_add(7 * 24 * 3600 * 1000);
+        let mut future_unfetched = self
+            .datapoints
+            .range(visible_latest + 1..=prefetch_latest)
+            .filter(|(_, dp)| !dp.trades_fetched && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0)
+            .map(|(&t, _)| t);
+
+        if let Some(first_unfetched) = future_unfetched.next() {
+            let last_unfetched = future_unfetched.next_back().unwrap_or(first_unfetched);
+            let fetch_from = first_unfetched.max(visible_latest);
+            let fetch_to = last_unfetched
+                .saturating_add(interval_ms)
+                .min(prefetch_latest);
+
+            if fetch_from < fetch_to {
+                return Some((fetch_from, fetch_to));
+            }
+        }
+
+        None
     }
 
     pub fn max_qty_ts_range(
@@ -505,5 +602,286 @@ impl From<&TimeSeries<KlineDataPoint>> for BTreeMap<u64, (f32, f32)> {
             .iter()
             .map(|(time, dp)| (*time, (dp.kline.volume.0, dp.kline.volume.1)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::util::Price;
+
+    #[test]
+    fn test_kline_datapoint_realtime_trade_update() {
+        let mut dp = KlineDataPoint {
+            kline: Kline {
+                time: 1_000_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(100.0),
+                low: Price::from_f32(100.0),
+                close: Price::from_f32(100.0),
+                volume: (0.0, 0.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: false,
+        };
+
+        let step = PriceStep::from_f32(0.5);
+
+        // Incoming Buy trade at 105.0 with qty 2.5
+        let trade_buy = Trade {
+            time: 1_000_100,
+            price: Price::from_f32(105.0),
+            qty: 2.5,
+            is_sell: false,
+        };
+        dp.add_trade(&trade_buy, step);
+
+        assert_eq!(dp.kline.high.to_f32(), 105.0);
+        assert_eq!(dp.kline.low.to_f32(), 100.0);
+        assert_eq!(dp.kline.close.to_f32(), 105.0);
+        assert_eq!(dp.kline.volume.0, 2.5);
+        assert_eq!(dp.kline.volume.1, 0.0);
+
+        // Incoming Sell trade at 95.0 with qty 1.5
+        let trade_sell = Trade {
+            time: 1_000_200,
+            price: Price::from_f32(95.0),
+            qty: 1.5,
+            is_sell: true,
+        };
+        dp.add_trade(&trade_sell, step);
+
+        assert_eq!(dp.kline.high.to_f32(), 105.0);
+        assert_eq!(dp.kline.low.to_f32(), 95.0);
+        assert_eq!(dp.kline.close.to_f32(), 95.0);
+        assert_eq!(dp.kline.volume.0, 2.5);
+        assert_eq!(dp.kline.volume.1, 1.5);
+    }
+
+    #[test]
+    fn test_timeseries_insert_realtime_trades_rollover() {
+        let step = PriceStep::from_f32(1.0);
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M15, step, &[]);
+
+        let t1 = 15 * 60 * 1000; // First 15m interval
+        let trade1 = Trade {
+            time: t1 + 5000,
+            price: Price::from_f32(100.0),
+            qty: 1.0,
+            is_sell: false,
+        };
+        ts.insert_realtime_trades(&[trade1]);
+
+        assert_eq!(ts.datapoints.len(), 1);
+        let dp1 = ts.datapoints.get(&t1).unwrap();
+        assert_eq!(dp1.kline.open.to_f32(), 100.0);
+        assert_eq!(dp1.kline.close.to_f32(), 100.0);
+
+        // Trade in the NEXT 15m interval
+        let t2 = 30 * 60 * 1000;
+        let trade2 = Trade {
+            time: t2 + 1000,
+            price: Price::from_f32(108.0),
+            qty: 3.0,
+            is_sell: true,
+        };
+        ts.insert_realtime_trades(&[trade2]);
+
+        assert_eq!(ts.datapoints.len(), 2);
+        let dp2 = ts.datapoints.get(&t2).unwrap();
+        assert_eq!(dp2.kline.open.to_f32(), 108.0);
+        assert_eq!(dp2.kline.close.to_f32(), 108.0);
+        assert_eq!(dp2.kline.volume.1, 3.0);
+    }
+
+    #[test]
+    fn test_suggest_trade_fetch_range_when_all_empty() {
+        let step = PriceStep::from_f32(1.0);
+        let klines = vec![
+            Kline {
+                time: 300_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: 600_000,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(107.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(106.0),
+                volume: (15.0, 15.0),
+            },
+        ];
+        let ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+
+        // All datapoints have empty footprint trades
+        let range = ts.suggest_trade_fetch_range(200_000, 800_000);
+        assert_eq!(range, Some((300_000, 800_000)));
+    }
+
+    #[test]
+    fn test_suggest_trade_fetch_range_stops_after_mark_fetched() {
+        let step = PriceStep::from_f32(1.0);
+        let klines = vec![
+            Kline {
+                time: 300_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: 600_000,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(107.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(106.0),
+                volume: (15.0, 15.0),
+            },
+        ];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+
+        let range = ts.suggest_trade_fetch_range(200_000, 800_000);
+        assert_eq!(range, Some((300_000, 800_000)));
+
+        // After marking the range fetched, no more gap should be suggested
+        ts.mark_trades_fetched(300_000, 800_000);
+        let next_range = ts.suggest_trade_fetch_range(200_000, 800_000);
+        assert_eq!(next_range, None);
+    }
+
+    #[test]
+    fn test_zero_volume_candle_is_not_suggested_as_gap() {
+        let step = PriceStep::from_f32(1.0);
+        let klines = vec![Kline {
+            time: 300_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(100.0),
+            low: Price::from_f32(100.0),
+            close: Price::from_f32(100.0),
+            volume: (0.0, 0.0),
+        }];
+        let ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+        assert_eq!(ts.suggest_trade_fetch_range(200_000, 800_000), None);
+    }
+
+    #[test]
+    fn test_midnight_rollover_footprint() {
+        let step = PriceStep::from_f32(0.1);
+        let t_sep11 = 1789171200000 - 900_000;
+        let t_sep12 = 1789171200000;
+        let klines = vec![
+            Kline {
+                time: t_sep11,
+                open: Price::from_f32(77000.0),
+                high: Price::from_f32(77100.0),
+                low: Price::from_f32(76900.0),
+                close: Price::from_f32(77050.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: t_sep12,
+                open: Price::from_f32(77050.0),
+                high: Price::from_f32(77200.0),
+                low: Price::from_f32(77000.0),
+                close: Price::from_f32(77150.0),
+                volume: (15.0, 15.0),
+            },
+        ];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M15, step, &klines);
+
+        let trade1 = Trade {
+            time: t_sep11 + 1000,
+            price: Price::from_f32(77000.0),
+            qty: 1.0,
+            is_sell: false,
+        };
+        ts.insert_trades_existing_buckets(&[trade1]);
+        assert!(
+            !ts.datapoints
+                .get(&t_sep11)
+                .unwrap()
+                .footprint
+                .trades
+                .is_empty()
+        );
+
+        let trade2 = Trade {
+            time: t_sep12 + 1000,
+            price: Price::from_f32(77100.0),
+            qty: 2.0,
+            is_sell: true,
+        };
+        ts.insert_trades_existing_buckets(&[trade2]);
+        assert!(
+            !ts.datapoints
+                .get(&t_sep12)
+                .unwrap()
+                .footprint
+                .trades
+                .is_empty()
+        );
+
+        ts.mark_trades_fetched(t_sep11, t_sep12 + 900_000);
+        assert_eq!(
+            ts.suggest_trade_fetch_range(t_sep11, t_sep12 + 900_000),
+            None
+        );
+    }
+
+    #[test]
+    fn test_insert_trades_existing_buckets_does_not_poison_earlier_candles() {
+        let step = PriceStep::from_f32(1.0);
+        let klines = vec![
+            Kline {
+                time: 0,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: 300_000,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(107.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(106.0),
+                volume: (15.0, 15.0),
+            },
+            Kline {
+                time: 600_000,
+                open: Price::from_f32(106.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(105.0),
+                close: Price::from_f32(108.0),
+                volume: (20.0, 20.0),
+            },
+        ];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+
+        // Insert trades ONLY for the latest candle at 600_000
+        let trade = Trade {
+            time: 605_000,
+            price: Price::from_f32(107.0),
+            qty: 5.0,
+            is_sell: false,
+        };
+        ts.insert_trades_existing_buckets(&[trade]);
+
+        // 600_000 should be marked fetched
+        assert!(ts.datapoints.get(&600_000).unwrap().trades_fetched);
+
+        // Earlier candles at 0 and 300_000 MUST remain unfetched!
+        assert!(!ts.datapoints.get(&0).unwrap().trades_fetched);
+        assert!(!ts.datapoints.get(&300_000).unwrap().trades_fetched);
+
+        // If user scrolls to past range 0..400_000, it MUST suggest fetching 0..400_000
+        let suggested = ts.suggest_trade_fetch_range(0, 400_000);
+        assert_eq!(suggested, Some((0, 400_000)));
     }
 }

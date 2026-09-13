@@ -81,7 +81,10 @@ where
             let specs: HashMap<window::Id, WindowSpec> = results
                 .into_iter()
                 .filter_map(|(id, (pos, size))| {
-                    pos.map(|position| (id, WindowSpec::from((&position, &size))))
+                    pos.filter(|p| {
+                        p.x > -10000.0 && p.y > -10000.0 && p.x < 50000.0 && p.y < 50000.0
+                    })
+                    .map(|position| (id, WindowSpec::from((&position, &size))))
                 })
                 .collect();
 

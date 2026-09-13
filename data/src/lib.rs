@@ -150,6 +150,13 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
     };
 
     for entry in entries.filter_map(Result::ok) {
+        let symbol_name = entry.file_name().to_string_lossy().to_uppercase();
+        let max_days = if symbol_name.starts_with("BTC") {
+            130
+        } else {
+            30
+        };
+
         let symbol_dir = match std::fs::read_dir(entry.path()) {
             Ok(dir) => dir,
             Err(e) => {
@@ -168,7 +175,7 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
                 && let Ok(file_date) = chrono::NaiveDate::parse_from_str(&cap[1], "%Y-%m-%d")
             {
                 let days_old = today.signed_duration_since(file_date).num_days();
-                if days_old > 4 {
+                if days_old > max_days {
                     if let Err(e) = std::fs::remove_file(&path) {
                         error!("Failed to remove old file {}: {}", filename, e);
                     } else {

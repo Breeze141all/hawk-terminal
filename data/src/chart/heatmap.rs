@@ -33,7 +33,6 @@ impl Default for Config {
     }
 }
 
-
 pub struct HeatmapDataPoint {
     pub grouped_trades: SmallVec<[GroupedTrade; 16]>,
     pub buy_sell: (f32, f32),

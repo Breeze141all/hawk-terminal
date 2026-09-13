@@ -1330,6 +1330,7 @@ fn expanded_ticker_card<'a>(
             init_content_button(ContentKind::HeatmapChart, *ticker, 180.0),
             init_content_button(ContentKind::FootprintChart, *ticker, 180.0),
             init_content_button(ContentKind::CandlestickChart, *ticker, 180.0),
+            init_content_button(ContentKind::TpoChart, *ticker, 180.0),
             init_content_button(ContentKind::ComparisonChart, *ticker, 180.0),
             init_content_button(ContentKind::TimeAndSales, *ticker, 160.0),
             init_content_button(ContentKind::Ladder, *ticker, 160.0),

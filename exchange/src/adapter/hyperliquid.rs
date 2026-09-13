@@ -691,7 +691,7 @@ pub async fn fetch_klines(
             .unwrap()
             .as_millis() as u64;
         let interval_ms = timeframe.to_milliseconds();
-        let candles_ago = now - (interval_ms * 500);
+        let candles_ago = now - (interval_ms * 1000);
         (candles_ago, now)
     };
 
