@@ -1421,6 +1421,77 @@ pub async fn fetch_intraday_trades(
     fetch_intraday_trades_raw(ticker_info, from, None).await
 }
 
+pub const USE_BINARY_CACHE: bool = true;
+pub const BINARY_CACHE_MAGIC: &[u8; 4] = b"FST1";
+pub const TRADE_RECORD_SIZE: usize = 24;
+
+pub fn encode_trades_binary(trades: &[Trade]) -> Vec<u8> {
+    let num_trades = trades.len();
+    let mut raw = Vec::with_capacity(8 + num_trades * TRADE_RECORD_SIZE);
+    raw.extend_from_slice(BINARY_CACHE_MAGIC);
+    raw.extend_from_slice(&(num_trades as u32).to_le_bytes());
+
+    for t in trades {
+        raw.extend_from_slice(&t.time.to_le_bytes());
+        raw.extend_from_slice(&t.price.units.to_le_bytes());
+        raw.extend_from_slice(&t.qty.to_le_bytes());
+        raw.push(if t.is_sell { 1 } else { 0 });
+        raw.extend_from_slice(&[0u8; 3]);
+    }
+
+    lz4_flex::compress_prepend_size(&raw)
+}
+
+pub fn decode_trades_binary(compressed_bytes: &[u8]) -> Result<Vec<Trade>, AdapterError> {
+    let decompressed = lz4_flex::decompress_size_prepended(compressed_bytes)
+        .map_err(|e| AdapterError::ParseError(format!("Failed to decompress binary cache: {e}")))?;
+
+    if decompressed.len() < 8 {
+        return Err(AdapterError::ParseError(
+            "Binary cache header too short".into(),
+        ));
+    }
+
+    if &decompressed[0..4] != BINARY_CACHE_MAGIC {
+        return Err(AdapterError::ParseError(
+            "Binary cache magic mismatch".into(),
+        ));
+    }
+
+    let count = u32::from_le_bytes(
+        decompressed[4..8]
+            .try_into()
+            .map_err(|_| AdapterError::ParseError("Failed to parse trade count".into()))?,
+    ) as usize;
+
+    let payload = &decompressed[8..];
+    if payload.len() != count * TRADE_RECORD_SIZE {
+        return Err(AdapterError::ParseError(format!(
+            "Binary cache payload size mismatch: expected {} bytes for {} trades, got {}",
+            count * TRADE_RECORD_SIZE,
+            count,
+            payload.len()
+        )));
+    }
+
+    let mut trades = Vec::with_capacity(count);
+    for chunk in payload.chunks_exact(TRADE_RECORD_SIZE) {
+        let time = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
+        let price_units = i64::from_le_bytes(chunk[8..16].try_into().unwrap());
+        let qty = f32::from_le_bytes(chunk[16..20].try_into().unwrap());
+        let is_sell = chunk[20] != 0;
+
+        trades.push(Trade {
+            time,
+            is_sell,
+            price: Price { units: price_units },
+            qty,
+        });
+    }
+
+    Ok(trades)
+}
+
 pub async fn get_hist_trades(
     ticker_info: TickerInfo,
     date: chrono::NaiveDate,
@@ -1439,18 +1510,54 @@ pub async fn get_hist_trades(
         }
     };
 
-    let zip_file_name = format!(
-        "{}-aggTrades-{}.zip",
-        symbol.to_uppercase(),
-        date.format("%Y-%m-%d"),
-    );
-
     let base_path = base_path.join(&market_subpath);
 
     std::fs::create_dir_all(&base_path)
         .map_err(|e| AdapterError::ParseError(format!("Failed to create directories: {e}")))?;
 
-    let zip_path = format!("{market_subpath}/{zip_file_name}",);
+    let bin_file_name = format!(
+        "{}-aggTrades-{}.bin",
+        symbol.to_uppercase(),
+        date.format("%Y-%m-%d"),
+    );
+    let base_bin_path = base_path.join(&bin_file_name);
+
+    if USE_BINARY_CACHE && base_bin_path.exists() {
+        match std::fs::read(&base_bin_path) {
+            Ok(bytes) => match decode_trades_binary(&bytes) {
+                Ok(trades) => {
+                    log::info!(
+                        "Using binary cached {} ({} trades)",
+                        base_bin_path.display(),
+                        trades.len()
+                    );
+                    return Ok(trades);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Corrupted binary cache {:?}: {}, removing and falling back to zip",
+                        base_bin_path,
+                        e
+                    );
+                    let _ = std::fs::remove_file(&base_bin_path);
+                }
+            },
+            Err(e) => {
+                log::warn!(
+                    "Failed to read binary cache {:?}: {}, falling back to zip",
+                    base_bin_path,
+                    e
+                );
+            }
+        }
+    }
+
+    let zip_file_name = format!(
+        "{}-aggTrades-{}.zip",
+        symbol.to_uppercase(),
+        date.format("%Y-%m-%d"),
+    );
+    let zip_path = format!("{market_subpath}/{zip_file_name}");
     let base_zip_path = base_path.join(&zip_file_name);
 
     if std::fs::metadata(&base_zip_path).is_ok() {
@@ -1491,7 +1598,7 @@ pub async fn get_hist_trades(
         &base_zip_path
     };
 
-    match std::fs::File::open(target_path) {
+    let trades = match std::fs::File::open(target_path) {
         Ok(file) => {
             let mut archive = zip::ZipArchive::new(file)
                 .map_err(|e| AdapterError::ParseError(format!("Failed to unzip file: {e}")))?;
@@ -1534,12 +1641,42 @@ pub async fn get_hist_trades(
                     })
                 }));
             }
-            Ok(trades)
+            trades
         }
-        Err(e) => Err(AdapterError::ParseError(format!(
-            "Failed to open compressed file: {e}"
-        ))),
+        Err(e) => {
+            return Err(AdapterError::ParseError(format!(
+                "Failed to open compressed file: {e}"
+            )));
+        }
+    };
+
+    if USE_BINARY_CACHE && !trades.is_empty() {
+        let compressed = encode_trades_binary(&trades);
+        let temp_bin_path = base_bin_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        if let Err(e) = std::fs::write(&temp_bin_path, &compressed) {
+            log::warn!(
+                "Failed to write temp binary cache {:?}: {}",
+                temp_bin_path,
+                e
+            );
+        } else {
+            if base_bin_path.exists() {
+                let _ = std::fs::remove_file(&base_bin_path);
+            }
+            if let Err(e) = std::fs::rename(&temp_bin_path, &base_bin_path) {
+                log::warn!("Failed to rename {temp_bin_path:?} to {base_bin_path:?}: {e}");
+                let _ = std::fs::remove_file(&temp_bin_path);
+            } else {
+                log::info!(
+                    "Saved {} trades to binary cache {:?}",
+                    trades.len(),
+                    base_bin_path
+                );
+            }
+        }
     }
+
+    Ok(trades)
 }
 
 // === Funding Rate API ===

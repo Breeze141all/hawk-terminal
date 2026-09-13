@@ -136,8 +136,8 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
         return 0;
     }
 
-    let re =
-        regex::Regex::new(r".*-(\d{4}-\d{2}-\d{2})\.zip$").expect("Cleanup regex pattern is valid");
+    let re = regex::Regex::new(r".*-(\d{4}-\d{2}-\d{2})\.(?:zip|bin)$")
+        .expect("Cleanup regex pattern is valid");
     let today = chrono::Local::now().date_naive();
     let mut deleted_files = Vec::new();
 
@@ -202,4 +202,57 @@ pub fn cleanup_old_market_data() -> usize {
 
     info!("File cleanup completed. Deleted {} files", total_deleted);
     total_deleted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cleanup_directory_recognizes_bin_and_zip() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_cleanup_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let btc_dir = temp_dir.join("BTCUSDT");
+        let eth_dir = temp_dir.join("ETHUSDT");
+        std::fs::create_dir_all(&btc_dir).unwrap();
+        std::fs::create_dir_all(&eth_dir).unwrap();
+
+        let old_date = "2020-01-01";
+        let recent_date = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+
+        let btc_old_zip = btc_dir.join(format!("BTCUSDT-aggTrades-{old_date}.zip"));
+        let btc_old_bin = btc_dir.join(format!("BTCUSDT-aggTrades-{old_date}.bin"));
+        let btc_recent_bin = btc_dir.join(format!("BTCUSDT-aggTrades-{recent_date}.bin"));
+        std::fs::write(&btc_old_zip, b"test").unwrap();
+        std::fs::write(&btc_old_bin, b"test").unwrap();
+        std::fs::write(&btc_recent_bin, b"test").unwrap();
+
+        let eth_old_zip = eth_dir.join(format!("ETHUSDT-aggTrades-{old_date}.zip"));
+        let eth_old_bin = eth_dir.join(format!("ETHUSDT-aggTrades-{old_date}.bin"));
+        let eth_recent_bin = eth_dir.join(format!("ETHUSDT-aggTrades-{recent_date}.bin"));
+        std::fs::write(&eth_old_zip, b"test").unwrap();
+        std::fs::write(&eth_old_bin, b"test").unwrap();
+        std::fs::write(&eth_recent_bin, b"test").unwrap();
+
+        let deleted = cleanup_directory(&temp_dir);
+        assert_eq!(deleted, 4);
+
+        assert!(!btc_old_zip.exists());
+        assert!(!btc_old_bin.exists());
+        assert!(btc_recent_bin.exists());
+
+        assert!(!eth_old_zip.exists());
+        assert!(!eth_old_bin.exists());
+        assert!(eth_recent_bin.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }

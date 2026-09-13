@@ -841,4 +841,106 @@ mod tests {
         }
         assert!(res.is_ok());
     }
+
+    #[test]
+    fn test_binary_cache_roundtrip() {
+        let original_trades = vec![
+            Trade {
+                time: 1726210800000,
+                is_sell: true,
+                price: util::Price {
+                    units: 5800000000000,
+                },
+                qty: 1.25,
+            },
+            Trade {
+                time: 1726210800123,
+                is_sell: false,
+                price: util::Price {
+                    units: 5800010000000,
+                },
+                qty: 0.005,
+            },
+            Trade {
+                time: 1726210801000,
+                is_sell: true,
+                price: util::Price { units: -100 },
+                qty: 100000.0,
+            },
+        ];
+
+        let encoded = adapter::binance::encode_trades_binary(&original_trades);
+        let decoded = adapter::binance::decode_trades_binary(&encoded).expect("decode failed");
+
+        assert_eq!(decoded.len(), original_trades.len());
+        for (dec, orig) in decoded.iter().zip(original_trades.iter()) {
+            assert_eq!(dec.time, orig.time);
+            assert_eq!(dec.is_sell, orig.is_sell);
+            assert_eq!(dec.price.units, orig.price.units);
+            assert_eq!(dec.qty, orig.qty);
+        }
+    }
+
+    #[test]
+    fn test_binary_cache_corruption_detection() {
+        let original_trades = vec![Trade {
+            time: 1000,
+            is_sell: false,
+            price: util::Price { units: 50000 },
+            qty: 1.0,
+        }];
+
+        let encoded = adapter::binance::encode_trades_binary(&original_trades);
+
+        // 1. Corrupt magic bytes
+        let mut corrupted_magic = encoded.clone();
+        // Decompress, change magic, recompress
+        let mut raw = lz4_flex::decompress_size_prepended(&corrupted_magic).unwrap();
+        raw[0] = b'X';
+        corrupted_magic = lz4_flex::compress_prepend_size(&raw);
+        assert!(adapter::binance::decode_trades_binary(&corrupted_magic).is_err());
+
+        // 2. Corrupt trade count
+        let mut corrupted_count = encoded.clone();
+        let mut raw = lz4_flex::decompress_size_prepended(&corrupted_count).unwrap();
+        raw[4] = 99; // change count
+        corrupted_count = lz4_flex::compress_prepend_size(&raw);
+        assert!(adapter::binance::decode_trades_binary(&corrupted_count).is_err());
+
+        // 3. Truncated data
+        assert!(adapter::binance::decode_trades_binary(&encoded[..4]).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_benchmark_bin_vs_zip() {
+        let ticker = Ticker::new("btcusdt", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo {
+            ticker,
+            min_ticksize: util::MinTicksize { power: -1 },
+            min_qty: util::MinQtySize { power: -3 },
+            contract_size: None,
+        };
+        let data_path = std::path::PathBuf::from(
+            r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+        );
+        if !data_path.exists() {
+            return;
+        }
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+
+        let t_start_bin = std::time::Instant::now();
+        let bin_trades = adapter::binance::get_hist_trades(ticker_info, date, data_path)
+            .await
+            .expect("read bin cache");
+        let bin_duration = t_start_bin.elapsed();
+
+        println!(
+            "Binary cache read: {} trades in {:?} ({:.2} ms)",
+            bin_trades.len(),
+            bin_duration,
+            bin_duration.as_secs_f64() * 1000.0
+        );
+
+        assert!(!bin_trades.is_empty());
+    }
 }
