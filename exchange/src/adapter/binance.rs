@@ -23,7 +23,9 @@ use serde::Deserialize;
 use sonic_rs::{FastStr, JsonContainerTrait, JsonValueTrait, to_object_iter_unchecked};
 use tokio::sync::Mutex;
 
-use std::{collections::HashMap, io::BufReader, path::PathBuf, sync::LazyLock, time::Duration};
+use std::{
+    collections::HashMap, io::BufReader, path::Path, path::PathBuf, sync::LazyLock, time::Duration,
+};
 
 const SPOT_DOMAIN: &str = "https://api.binance.com";
 const LINEAR_PERP_DOMAIN: &str = "https://fapi.binance.com";
@@ -1492,35 +1494,61 @@ pub fn decode_trades_binary(compressed_bytes: &[u8]) -> Result<Vec<Trade>, Adapt
     Ok(trades)
 }
 
+pub fn raw_trade_subpath(ticker_info: &TickerInfo) -> String {
+    let ticker = ticker_info.ticker;
+    let (symbol, market_type) = ticker.to_full_symbol_and_type();
+    let symbol_upper = symbol.to_uppercase();
+
+    match market_type {
+        MarketKind::Spot => format!("data/spot/daily/aggTrades/{symbol_upper}"),
+        MarketKind::LinearPerps => format!("data/futures/um/daily/aggTrades/{symbol_upper}"),
+        MarketKind::InversePerps => format!("data/futures/cm/daily/aggTrades/{symbol_upper}"),
+    }
+}
+
+pub fn raw_trade_bin_path(
+    base_data_path: &Path,
+    ticker_info: &TickerInfo,
+    date: chrono::NaiveDate,
+) -> PathBuf {
+    let ticker = ticker_info.ticker;
+    let (symbol, _) = ticker.to_full_symbol_and_type();
+    let symbol_upper = symbol.to_uppercase();
+    let market_subpath = raw_trade_subpath(ticker_info);
+    let bin_file_name = format!("{symbol_upper}-aggTrades-{}.bin", date.format("%Y-%m-%d"));
+    base_data_path.join(market_subpath).join(bin_file_name)
+}
+
+pub fn load_raw_trades_from_cache(
+    base_data_path: &Path,
+    ticker_info: &TickerInfo,
+    date: chrono::NaiveDate,
+) -> Option<Vec<Trade>> {
+    let bin_path = raw_trade_bin_path(base_data_path, ticker_info, date);
+    if bin_path.exists()
+        && let Ok(bytes) = std::fs::read(&bin_path)
+        && let Ok(trades) = decode_trades_binary(&bytes)
+    {
+        return Some(trades);
+    }
+    None
+}
+
 pub async fn get_hist_trades(
     ticker_info: TickerInfo,
     date: chrono::NaiveDate,
     base_path: PathBuf,
 ) -> Result<Vec<Trade>, AdapterError> {
     let ticker = ticker_info.ticker;
-    let (symbol, market_type) = ticker.to_full_symbol_and_type();
+    let (symbol, _) = ticker.to_full_symbol_and_type();
     let symbol_upper = symbol.to_uppercase();
-
-    let market_subpath = match market_type {
-        MarketKind::Spot => format!("data/spot/daily/aggTrades/{symbol_upper}"),
-        MarketKind::LinearPerps => {
-            format!("data/futures/um/daily/aggTrades/{symbol_upper}")
-        }
-        MarketKind::InversePerps => {
-            format!("data/futures/cm/daily/aggTrades/{symbol_upper}")
-        }
-    };
-
+    let market_subpath = raw_trade_subpath(&ticker_info);
     let base_path = base_path.join(&market_subpath);
 
     std::fs::create_dir_all(&base_path)
         .map_err(|e| AdapterError::ParseError(format!("Failed to create directories: {e}")))?;
 
-    let bin_file_name = format!(
-        "{}-aggTrades-{}.bin",
-        symbol.to_uppercase(),
-        date.format("%Y-%m-%d"),
-    );
+    let bin_file_name = format!("{symbol_upper}-aggTrades-{}.bin", date.format("%Y-%m-%d"));
     let base_bin_path = base_path.join(&bin_file_name);
 
     if USE_BINARY_CACHE && base_bin_path.exists() {

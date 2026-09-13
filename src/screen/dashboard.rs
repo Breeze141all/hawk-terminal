@@ -1558,13 +1558,30 @@ pub fn fetch_trades_batched(
 ) -> impl Straw<(), Vec<Trade>, AdapterError> {
     sipper(async move |mut progress| {
         let mut latest_trade_t = from_time;
+        let today_midnight = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        let mut intraday_batch_count = 0;
 
         while latest_trade_t < to_time {
             match binance::fetch_trades(ticker_info, latest_trade_t, data_path.clone()).await {
                 Ok((batch, next_trade_t)) => {
-                    let has_trades = !batch.is_empty();
-                    if has_trades {
+                    let batch_len = batch.len();
+                    if batch_len > 0 {
                         let () = progress.send(batch).await;
+                    }
+
+                    if latest_trade_t >= today_midnight {
+                        intraday_batch_count += 1;
+                        // Limit intraday REST trade polling to 5 batches (5000 trades) to avoid rate limits
+                        // Live websocket stream handles incoming trades in real time.
+                        if intraday_batch_count >= 5 || batch_len < 1000 {
+                            break;
+                        }
                     }
 
                     if next_trade_t <= latest_trade_t {

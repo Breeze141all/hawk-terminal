@@ -518,10 +518,7 @@ impl KlineChart {
         }
 
         // priority 2, trades fetch (Footprint only)
-        if !self.is_fetching_trades()
-            && matches!(self.kind, KlineChartKind::Footprint { .. })
-            && exchange::fetcher::is_trade_fetch_enabled()
-        {
+        if matches!(self.kind, KlineChartKind::Footprint { .. }) {
             let mut trade_fetch_range = None;
             let mut needs_invalidation = false;
 
@@ -531,6 +528,7 @@ impl KlineChart {
             {
                 let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
                 let base_data_path = data::data_path(None);
+                let binance_data_path = data::data_path(Some("market_data/binance/"));
                 let interval = timeseries.interval;
                 let step = self.chart.tick_size;
 
@@ -557,6 +555,20 @@ impl KlineChart {
                         {
                             timeseries.insert_preaggregated_footprint(dps);
                             loaded_any = true;
+                        } else if let Some(trades) =
+                            exchange::adapter::binance::load_raw_trades_from_cache(
+                                &binance_data_path,
+                                &self.ticker_info,
+                                cur_d,
+                            )
+                        {
+                            let dps =
+                                data::aggr::time::aggregate_trades_for_day(&trades, interval, step);
+                            if !dps.is_empty() {
+                                let _ = data::chart::kline::save_daily_footprint(&cache_path, &dps);
+                                timeseries.insert_preaggregated_footprint(dps);
+                                loaded_any = true;
+                            }
                         }
                         match cur_d.succ_opt() {
                             Some(next_d) => cur_d = next_d,
@@ -578,7 +590,10 @@ impl KlineChart {
                     }
                 }
 
-                if fetch_from < fetch_to {
+                if fetch_from < fetch_to
+                    && !self.is_fetching_trades()
+                    && exchange::fetcher::is_trade_fetch_enabled()
+                {
                     trade_fetch_range = Some((fetch_from, fetch_to));
                 }
             }
