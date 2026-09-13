@@ -1162,6 +1162,7 @@ dependencies = [
  "flowsurface-exchange",
  "iced_core",
  "log",
+ "lz4_flex",
  "open",
  "palette",
  "regex",

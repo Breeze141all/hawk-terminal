@@ -1362,7 +1362,7 @@ pub async fn fetch_trades(
                     .unwrap_or(next_day_start);
                 Ok((trades, next_from))
             } else {
-                Ok((Vec::new(), next_day_start))
+                Err(e)
             }
         }
     }
@@ -1499,14 +1499,15 @@ pub async fn get_hist_trades(
 ) -> Result<Vec<Trade>, AdapterError> {
     let ticker = ticker_info.ticker;
     let (symbol, market_type) = ticker.to_full_symbol_and_type();
+    let symbol_upper = symbol.to_uppercase();
 
     let market_subpath = match market_type {
-        MarketKind::Spot => format!("data/spot/daily/aggTrades/{symbol}"),
+        MarketKind::Spot => format!("data/spot/daily/aggTrades/{symbol_upper}"),
         MarketKind::LinearPerps => {
-            format!("data/futures/um/daily/aggTrades/{symbol}")
+            format!("data/futures/um/daily/aggTrades/{symbol_upper}")
         }
         MarketKind::InversePerps => {
-            format!("data/futures/cm/daily/aggTrades/{symbol}")
+            format!("data/futures/cm/daily/aggTrades/{symbol_upper}")
         }
     };
 

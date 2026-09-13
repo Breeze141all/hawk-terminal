@@ -1,9 +1,10 @@
 use exchange::{
-    Kline, Trade,
+    Kline, Timeframe, Trade,
     util::{Price, PriceStep},
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use super::tpo::{SessionCluster, SessionPeriod};
 use crate::aggr::time::DataPoint;
@@ -786,6 +787,298 @@ impl NPoc {
     }
 }
 
+pub const FOOTPRINT_CACHE_MAGIC: &[u8; 4] = b"FPCB";
+
+pub fn encode_footprint_datapoints(datapoints: &[(u64, KlineDataPoint)]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    raw.extend_from_slice(FOOTPRINT_CACHE_MAGIC);
+    raw.extend_from_slice(&1u16.to_le_bytes());
+    raw.extend_from_slice(&(datapoints.len() as u32).to_le_bytes());
+
+    for (timestamp, dp) in datapoints {
+        raw.extend_from_slice(&timestamp.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.time.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.open.units.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.high.units.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.low.units.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.close.units.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.volume.0.to_le_bytes());
+        raw.extend_from_slice(&dp.kline.volume.1.to_le_bytes());
+        raw.push(if dp.trades_fetched { 1 } else { 0 });
+
+        raw.extend_from_slice(&dp.footprint.first_trade_t().unwrap_or(0).to_le_bytes());
+        raw.extend_from_slice(&dp.footprint.last_trade_t().unwrap_or(0).to_le_bytes());
+
+        if let Some(poc) = &dp.footprint.poc {
+            raw.push(1);
+            raw.extend_from_slice(&poc.price.units.to_le_bytes());
+            raw.extend_from_slice(&poc.volume.to_le_bytes());
+            match poc.status {
+                NPoc::None => {
+                    raw.push(0);
+                    raw.extend_from_slice(&0u64.to_le_bytes());
+                }
+                NPoc::Naked => {
+                    raw.push(1);
+                    raw.extend_from_slice(&0u64.to_le_bytes());
+                }
+                NPoc::Filled { at } => {
+                    raw.push(2);
+                    raw.extend_from_slice(&at.to_le_bytes());
+                }
+            }
+        } else {
+            raw.push(0);
+        }
+
+        let num_clusters = dp.footprint.trades.len();
+        raw.extend_from_slice(&(num_clusters as u32).to_le_bytes());
+
+        for (price, group) in &dp.footprint.trades {
+            raw.extend_from_slice(&price.units.to_le_bytes());
+            raw.extend_from_slice(&group.buy_qty.to_le_bytes());
+            raw.extend_from_slice(&group.sell_qty.to_le_bytes());
+            raw.extend_from_slice(&group.first_time.to_le_bytes());
+            raw.extend_from_slice(&group.last_time.to_le_bytes());
+            raw.extend_from_slice(&(group.buy_count as u32).to_le_bytes());
+            raw.extend_from_slice(&(group.sell_count as u32).to_le_bytes());
+        }
+    }
+
+    lz4_flex::compress_prepend_size(&raw)
+}
+
+pub fn decode_footprint_datapoints(
+    compressed: &[u8],
+) -> Result<Vec<(u64, KlineDataPoint)>, String> {
+    let decompressed = lz4_flex::decompress_size_prepended(compressed)
+        .map_err(|e| format!("Decompress footprint cache failed: {e}"))?;
+
+    if decompressed.len() < 10 {
+        return Err("Footprint cache data too short".into());
+    }
+
+    if &decompressed[0..4] != FOOTPRINT_CACHE_MAGIC {
+        return Err("Footprint cache magic mismatch".into());
+    }
+
+    let _version = u16::from_le_bytes(decompressed[4..6].try_into().unwrap());
+    let count = u32::from_le_bytes(decompressed[6..10].try_into().unwrap()) as usize;
+
+    let mut cursor = 10;
+    let mut datapoints = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        if cursor + 8 + 8 + 8 + 8 + 8 + 8 + 4 + 4 + 1 + 8 + 8 + 1 > decompressed.len() {
+            return Err("Unexpected EOF in candle header".into());
+        }
+
+        let timestamp = u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let kline_time = u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let open_units = i64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let high_units = i64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let low_units = i64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let close_units = i64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let vol_buy = f32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        let vol_sell = f32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap());
+        cursor += 4;
+        let trades_fetched = decompressed[cursor] != 0;
+        cursor += 1;
+
+        let first_t = u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+        let last_t = u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+        cursor += 8;
+
+        let has_poc = decompressed[cursor] != 0;
+        cursor += 1;
+
+        let poc = if has_poc {
+            if cursor + 8 + 4 + 1 + 8 > decompressed.len() {
+                return Err("Unexpected EOF in POC".into());
+            }
+            let poc_price_units =
+                i64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let poc_volume =
+                f32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            let npoc_tag = decompressed[cursor];
+            cursor += 1;
+            let npoc_filled_at =
+                u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+
+            let status = match npoc_tag {
+                1 => NPoc::Naked,
+                2 => NPoc::Filled { at: npoc_filled_at },
+                _ => NPoc::None,
+            };
+
+            Some(PointOfControl {
+                price: Price {
+                    units: poc_price_units,
+                },
+                volume: poc_volume,
+                status,
+            })
+        } else {
+            None
+        };
+
+        if cursor + 4 > decompressed.len() {
+            return Err("Unexpected EOF in clusters count".into());
+        }
+        let clusters_count =
+            u32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap()) as usize;
+        cursor += 4;
+
+        let mut trades_map = FxHashMap::default();
+        trades_map.reserve(clusters_count);
+
+        for _ in 0..clusters_count {
+            if cursor + 8 + 4 + 4 + 8 + 8 + 4 + 4 > decompressed.len() {
+                return Err("Unexpected EOF in cluster entry".into());
+            }
+            let price_units =
+                i64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let buy_qty = f32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            let sell_qty = f32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap());
+            cursor += 4;
+            let first_time =
+                u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let last_time =
+                u64::from_le_bytes(decompressed[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let buy_count =
+                u32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            let sell_count =
+                u32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+
+            trades_map.insert(
+                Price { units: price_units },
+                GroupedTrades {
+                    buy_qty,
+                    sell_qty,
+                    first_time,
+                    last_time,
+                    buy_count,
+                    sell_count,
+                },
+            );
+        }
+
+        let footprint = KlineTrades {
+            trades: trades_map,
+            poc,
+            cached_first_time: if first_t == 0 { None } else { Some(first_t) },
+            cached_last_time: if last_t == 0 { None } else { Some(last_t) },
+        };
+
+        let kline = Kline {
+            time: kline_time,
+            open: Price { units: open_units },
+            high: Price { units: high_units },
+            low: Price { units: low_units },
+            close: Price { units: close_units },
+            volume: (vol_buy, vol_sell),
+        };
+
+        datapoints.push((
+            timestamp,
+            KlineDataPoint {
+                kline,
+                footprint,
+                trades_fetched,
+            },
+        ));
+    }
+
+    Ok(datapoints)
+}
+
+pub fn footprint_cache_path(
+    base_data_path: &Path,
+    symbol: &str,
+    timeframe: Timeframe,
+    step: PriceStep,
+    date: chrono::NaiveDate,
+) -> PathBuf {
+    let symbol_upper = symbol.to_uppercase();
+    let timeframe_str = timeframe.to_string();
+    let step_units = step.units;
+    let file_name = format!("{symbol_upper}-fp-{}.bin", date.format("%Y-%m-%d"));
+    base_data_path
+        .join("footprint")
+        .join(&symbol_upper)
+        .join(&timeframe_str)
+        .join(step_units.to_string())
+        .join(file_name)
+}
+
+pub fn load_daily_footprint(path: &Path) -> Option<Vec<(u64, KlineDataPoint)>> {
+    if !path.exists() {
+        return None;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => match decode_footprint_datapoints(&bytes) {
+            Ok(dps) => Some(dps),
+            Err(e) => {
+                log::warn!("Corrupted footprint cache {:?}: {}, removing", path, e);
+                let _ = std::fs::remove_file(path);
+                None
+            }
+        },
+        Err(e) => {
+            log::warn!("Failed to read footprint cache {:?}: {}", path, e);
+            None
+        }
+    }
+}
+
+pub fn save_daily_footprint(
+    path: &Path,
+    datapoints: &[(u64, KlineDataPoint)],
+) -> Result<(), std::io::Error> {
+    if datapoints.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let encoded = encode_footprint_datapoints(datapoints);
+    let temp_name = format!(
+        "tmp.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let temp_path = path.with_extension(temp_name);
+    std::fs::write(&temp_path, &encoded)?;
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Err(e) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,5 +1174,95 @@ mod tests {
         let json = serde_json::to_string(&footprint).unwrap();
         let deserialized: KlineChartKind = serde_json::from_str(&json).unwrap();
         assert_eq!(footprint, deserialized);
+    }
+
+    #[test]
+    fn test_footprint_datapoints_binary_roundtrip() {
+        let mut dp = KlineDataPoint {
+            kline: Kline {
+                time: 1726210800000,
+                open: Price {
+                    units: 58000_00000000,
+                },
+                high: Price {
+                    units: 58500_00000000,
+                },
+                low: Price {
+                    units: 57900_00000000,
+                },
+                close: Price {
+                    units: 58300_00000000,
+                },
+                volume: (15.5, 12.3),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: true,
+        };
+
+        dp.footprint.add_trade_to_nearest_bin(
+            &Trade {
+                time: 1726210800100,
+                is_sell: false,
+                price: Price {
+                    units: 58000_00000000,
+                },
+                qty: 10.0,
+            },
+            PriceStep {
+                units: 100_00000000,
+            },
+        );
+
+        dp.footprint.add_trade_to_nearest_bin(
+            &Trade {
+                time: 1726210800200,
+                is_sell: true,
+                price: Price {
+                    units: 58100_00000000,
+                },
+                qty: 5.5,
+            },
+            PriceStep {
+                units: 100_00000000,
+            },
+        );
+
+        dp.calculate_poc();
+        dp.set_poc_status(NPoc::Filled { at: 1726214400000 });
+
+        let original = vec![(1726210800000, dp)];
+        let encoded = encode_footprint_datapoints(&original);
+        let decoded = decode_footprint_datapoints(&encoded).expect("decode failed");
+
+        assert_eq!(decoded.len(), original.len());
+        let (t_orig, dp_orig) = &original[0];
+        let (t_dec, dp_dec) = &decoded[0];
+
+        assert_eq!(t_orig, t_dec);
+        assert_eq!(dp_orig.kline.time, dp_dec.kline.time);
+        assert_eq!(dp_orig.kline.open.units, dp_dec.kline.open.units);
+        assert_eq!(dp_orig.kline.high.units, dp_dec.kline.high.units);
+        assert_eq!(dp_orig.kline.low.units, dp_dec.kline.low.units);
+        assert_eq!(dp_orig.kline.close.units, dp_dec.kline.close.units);
+        assert_eq!(dp_orig.kline.volume, dp_dec.kline.volume);
+        assert_eq!(dp_orig.trades_fetched, dp_dec.trades_fetched);
+
+        let poc_orig = dp_orig.footprint.poc.as_ref().unwrap();
+        let poc_dec = dp_dec.footprint.poc.as_ref().unwrap();
+        assert_eq!(poc_orig.price.units, poc_dec.price.units);
+        assert_eq!(poc_orig.volume, poc_dec.volume);
+        assert_eq!(poc_orig.status, poc_dec.status);
+
+        assert_eq!(
+            dp_orig.footprint.trades.len(),
+            dp_dec.footprint.trades.len()
+        );
+        for (price, group_orig) in &dp_orig.footprint.trades {
+            let group_dec = dp_dec.footprint.trades.get(price).expect("price missing");
+            assert_eq!(group_orig.buy_qty, group_dec.buy_qty);
+            assert_eq!(group_orig.sell_qty, group_dec.sell_qty);
+            assert_eq!(group_orig.buy_count, group_dec.buy_count);
+            assert_eq!(group_orig.sell_count, group_dec.sell_count);
+        }
     }
 }

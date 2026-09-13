@@ -274,6 +274,21 @@ impl TimeSeries<KlineDataPoint> {
         }
     }
 
+    pub fn insert_preaggregated_footprint(&mut self, dps: Vec<(u64, KlineDataPoint)>) {
+        if dps.is_empty() {
+            return;
+        }
+        for (time, new_dp) in dps {
+            if let Some(existing) = self.datapoints.get_mut(&time) {
+                existing.footprint = new_dp.footprint;
+                existing.trades_fetched = true;
+            } else {
+                self.datapoints.insert(time, new_dp);
+            }
+        }
+        self.update_poc_status();
+    }
+
     pub fn mark_trades_fetched(&mut self, from_time: u64, to_time: u64) {
         if from_time > to_time {
             return;
@@ -338,7 +353,10 @@ impl TimeSeries<KlineDataPoint> {
 
     pub fn change_tick_size(&mut self, tick_size: f32, raw_trades: &[Trade]) {
         self.tick_size = PriceStep::from_f32(tick_size);
-        self.clear_trades();
+        for dp in self.datapoints.values_mut() {
+            dp.clear_trades();
+            dp.trades_fetched = false;
+        }
 
         if !raw_trades.is_empty() {
             self.insert_trades_existing_buckets(raw_trades);
@@ -552,6 +570,46 @@ impl TimeSeries<KlineDataPoint> {
 
         max_cluster_qty
     }
+}
+
+pub fn aggregate_trades_for_day(
+    trades: &[Trade],
+    interval: Timeframe,
+    step: PriceStep,
+) -> Vec<(u64, KlineDataPoint)> {
+    if trades.is_empty() {
+        return Vec::new();
+    }
+    let interval_ms = interval.to_milliseconds();
+    if interval_ms == 0 {
+        return Vec::new();
+    }
+
+    let mut map: BTreeMap<u64, KlineDataPoint> = BTreeMap::new();
+
+    for trade in trades {
+        let rounded_time = (trade.time / interval_ms) * interval_ms;
+        let entry = map.entry(rounded_time).or_insert_with(|| KlineDataPoint {
+            kline: Kline {
+                time: rounded_time,
+                open: trade.price,
+                high: trade.price,
+                low: trade.price,
+                close: trade.price,
+                volume: (0.0, 0.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: true,
+        });
+
+        entry.add_trade(trade, step);
+    }
+
+    for dp in map.values_mut() {
+        dp.calculate_poc();
+    }
+
+    map.into_iter().collect()
 }
 
 impl TimeSeries<HeatmapDataPoint> {
@@ -883,5 +941,56 @@ mod tests {
         // If user scrolls to past range 0..400_000, it MUST suggest fetching 0..400_000
         let suggested = ts.suggest_trade_fetch_range(0, 400_000);
         assert_eq!(suggested, Some((0, 400_000)));
+    }
+
+    #[test]
+    fn test_daily_footprint_cache_integration() {
+        let step = PriceStep::from_f32(10.0);
+        let trades = vec![
+            Trade {
+                time: 1726210800000,
+                price: Price::from_f32(58000.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: 1726210805000,
+                price: Price::from_f32(58010.0),
+                qty: 2.5,
+                is_sell: true,
+            },
+        ];
+
+        let dps = aggregate_trades_for_day(&trades, Timeframe::H1, step);
+        assert_eq!(dps.len(), 1);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_fp_cache_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let fp_file = temp_dir.join("BTCUSDT-fp-2026-09-12.bin");
+
+        crate::chart::kline::save_daily_footprint(&fp_file, &dps).expect("save failed");
+        assert!(fp_file.exists());
+
+        let loaded = crate::chart::kline::load_daily_footprint(&fp_file).expect("load failed");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0, dps[0].0);
+        assert_eq!(loaded[0].1.kline.open, dps[0].1.kline.open);
+        assert_eq!(loaded[0].1.kline.close, dps[0].1.kline.close);
+        assert_eq!(
+            loaded[0].1.footprint.trades.len(),
+            dps[0].1.footprint.trades.len()
+        );
+
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::H1, step, &[]);
+        ts.insert_preaggregated_footprint(loaded);
+        assert_eq!(ts.datapoints.len(), 1);
+        assert!(ts.datapoints.values().next().unwrap().trades_fetched);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

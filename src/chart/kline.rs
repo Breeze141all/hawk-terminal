@@ -17,7 +17,7 @@ use data::chart::{
 use data::util::{abbr_large_numbers, count_decimals};
 use exchange::util::{Price, PriceStep};
 use exchange::{
-    Kline, OpenInterest as OIData, TickerInfo, Trade,
+    Kline, OpenInterest as OIData, TickerInfo, Timeframe, Trade,
     fetcher::{FetchRange, RequestHandler},
 };
 
@@ -239,6 +239,7 @@ impl TpoCache {
 }
 
 pub struct KlineChart {
+    pub ticker_info: TickerInfo,
     chart: ViewState,
     data_source: PlotData<KlineDataPoint>,
     raw_trades: Vec<Trade>,
@@ -364,6 +365,7 @@ impl KlineChart {
                 }
 
                 KlineChart {
+                    ticker_info,
                     chart,
                     data_source,
                     raw_trades,
@@ -435,6 +437,7 @@ impl KlineChart {
                     LiquidationHeatmap::new(LiquidationHeatmapConfig::default());
 
                 KlineChart {
+                    ticker_info,
                     chart,
                     data_source,
                     raw_trades,
@@ -483,82 +486,151 @@ impl KlineChart {
     }
 
     fn missing_data_task(&mut self) -> Option<Action> {
-        match &self.data_source {
-            PlotData::TimeBased(timeseries) => {
-                let timeframe_ms = timeseries.interval.to_milliseconds();
+        let (timeframe_ms, is_empty, kline_range) = match &self.data_source {
+            PlotData::TimeBased(ts) => (
+                ts.interval.to_milliseconds(),
+                ts.datapoints.is_empty(),
+                ts.timerange(),
+            ),
+            PlotData::TickBased(_) => return None,
+        };
 
-                if timeseries.datapoints.is_empty() || self.chart.latest_x == 0 {
-                    let latest = chrono::Utc::now().timestamp_millis() as u64;
-                    let earliest = latest.saturating_sub(450 * timeframe_ms);
+        if is_empty || self.chart.latest_x == 0 {
+            let latest = chrono::Utc::now().timestamp_millis() as u64;
+            let earliest = latest.saturating_sub(450 * timeframe_ms);
 
-                    let range = FetchRange::Kline(earliest, latest);
-                    return request_fetch(&mut self.request_handler, range);
-                }
+            let range = FetchRange::Kline(earliest, latest);
+            return request_fetch(&mut self.request_handler, range);
+        }
 
-                let (visible_earliest, visible_latest) = self.visible_timerange()?;
-                let (kline_earliest, kline_latest) = timeseries.timerange();
-                let earliest = visible_earliest
-                    .saturating_sub(visible_latest.saturating_sub(visible_earliest));
+        let (visible_earliest, visible_latest) = self.visible_timerange()?;
+        let (kline_earliest, kline_latest) = kline_range;
+        let earliest =
+            visible_earliest.saturating_sub(visible_latest.saturating_sub(visible_earliest));
 
-                // priority 1, basic kline data fetch
-                if visible_earliest < kline_earliest && visible_earliest > 0 && kline_earliest > 0 {
-                    let range = FetchRange::Kline(earliest, kline_earliest);
+        // priority 1, basic kline data fetch
+        if visible_earliest < kline_earliest && visible_earliest > 0 && kline_earliest > 0 {
+            let range = FetchRange::Kline(earliest, kline_earliest);
 
-                    if let Some(action) = request_fetch(&mut self.request_handler, range) {
-                        return Some(action);
+            if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                return Some(action);
+            }
+        }
+
+        // priority 2, trades fetch (Footprint only)
+        if !self.is_fetching_trades()
+            && matches!(self.kind, KlineChartKind::Footprint { .. })
+            && exchange::fetcher::is_trade_fetch_enabled()
+        {
+            let mut trade_fetch_range = None;
+            let mut needs_invalidation = false;
+
+            if let PlotData::TimeBased(ref mut timeseries) = self.data_source
+                && let Some((mut fetch_from, mut fetch_to)) =
+                    timeseries.suggest_trade_fetch_range(visible_earliest, visible_latest)
+            {
+                let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
+                let base_data_path = data::data_path(None);
+                let interval = timeseries.interval;
+                let step = self.chart.tick_size;
+
+                let from_d = chrono::DateTime::from_timestamp_millis(fetch_from as i64)
+                    .map(|dt| dt.date_naive());
+                let to_d = chrono::DateTime::from_timestamp_millis(fetch_to as i64)
+                    .map(|dt| dt.date_naive());
+
+                if let (Some(start_d), Some(end_d)) = (from_d, to_d) {
+                    let mut cur_d = start_d;
+                    let mut loaded_any = false;
+                    let today = chrono::Utc::now().date_naive();
+
+                    while cur_d <= end_d && cur_d < today {
+                        let cache_path = data::chart::kline::footprint_cache_path(
+                            &base_data_path,
+                            &symbol,
+                            interval,
+                            step,
+                            cur_d,
+                        );
+                        if cache_path.exists()
+                            && let Some(dps) = data::chart::kline::load_daily_footprint(&cache_path)
+                        {
+                            timeseries.insert_preaggregated_footprint(dps);
+                            loaded_any = true;
+                        }
+                        match cur_d.succ_opt() {
+                            Some(next_d) => cur_d = next_d,
+                            None => break,
+                        }
+                    }
+
+                    if loaded_any {
+                        needs_invalidation = true;
+                        if let Some((new_from, new_to)) =
+                            timeseries.suggest_trade_fetch_range(visible_earliest, visible_latest)
+                        {
+                            fetch_from = new_from;
+                            fetch_to = new_to;
+                        } else {
+                            fetch_from = 0;
+                            fetch_to = 0;
+                        }
                     }
                 }
 
-                // priority 2, trades fetch (Footprint only)
-                if !self.is_fetching_trades()
-                    && matches!(self.kind, KlineChartKind::Footprint { .. })
-                    && exchange::fetcher::is_trade_fetch_enabled()
-                    && let Some((fetch_from, fetch_to)) =
-                        timeseries.suggest_trade_fetch_range(visible_earliest, visible_latest)
-                {
-                    let range = FetchRange::Trades(fetch_from, fetch_to);
-                    if let Some(action) = request_fetch(&mut self.request_handler, range) {
-                        self.fetching_trades.0 = true;
-                        return Some(action);
-                    }
-                }
-
-                // priority 3, Open Interest data
-                let ctx = indicator::kline::FetchCtx {
-                    main_chart: &self.chart,
-                    timeframe: timeseries.interval,
-                    visible_earliest,
-                    kline_latest,
-                    prefetch_earliest: earliest,
-                };
-                for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
-                    if let Some(range) = indi.fetch_range(&ctx)
-                        && let Some(action) = request_fetch(&mut self.request_handler, range)
-                    {
-                        return Some(action);
-                    }
-                }
-
-                // priority 4, missing klines & integrity check
-                if let Some(missing_keys) =
-                    timeseries.check_kline_integrity(kline_earliest, kline_latest, timeframe_ms)
-                {
-                    let latest =
-                        missing_keys.iter().max().unwrap_or(&visible_latest) + timeframe_ms;
-                    let earliest = missing_keys
-                        .iter()
-                        .min()
-                        .unwrap_or(&visible_earliest)
-                        .saturating_sub(timeframe_ms);
-
-                    let range = FetchRange::Kline(earliest, latest);
-                    if let Some(action) = request_fetch(&mut self.request_handler, range) {
-                        return Some(action);
-                    }
+                if fetch_from < fetch_to {
+                    trade_fetch_range = Some((fetch_from, fetch_to));
                 }
             }
-            PlotData::TickBased(_) => {
-                // TODO: implement trade fetch
+
+            if needs_invalidation {
+                self.invalidate(None);
+            }
+
+            if let Some((fetch_from, fetch_to)) = trade_fetch_range {
+                let range = FetchRange::Trades(fetch_from, fetch_to);
+                if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                    self.fetching_trades.0 = true;
+                    return Some(action);
+                }
+            }
+        }
+
+        // priority 3, Open Interest data
+        let timeframe = match &self.data_source {
+            PlotData::TimeBased(ts) => ts.interval,
+            PlotData::TickBased(_) => return None,
+        };
+        let ctx = indicator::kline::FetchCtx {
+            main_chart: &self.chart,
+            timeframe,
+            visible_earliest,
+            kline_latest,
+            prefetch_earliest: earliest,
+        };
+        for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
+            if let Some(range) = indi.fetch_range(&ctx)
+                && let Some(action) = request_fetch(&mut self.request_handler, range)
+            {
+                return Some(action);
+            }
+        }
+
+        // priority 4, missing klines & integrity check
+        if let PlotData::TimeBased(ref timeseries) = self.data_source
+            && let Some(missing_keys) =
+                timeseries.check_kline_integrity(kline_earliest, kline_latest, timeframe_ms)
+        {
+            let latest = missing_keys.iter().max().unwrap_or(&visible_latest) + timeframe_ms;
+            let earliest = missing_keys
+                .iter()
+                .min()
+                .unwrap_or(&visible_earliest)
+                .saturating_sub(timeframe_ms);
+
+            let range = FetchRange::Kline(earliest, latest);
+            if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                return Some(action);
             }
         }
 
@@ -608,6 +680,10 @@ impl KlineChart {
 
     pub fn tick_size(&self) -> f32 {
         self.chart.tick_size.to_f32_lossy()
+    }
+
+    pub fn ticker_info(&self) -> TickerInfo {
+        self.ticker_info
     }
 
     pub fn study_configurator(&self) -> &study::Configurator<FootprintStudy> {
@@ -745,6 +821,7 @@ impl KlineChart {
             .filter_map(Option::as_mut)
             .for_each(|indi| indi.on_ticksize_change(&self.data_source));
 
+        self.reset_request_handler();
         self.invalidate(None);
     }
 
@@ -930,6 +1007,103 @@ impl KlineChart {
                 }
                 PlotData::TimeBased(ref mut timeseries) => {
                     timeseries.insert_trades_existing_buckets(&new_trades);
+
+                    if matches!(self.kind, KlineChartKind::Footprint { .. }) {
+                        let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
+                        let base_data_path = data::data_path(None);
+                        let today = chrono::Utc::now().date_naive();
+                        let interval = timeseries.interval;
+                        let step = self.chart.tick_size;
+
+                        let mut distinct_dates: Vec<chrono::NaiveDate> = Vec::new();
+                        for trade in &new_trades {
+                            if let Some(dt) =
+                                chrono::DateTime::from_timestamp_millis(trade.time as i64)
+                            {
+                                let d = dt.date_naive();
+                                if d < today && !distinct_dates.contains(&d) {
+                                    distinct_dates.push(d);
+                                }
+                            }
+                        }
+
+                        for &date in &distinct_dates {
+                            if let Some(day_start_dt) = date.and_hms_opt(0, 0, 0) {
+                                let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
+                                let day_end = day_start + 86_400_000 - 1;
+                                let dps: Vec<(u64, KlineDataPoint)> = timeseries
+                                    .datapoints
+                                    .range(day_start..=day_end)
+                                    .map(|(&t, dp)| (t, dp.clone()))
+                                    .collect();
+
+                                if !dps.is_empty() {
+                                    let cache_path = data::chart::kline::footprint_cache_path(
+                                        &base_data_path,
+                                        &symbol,
+                                        interval,
+                                        step,
+                                        date,
+                                    );
+                                    let _ =
+                                        data::chart::kline::save_daily_footprint(&cache_path, &dps);
+                                }
+                            }
+                        }
+
+                        if !distinct_dates.is_empty() {
+                            let raw_batch = new_trades.clone();
+                            let base_path_bg = base_data_path.clone();
+                            let symbol_bg = symbol.clone();
+                            let min_tick_f = self.ticker_info.min_ticksize.as_f32();
+                            let min_tick = if min_tick_f > 0.0 { min_tick_f } else { 0.1 };
+
+                            std::thread::spawn(move || {
+                                for &date in &distinct_dates {
+                                    if let Some(day_start_dt) = date.and_hms_opt(0, 0, 0) {
+                                        let day_start =
+                                            day_start_dt.and_utc().timestamp_millis() as u64;
+                                        let day_end = day_start + 86_400_000 - 1;
+                                        let day_trades: Vec<Trade> = raw_batch
+                                            .iter()
+                                            .filter(|t| t.time >= day_start && t.time <= day_end)
+                                            .copied()
+                                            .collect();
+
+                                        if day_trades.is_empty() {
+                                            continue;
+                                        }
+
+                                        for tf in [Timeframe::M15, Timeframe::H1, Timeframe::H4] {
+                                            for mult in [10, 25, 50, 100, 200, 500] {
+                                                let target_step =
+                                                    PriceStep::from_f32(min_tick * mult as f32);
+                                                let path = data::chart::kline::footprint_cache_path(
+                                                    &base_path_bg,
+                                                    &symbol_bg,
+                                                    tf,
+                                                    target_step,
+                                                    date,
+                                                );
+                                                if !path.exists() {
+                                                    let dps =
+                                                        data::aggr::time::aggregate_trades_for_day(
+                                                            &day_trades,
+                                                            tf,
+                                                            target_step,
+                                                        );
+                                                    let _ =
+                                                        data::chart::kline::save_daily_footprint(
+                                                            &path, &dps,
+                                                        );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
 
@@ -944,6 +1118,13 @@ impl KlineChart {
                 self.raw_trades.extend(new_trades);
                 self.raw_trades.sort_unstable_by_key(|t| t.time);
             }
+
+            const MAX_RAW_TRADES_IN_RAM: usize = 500_000;
+            if self.raw_trades.len() > MAX_RAW_TRADES_IN_RAM {
+                let excess = self.raw_trades.len() - MAX_RAW_TRADES_IN_RAM;
+                self.raw_trades.drain(..excess);
+            }
+
             self.invalidate(None);
         }
     }

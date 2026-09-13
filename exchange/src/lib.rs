@@ -943,4 +943,25 @@ mod tests {
 
         assert!(!bin_trades.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_get_hist_trades_aug21() {
+        let ticker = Ticker::new("btcusdt", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo {
+            ticker,
+            min_ticksize: util::MinTicksize { power: -1 },
+            min_qty: util::MinQtySize { power: -3 },
+            contract_size: None,
+        };
+        let data_path = std::path::PathBuf::from(
+            r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+        );
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
+        let trades = adapter::binance::get_hist_trades(ticker_info, date, data_path).await;
+        match &trades {
+            Ok(t) => println!("Aug 21 SUCCESS: {} trades", t.len()),
+            Err(e) => println!("Aug 21 ERROR: {:?}", e),
+        }
+        assert!(trades.is_ok());
+    }
 }
