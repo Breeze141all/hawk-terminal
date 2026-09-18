@@ -65,7 +65,8 @@ pub fn decode_trades_binary(compressed_bytes: &[u8]) -> Result<Vec<Trade>, Adapt
     }
 
     let mut trades = Vec::with_capacity(count);
-    for chunk in payload.chunks_exact(TRADE_RECORD_SIZE) {
+    let (chunks, _) = payload.as_chunks::<TRADE_RECORD_SIZE>();
+    for chunk in chunks {
         let time = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
         let price_units = i64::from_le_bytes(chunk[8..16].try_into().unwrap());
         let qty = f32::from_le_bytes(chunk[16..20].try_into().unwrap());

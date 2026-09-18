@@ -562,7 +562,7 @@ pub fn connect_kline_stream(
                                     } else {
                                         log::error!(
                                             "Failed to find timeframe: {}, {:?}",
-                                            &de_kline.interval,
+                                            de_kline.interval,
                                             streams
                                         );
                                     }
