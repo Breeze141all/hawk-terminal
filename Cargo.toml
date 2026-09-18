@@ -19,8 +19,8 @@ path = "src/main.rs"
 
 [workspace.package]
 edition = "2024"
-repository = "https://github.com/flowsurface-rs/flowsurface"
-homepage = "https://flowsurface.com"
+repository = "https://github.com/Breeze141all/hawk-terminal"
+homepage = "https://breeze141all.github.io/hawk-site/"
 
 [workspace]
 members = [ "data", "exchange"]
