@@ -1,4 +1,4 @@
-# Flowsurface
+# Hawk Terminal
 
 Desktop-приложение для крипто-чартинга. Поддерживает Binance, Bybit, Hyperliquid, OKX.
 
@@ -27,8 +27,8 @@ xcode-select --install
 ### 3. Клонируй и собери
 
 ```bash
-git clone https://github.com/lubluniky/ct-client
-cd ct-client
+git clone https://github.com/lubluniky/hawk-client
+cd hawk-client
 cargo build --release
 ```
 
@@ -40,7 +40,7 @@ cargo build --release
 cargo run --release
 ```
 
-Бинарник также будет лежать в `target/release/flowsurface`.
+Бинарник также будет лежать в `target/release/hawk-terminal`.
 
 ## Что умеет
 

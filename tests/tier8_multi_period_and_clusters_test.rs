@@ -1,12 +1,12 @@
-use flowsurface::data::chart::ViewMode;
-use flowsurface::data::chart::kline::KlineChartKind;
-use flowsurface::exchange::Kline;
-use flowsurface::exchange::util::Price;
-use flowsurface::profile::session::{
+use hawk_terminal::data::chart::ViewMode;
+use hawk_terminal::data::chart::kline::{KlineChartKind, TpoColorScheme, TpoElementColor};
+use hawk_terminal::exchange::Kline;
+use hawk_terminal::exchange::util::Price;
+use hawk_terminal::profile::session::{
     SessionCluster, SessionPeriod, apply_session_clusters, group_candles_by_period,
     merge_adjacent_clusters, period_bounds_utc, split_cluster,
 };
-use flowsurface::profile::tpo::{
+use hawk_terminal::profile::tpo::{
     build_tpo_profile, get_tpo_bracket_continuous, merge_tpo_profiles,
 };
 
@@ -265,6 +265,10 @@ fn test_display_mode_isolation_and_enforcement() {
         period: SessionPeriod::Weekly,
         clusters: Vec::new(),
         split_sessions: Vec::new(),
+        color_scheme: Default::default(),
+        ib_color: Default::default(),
+        poc_color: Default::default(),
+        single_prints_color: Default::default(),
     };
     assert_eq!(combined_kind.view_mode(), ViewMode::Combined);
     assert_eq!(
@@ -286,6 +290,10 @@ fn test_display_mode_isolation_and_enforcement() {
         period: SessionPeriod::Weekly,
         clusters: Vec::new(),
         split_sessions: Vec::new(),
+        color_scheme: Default::default(),
+        ib_color: Default::default(),
+        poc_color: Default::default(),
+        single_prints_color: Default::default(),
     };
     assert_eq!(pure_weekly.view_mode(), ViewMode::TpoOnly);
     assert_eq!(
@@ -305,6 +313,10 @@ fn test_display_mode_isolation_and_enforcement() {
         period: SessionPeriod::CustomDays(4),
         clusters: Vec::new(),
         split_sessions: Vec::new(),
+        color_scheme: Default::default(),
+        ib_color: Default::default(),
+        poc_color: Default::default(),
+        single_prints_color: Default::default(),
     };
     assert_eq!(
         pure_custom4.effective_tpo_period(),
@@ -328,6 +340,10 @@ fn test_workspace_and_pane_config_persistence_roundtrip() {
             SessionCluster::new(vec![1705536000000, 1705622400000, 1705708800000]),
         ],
         split_sessions: vec![1705276800000],
+        color_scheme: Default::default(),
+        ib_color: Default::default(),
+        poc_color: Default::default(),
+        single_prints_color: Default::default(),
     };
 
     let json = serde_json::to_string_pretty(&tpo_kind).expect("Serialize KlineChartKind");
@@ -388,4 +404,126 @@ fn test_view_mode_pure_tpo_alias() {
     let json_pure = "\"PureTpo\"";
     let deserialized: ViewMode = serde_json::from_str(json_pure).expect("Deserialize PureTpo");
     assert_eq!(deserialized, ViewMode::TpoOnly);
+}
+
+#[test]
+fn test_trading_sessions_partitioning() {
+    let day_start = 1705276800000i64; // Mon 00:00:00 UTC
+    let hour = 3_600_000i64;
+
+    // 1. Asia session (00:00 - 08:00 UTC)
+    let (s_asia, e_asia) = period_bounds_utc(day_start + 2 * hour, SessionPeriod::TradingSessions);
+    assert_eq!(s_asia, day_start);
+    assert_eq!(e_asia, day_start + 8 * hour);
+
+    // 2. London session (08:00 - 16:00 UTC)
+    let (s_ldn, e_ldn) = period_bounds_utc(day_start + 10 * hour, SessionPeriod::TradingSessions);
+    assert_eq!(s_ldn, day_start + 8 * hour);
+    assert_eq!(e_ldn, day_start + 16 * hour);
+
+    // 3. New York session (16:00 - 24:00 UTC)
+    let (s_ny, e_ny) = period_bounds_utc(day_start + 20 * hour, SessionPeriod::TradingSessions);
+    assert_eq!(s_ny, day_start + 16 * hour);
+    assert_eq!(e_ny, day_start + 24 * hour);
+
+    // Grouping verification for 24h into 3 sessions
+    let mut candles = Vec::new();
+    for h in 0..24 {
+        candles.push(make_kline(
+            day_start + h * hour,
+            100.0,
+            105.0,
+            95.0,
+            100.0,
+            10.0,
+        ));
+    }
+    let sessions = group_candles_by_period(&candles, SessionPeriod::TradingSessions);
+    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions[0].0, day_start);
+    assert_eq!(sessions[0].1, day_start + 8 * hour);
+    assert_eq!(sessions[0].2.len(), 8);
+    assert_eq!(sessions[1].0, day_start + 8 * hour);
+    assert_eq!(sessions[1].1, day_start + 16 * hour);
+    assert_eq!(sessions[1].2.len(), 8);
+    assert_eq!(sessions[2].0, day_start + 16 * hour);
+    assert_eq!(sessions[2].1, day_start + 24 * hour);
+    assert_eq!(sessions[2].2.len(), 8);
+}
+
+#[test]
+fn test_bracket_indices_chronological_integrity() {
+    let start = 1705276800000i64; // Mon 00:00 UTC
+    let half_hour = 1_800_000i64;
+
+    let mut candles = Vec::new();
+    for slot in 0..100 {
+        let t = start + slot * half_hour;
+        candles.push(make_kline(t, 200.0, 202.0, 198.0, 200.0, 1.0));
+    }
+
+    let profile = build_tpo_profile(&candles, start, start + 7 * 86_400_000, "Week", 1.0);
+    assert!(!profile.bracket_indices.is_empty());
+    let indices = &profile.bracket_indices[&200];
+    assert_eq!(indices.len(), 100);
+    assert_eq!(indices[0], 0);
+    assert_eq!(indices[51], 51);
+    assert_eq!(indices[52], 52); // Index beyond 51 is preserved, not wrapped!
+    assert_eq!(indices[99], 99);
+}
+
+#[test]
+fn test_merged_clusters_bracket_indices() {
+    let start1 = 1705276800000i64; // Day 1
+    let day_ms = 86_400_000i64;
+    let start2 = start1 + day_ms; // Day 2
+
+    let c1 = vec![make_kline(start1, 100.0, 105.0, 95.0, 100.0, 1.0)];
+    let p1 = build_tpo_profile(&c1, start1, start1 + day_ms, "Day1", 1.0);
+
+    let c2 = vec![make_kline(start2, 100.0, 105.0, 95.0, 100.0, 1.0)];
+    let p2 = build_tpo_profile(&c2, start2, start2 + day_ms, "Day2", 1.0);
+
+    let merged = merge_tpo_profiles(&[p1, p2]).expect("Merged profile");
+    let indices = &merged.bracket_indices[&100];
+    assert!(indices.contains(&0)); // Day 1 bracket 0
+    assert!(indices.contains(&48)); // Day 2 bracket 0 is offset by 48 (24h)!
+}
+
+#[test]
+fn test_tpo_color_scheme_serde_and_palette() {
+    let default_scheme: TpoColorScheme =
+        serde_json::from_str("\"Classic\"").expect("Classic scheme");
+    assert_eq!(default_scheme, TpoColorScheme::Classic);
+
+    let theme_scheme: TpoColorScheme = serde_json::from_str("\"Theme\"").expect("Theme scheme");
+    assert_eq!(theme_scheme, TpoColorScheme::Theme);
+
+    let custom_scheme = TpoColorScheme::Custom([255, 128, 64]);
+    let serialized = serde_json::to_string(&custom_scheme).expect("Serialize Custom");
+    let deserialized: TpoColorScheme =
+        serde_json::from_str(&serialized).expect("Deserialize Custom");
+    assert_eq!(deserialized, custom_scheme);
+    assert_eq!(custom_scheme.custom_rgb(), Some([255, 128, 64]));
+}
+
+#[test]
+fn test_tpo_element_colors_serde_and_resolution() {
+    let auto_col: TpoElementColor = serde_json::from_str("\"Auto\"").expect("Auto element color");
+    assert_eq!(auto_col, TpoElementColor::Auto);
+    assert_eq!(auto_col, TpoElementColor::default());
+
+    let theme_col: TpoElementColor =
+        serde_json::from_str("\"Theme\"").expect("Theme element color");
+    assert_eq!(theme_col, TpoElementColor::Theme);
+
+    let red_col = TpoElementColor::Red;
+    assert_eq!(red_col.to_rgb(), Some([235, 75, 75]));
+
+    let custom_col = TpoElementColor::Custom([10, 200, 150]);
+    let serialized = serde_json::to_string(&custom_col).expect("Serialize Custom element color");
+    let deserialized: TpoElementColor =
+        serde_json::from_str(&serialized).expect("Deserialize Custom element color");
+    assert_eq!(deserialized, custom_col);
+    assert_eq!(custom_col.custom_rgb(), Some([10, 200, 150]));
 }

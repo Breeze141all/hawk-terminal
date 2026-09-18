@@ -58,9 +58,42 @@ pub fn setup(is_debug: bool) -> Result<(), Error> {
         .level_for("iced_wgpu", log::LevelFilter::Info)
         .level_for("data", level_filter)
         .level_for("exchange", level_filter)
+        .level_for("hawk_terminal", level_filter)
         .level_for("flowsurface", level_filter)
         .chain(io_sink)
         .apply()?;
+
+    std::panic::set_hook(Box::new(|info| {
+        let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "unknown panic payload"
+        };
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let backtrace = std::backtrace::Backtrace::capture();
+        let panic_msg = format!("Panic at {location}: {payload}\nBacktrace:\n{backtrace}");
+
+        log::error!(target: "panic", "{panic_msg}");
+
+        if let Ok(path) = data::log::path()
+            && let Some(parent) = path.parent()
+        {
+            let crash_log_path = parent.join("hawk-crash.log");
+            let _ = std::fs::write(
+                crash_log_path,
+                format!(
+                    "{}: {}\n",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                    panic_msg
+                ),
+            );
+        }
+    }));
 
     Ok(())
 }
@@ -70,7 +103,7 @@ fn initial_rotation(log_path: &PathBuf) -> io::Result<()> {
 
     let dir = log_path.parent().unwrap_or(&path);
 
-    let previous_log_path = dir.join("flowsurface-previous.log");
+    let previous_log_path = dir.join("hawk-previous.log");
 
     if previous_log_path.exists() {
         fs::remove_file(&previous_log_path)?;

@@ -54,6 +54,7 @@ pub enum Icon {
     DragHandle,
     Folder,
     ExternalLink,
+    Journal,
 }
 
 impl From<Icon> for char {
@@ -90,6 +91,7 @@ impl From<Icon> for char {
             Icon::DragHandle => '\u{E817}',
             Icon::Folder => '\u{F114}',
             Icon::ExternalLink => '\u{F14C}',
+            Icon::Journal => '\u{F0C5}',
         }
     }
 }
@@ -769,4 +771,94 @@ pub fn dashed_line_from_palette(palette: &'_ Extended) -> Stroke<'_> {
             .color
             .scale_alpha(if palette.is_dark { 0.8 } else { 1.0 }),
     )
+}
+
+pub fn journal_panel(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    Style {
+        background: Some(palette.background.base.color.into()),
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: palette.background.strong.color,
+        },
+        ..Default::default()
+    }
+}
+
+pub fn journal_card(theme: &Theme, is_profit: Option<bool>) -> Style {
+    let palette = theme.extended_palette();
+
+    let border_color = match is_profit {
+        Some(true) => palette.success.strong.color.scale_alpha(0.6),
+        Some(false) => palette.danger.strong.color.scale_alpha(0.6),
+        None => palette.background.strong.color,
+    };
+
+    Style {
+        background: Some(palette.background.weak.color.scale_alpha(0.5).into()),
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: border_color,
+        },
+        ..Default::default()
+    }
+}
+
+pub fn journal_stat_box(theme: &Theme) -> Style {
+    let palette = theme.extended_palette();
+
+    Style {
+        background: Some(palette.background.weak.color.scale_alpha(0.35).into()),
+        border: Border {
+            radius: 4.0.into(),
+            width: 1.0,
+            color: palette.background.strong.color,
+        },
+        ..Default::default()
+    }
+}
+
+pub fn journal_badge(theme: &Theme, is_success: bool) -> Style {
+    let palette = theme.extended_palette();
+    let (bg, border) = if is_success {
+        (
+            palette.success.strong.color.scale_alpha(0.2),
+            palette.success.strong.color.scale_alpha(0.8),
+        )
+    } else {
+        (
+            palette.danger.strong.color.scale_alpha(0.2),
+            palette.danger.strong.color.scale_alpha(0.8),
+        )
+    };
+
+    Style {
+        background: Some(bg.into()),
+        border: Border {
+            radius: 3.0.into(),
+            width: 1.0,
+            color: border,
+        },
+        ..Default::default()
+    }
+}
+
+pub fn pnl_text_color(theme: &Theme, pnl: f64) -> iced::Color {
+    let palette = theme.extended_palette();
+    if pnl > 0.0001 {
+        palette.success.base.color
+    } else if pnl < -0.0001 {
+        palette.danger.base.color
+    } else {
+        palette.background.base.text
+    }
+}
+
+pub fn pnl_text(theme: &Theme, pnl: f64) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(pnl_text_color(theme, pnl)),
+    }
 }

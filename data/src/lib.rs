@@ -2,6 +2,7 @@ pub mod aggr;
 pub mod audio;
 pub mod chart;
 pub mod config;
+pub mod journal;
 pub mod layout;
 pub mod log;
 pub mod panel;
@@ -14,15 +15,64 @@ use std::path::PathBuf;
 
 pub use audio::AudioStream;
 pub use config::ScaleFactor;
+pub use config::bundle::{
+    BundleMetadata, BundlePayload, BundleValidationError, ConfigBundle, ExportType, WorkspaceBundle,
+};
 pub use config::sidebar::{self, Sidebar};
 pub use config::state::{Layouts, State};
 pub use config::theme::Theme;
 pub use config::timezone::UserTimezone;
+pub use journal::{
+    JournalEntry, JournalMode, JournalStats, TradeSide, TradeStatus, load_journal, save_journal,
+};
 
 use ::log::{error, info, warn};
 pub use layout::{Dashboard, Layout, Pane};
 
 pub const SAVED_STATE_PATH: &str = "saved-state.json";
+pub const ALERTS_PATH: &str = "alerts.json";
+pub const EXPORTS_DIR: &str = "exports";
+
+pub fn exports_path(file_name: Option<&str>) -> PathBuf {
+    let base = data_path(Some(EXPORTS_DIR));
+    if let Some(file_name) = file_name {
+        base.join(file_name)
+    } else {
+        base
+    }
+}
+
+pub fn save_export_file(json: &str, file_name: &str) -> std::io::Result<PathBuf> {
+    let path = exports_path(Some(file_name));
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = File::create(&path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(path)
+}
+
+pub use chart::alert::AlertStore;
+
+pub fn save_alerts(alerts: &[chart::alert::PriceAlert]) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(alerts)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_json_to_file(&json, ALERTS_PATH)
+}
+
+pub fn load_alerts() -> Vec<chart::alert::PriceAlert> {
+    let path = data_path(Some(ALERTS_PATH));
+    let Ok(mut file) = File::open(&path) else {
+        return Vec::new();
+    };
+    let mut contents = String::new();
+    if file.read_to_string(&mut contents).is_err() {
+        return Vec::new();
+    }
+    serde_json::from_str(&contents).unwrap_or_default()
+}
 
 #[derive(thiserror::Error, Debug, Clone)]
 pub enum InternalError {
@@ -117,15 +167,42 @@ pub fn open_data_folder() -> Result<(), InternalError> {
     }
 }
 
+pub fn open_exports_folder() -> Result<(), InternalError> {
+    let pathbuf = exports_path(None);
+    if !pathbuf.exists() {
+        let _ = std::fs::create_dir_all(&pathbuf);
+    }
+
+    if let Err(err) = open::that(&pathbuf) {
+        Err(InternalError::Layout(format!(
+            "Failed to open exports folder: {:?}, error: {}",
+            pathbuf, err
+        )))
+    } else {
+        info!("Opened exports folder: {:?}", pathbuf);
+        Ok(())
+    }
+}
+
 pub fn data_path(path_name: Option<&str>) -> PathBuf {
-    if let Ok(path) = std::env::var("FLOWSURFACE_DATA_PATH") {
+    if let Ok(path) =
+        std::env::var("HAWK_DATA_PATH").or_else(|_| std::env::var("FLOWSURFACE_DATA_PATH"))
+    {
         PathBuf::from(path)
     } else {
         let data_dir = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        if let Some(path_name) = path_name {
-            data_dir.join("flowsurface").join(path_name)
-        } else {
+        let hawk_dir = data_dir.join("hawk-terminal");
+        let base_dir = if hawk_dir.exists() {
+            hawk_dir
+        } else if data_dir.join("flowsurface").exists() {
             data_dir.join("flowsurface")
+        } else {
+            hawk_dir
+        };
+        if let Some(path_name) = path_name {
+            base_dir.join(path_name)
+        } else {
+            base_dir
         }
     }
 }

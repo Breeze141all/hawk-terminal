@@ -31,11 +31,19 @@ pub enum Message {
     ToggleEditMode(Editing),
     CloneLayout(Uuid),
     Reorder(DragEvent),
+    ExportLayout(Uuid),
+    ExportWorkspace,
+    ImportFromClipboard,
+    OpenExportsFolder,
 }
 
 pub enum Action {
     Select(Uuid),
     Clone(Uuid),
+    ExportLayout(Uuid),
+    ExportWorkspace,
+    ImportFromClipboard,
+    OpenExportsFolder,
 }
 
 pub struct LayoutManager {
@@ -191,6 +199,10 @@ impl LayoutManager {
                 return Some(Action::Clone(id));
             }
             Message::Reorder(event) => column_drag::reorder_vec(&mut self.layouts, &event),
+            Message::ExportLayout(id) => return Some(Action::ExportLayout(id)),
+            Message::ExportWorkspace => return Some(Action::ExportWorkspace),
+            Message::ImportFromClipboard => return Some(Action::ImportFromClipboard),
+            Message::OpenExportsFolder => return Some(Action::OpenExportsFolder),
         }
 
         None
@@ -264,6 +276,7 @@ impl LayoutManager {
                 Editing::Preview => {
                     layout_row = layout_row
                         .push(create_layout_button(layout_id, None))
+                        .push(create_export_button(layout_id))
                         .push(create_clone_button(layout_id))
                         .push(create_rename_button(layout_id));
 
@@ -321,11 +334,37 @@ impl LayoutManager {
         content = content.push(layouts_list);
 
         if self.edit_mode != Editing::None {
+            content = content
+                .push(
+                    button(text("Add layout"))
+                        .style(move |t, s| style::button::transparent(t, s, true))
+                        .width(iced::Length::Fill)
+                        .on_press(Message::AddLayout),
+                )
+                .push(
+                    button(text("Import from Clipboard"))
+                        .style(move |t, s| style::button::transparent(t, s, true))
+                        .width(iced::Length::Fill)
+                        .on_press(Message::ImportFromClipboard),
+                )
+                .push(
+                    button(text("Export Workspace"))
+                        .style(move |t, s| style::button::transparent(t, s, true))
+                        .width(iced::Length::Fill)
+                        .on_press(Message::ExportWorkspace),
+                )
+                .push(
+                    button(text("Open Exports Folder"))
+                        .style(move |t, s| style::button::transparent(t, s, true))
+                        .width(iced::Length::Fill)
+                        .on_press(Message::OpenExportsFolder),
+                );
+        } else {
             content = content.push(
-                button(text("Add layout"))
+                button(text("Import from Clipboard"))
                     .style(move |t, s| style::button::transparent(t, s, true))
                     .width(iced::Length::Fill)
-                    .on_press(Message::AddLayout),
+                    .on_press(Message::ImportFromClipboard),
             );
         };
 
@@ -372,6 +411,19 @@ fn create_clone_button<'a>(layout: &LayoutId) -> Element<'a, Message> {
             Some(Message::CloneLayout(layout.unique)),
         ),
         Some("Clone layout"),
+        TooltipPosition::Top,
+    )
+}
+
+fn create_export_button<'a>(layout: &LayoutId) -> Element<'a, Message> {
+    tooltip(
+        create_icon_button(
+            style::Icon::ExternalLink,
+            12,
+            |theme, status| style::button::layout_name(theme, *status),
+            Some(Message::ExportLayout(layout.unique)),
+        ),
+        Some("Export layout"),
         TooltipPosition::Top,
     )
 }

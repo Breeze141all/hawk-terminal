@@ -176,6 +176,11 @@ impl Price {
         self.to_f32_lossy()
     }
 
+    #[inline]
+    pub fn to_f64(self) -> f64 {
+        (self.units as f64) / 10f64.powi(Self::PRICE_SCALE)
+    }
+
     pub fn round_to_step(self, step: PriceStep) -> Self {
         let unit = step.units;
         if unit <= 1 {

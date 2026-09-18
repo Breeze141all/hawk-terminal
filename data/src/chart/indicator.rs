@@ -19,6 +19,11 @@ pub enum KlineIndicator {
     Vpin,
     Vwap,
     Tpo,
+    RollingVwap,
+    Cvd,
+    BidAskRatio,
+    PositionFlow,
+    LiquidationHeatmap,
 }
 
 impl Indicator for KlineIndicator {
@@ -34,14 +39,18 @@ impl KlineIndicator {
     // Indicator togglers on UI menus depend on these arrays.
     // Every variant needs to be in either SPOT, PERPS or both.
     /// Indicators that can be used with spot market tickers
-    const FOR_SPOT: [KlineIndicator; 4] = [
+    const FOR_SPOT: [KlineIndicator; 8] = [
         KlineIndicator::Volume,
         KlineIndicator::Vpin,
         KlineIndicator::Vwap,
         KlineIndicator::Tpo,
+        KlineIndicator::RollingVwap,
+        KlineIndicator::Cvd,
+        KlineIndicator::BidAskRatio,
+        KlineIndicator::PositionFlow,
     ];
     /// Indicators that can be used with perpetual swap market tickers
-    const FOR_PERPS: [KlineIndicator; 7] = [
+    const FOR_PERPS: [KlineIndicator; 12] = [
         KlineIndicator::Volume,
         KlineIndicator::OpenInterest,
         KlineIndicator::MarketPulse,
@@ -49,12 +58,20 @@ impl KlineIndicator {
         KlineIndicator::Vpin,
         KlineIndicator::Vwap,
         KlineIndicator::Tpo,
+        KlineIndicator::RollingVwap,
+        KlineIndicator::Cvd,
+        KlineIndicator::BidAskRatio,
+        KlineIndicator::PositionFlow,
+        KlineIndicator::LiquidationHeatmap,
     ];
 
     /// Returns true if this indicator requires an independent sub-panel in the layout.
-    /// Overlays like TPO return false because they render directly on the price chart canvas.
+    /// Overlays like TPO and Liquidation Heatmap return false because they render directly on the price chart canvas.
     pub const fn is_panel(&self) -> bool {
-        !matches!(self, KlineIndicator::Tpo)
+        !matches!(
+            self,
+            KlineIndicator::Tpo | KlineIndicator::LiquidationHeatmap
+        )
     }
 }
 
@@ -68,6 +85,11 @@ impl Display for KlineIndicator {
             KlineIndicator::Vpin => write!(f, "VPIN"),
             KlineIndicator::Vwap => write!(f, "VWAP"),
             KlineIndicator::Tpo => write!(f, "TPO Profile"),
+            KlineIndicator::RollingVwap => write!(f, "Rolling VWAP"),
+            KlineIndicator::Cvd => write!(f, "Cumulative Delta"),
+            KlineIndicator::BidAskRatio => write!(f, "Bid/Ask Ratio"),
+            KlineIndicator::PositionFlow => write!(f, "Position Flow"),
+            KlineIndicator::LiquidationHeatmap => write!(f, "Liquidation Heatmap"),
         }
     }
 }
@@ -120,5 +142,31 @@ impl From<KlineIndicator> for UiIndicator {
 impl From<HeatmapIndicator> for UiIndicator {
     fn from(h: HeatmapIndicator) -> Self {
         UiIndicator::Heatmap(h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_liquidation_heatmap_indicator_properties() {
+        assert!(!KlineIndicator::LiquidationHeatmap.is_panel());
+        assert!(
+            KlineIndicator::for_market(MarketKind::LinearPerps)
+                .contains(&KlineIndicator::LiquidationHeatmap)
+        );
+        assert!(
+            KlineIndicator::for_market(MarketKind::InversePerps)
+                .contains(&KlineIndicator::LiquidationHeatmap)
+        );
+        assert!(
+            !KlineIndicator::for_market(MarketKind::Spot)
+                .contains(&KlineIndicator::LiquidationHeatmap)
+        );
+        assert_eq!(
+            KlineIndicator::LiquidationHeatmap.to_string(),
+            "Liquidation Heatmap"
+        );
     }
 }

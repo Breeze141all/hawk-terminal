@@ -1,3 +1,4 @@
+use super::journal::{self, Journal};
 use super::tickers_table::{self, TickersTable};
 use crate::{
     TooltipPosition,
@@ -19,11 +20,15 @@ pub enum Message {
     ToggleSidebarMenu(Option<sidebar::Menu>),
     SetSidebarPosition(sidebar::Position),
     TickersTable(super::tickers_table::Message),
+    Journal(super::journal::Message),
 }
 
 pub struct Sidebar {
     pub state: data::Sidebar,
     pub tickers_table: TickersTable,
+    pub journal: Journal,
+    pub journal_mode: data::JournalMode,
+    pub is_journal_window_open: bool,
 }
 
 pub enum Action {
@@ -32,6 +37,7 @@ pub enum Action {
         Option<data::layout::pane::ContentKind>,
     ),
     ErrorOccurred(data::InternalError),
+    ToggleJournalWindow,
 }
 
 impl Sidebar {
@@ -47,6 +53,9 @@ impl Sidebar {
             Self {
                 state: state.sidebar.clone(),
                 tickers_table,
+                journal: Journal::new(),
+                journal_mode: state.journal_mode,
+                is_journal_window_open: false,
             },
             initial_fetch.map(Message::TickersTable),
         )
@@ -62,6 +71,9 @@ impl Sidebar {
             }
             Message::TickersTable(msg) => {
                 let action = self.tickers_table.update(msg);
+                if self.tickers_table.is_shown {
+                    self.journal.is_shown = false;
+                }
 
                 match action {
                     Some(tickers_table::Action::TickerSelected(ticker_info, content)) => {
@@ -82,6 +94,41 @@ impl Sidebar {
                     None => {}
                 }
             }
+            Message::Journal(msg) => {
+                if let super::journal::Message::ToggleJournal = &msg
+                    && self.journal_mode == data::JournalMode::Extended
+                {
+                    return (Task::none(), Some(Action::ToggleJournalWindow));
+                }
+
+                let action = self.journal.update(msg);
+                if self.journal.is_shown {
+                    self.tickers_table.is_shown = false;
+                }
+
+                match action {
+                    Some(journal::Action::TickerSelected(ticker_str)) => {
+                        let found_ticker =
+                            self.tickers_table
+                                .tickers_info
+                                .iter()
+                                .find_map(|(t, info)| {
+                                    if t.to_string().eq_ignore_ascii_case(&ticker_str) {
+                                        *info
+                                    } else {
+                                        None
+                                    }
+                                });
+                        if let Some(ticker_info) = found_ticker {
+                            return (
+                                Task::none(),
+                                Some(Action::TickerSelected(ticker_info, None)),
+                            );
+                        }
+                    }
+                    None => {}
+                }
+            }
         }
 
         (Task::none(), None)
@@ -97,24 +144,38 @@ impl Sidebar {
         };
 
         let is_table_open = self.tickers_table.is_shown;
+        let is_journal_open = self.journal.is_shown;
 
-        let nav_buttons = self.nav_buttons(is_table_open, audio_volume, tooltip_position);
+        let nav_buttons = self.nav_buttons(
+            is_table_open,
+            is_journal_open,
+            audio_volume,
+            tooltip_position,
+        );
 
-        let tickers_table = if is_table_open {
+        let side_content = if is_table_open {
             column![responsive(move |size| self
                 .tickers_table
                 .view(size)
                 .map(Message::TickersTable))]
             .width(200)
+        } else if is_journal_open {
+            column![responsive(move |size| self
+                .journal
+                .view(size)
+                .map(Message::Journal))]
+            .width(330)
         } else {
             column![]
         };
 
+        let has_panel_open = is_table_open || is_journal_open;
+
         match state.position {
-            sidebar::Position::Left => row![nav_buttons, tickers_table],
-            sidebar::Position::Right => row![tickers_table, nav_buttons],
+            sidebar::Position::Left => row![nav_buttons, side_content],
+            sidebar::Position::Right => row![side_content, nav_buttons],
         }
-        .spacing(if is_table_open { 8 } else { 4 })
+        .spacing(if has_panel_open { 8 } else { 4 })
         .into()
     }
 
@@ -125,6 +186,7 @@ impl Sidebar {
     fn nav_buttons(
         &self,
         is_table_open: bool,
+        is_journal_open: bool,
         audio_volume: Option<f32>,
         tooltip_position: TooltipPosition,
     ) -> iced::widget::Column<'_, Message> {
@@ -171,6 +233,26 @@ impl Sidebar {
             )
         };
 
+        let is_journal_active = match self.journal_mode {
+            data::JournalMode::Disabled => false,
+            data::JournalMode::Basic => is_journal_open,
+            data::JournalMode::Extended => self.is_journal_window_open,
+        };
+
+        let journal_button = {
+            button_with_tooltip(
+                icon_text(Icon::Journal, 14)
+                    .width(24)
+                    .align_x(Alignment::Center),
+                Message::Journal(super::journal::Message::ToggleJournal),
+                Some("Trade Journal"),
+                tooltip_position,
+                move |theme, status| {
+                    crate::style::button::transparent(theme, status, is_journal_active)
+                },
+            )
+        };
+
         let audio_btn = {
             let is_active = self.is_menu_active(sidebar::Menu::Audio);
 
@@ -189,15 +271,33 @@ impl Sidebar {
             )
         };
 
-        column![
-            ticker_search_button,
-            layout_modal_button,
-            audio_btn,
-            space::vertical(),
-            settings_modal_button,
-        ]
-        .width(32)
-        .spacing(8)
+        let mut buttons = column![ticker_search_button, layout_modal_button, audio_btn,];
+
+        if self.journal_mode != data::JournalMode::Disabled {
+            buttons = buttons.push(journal_button);
+        }
+
+        buttons
+            .push(space::vertical())
+            .push(settings_modal_button)
+            .width(32)
+            .spacing(8)
+    }
+
+    pub fn set_journal_mode(&mut self, mode: data::JournalMode) {
+        self.journal_mode = mode;
+        if mode == data::JournalMode::Disabled {
+            self.journal.is_shown = false;
+            self.is_journal_window_open = false;
+        } else if mode == data::JournalMode::Extended {
+            self.journal.is_shown = false;
+        } else {
+            self.is_journal_window_open = false;
+        }
+    }
+
+    pub fn set_journal_window_open(&mut self, is_open: bool) {
+        self.is_journal_window_open = is_open;
     }
 
     pub fn hide_tickers_table(&mut self) -> bool {
@@ -208,6 +308,9 @@ impl Sidebar {
             return true;
         } else if table.is_shown {
             table.is_shown = false;
+            return true;
+        } else if self.journal.is_shown {
+            self.journal.is_shown = false;
             return true;
         }
 

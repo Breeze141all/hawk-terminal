@@ -7,17 +7,20 @@ use crate::{modal::pane::settings::study, style};
 use data::aggr::ticks::TickAggr;
 use data::aggr::time::TimeSeries;
 use data::chart::Autoscale;
+use data::chart::alert::{AlertStatus, PriceAlert};
+use data::chart::drawing::{Drawing, DrawingKind, DrawingTool};
 use data::chart::kline::ClusterScaling;
+use data::chart::replay::ReplayState;
 use data::chart::{
     KlineChartKind, ViewConfig,
     indicator::{Indicator, KlineIndicator},
     kline::{ClusterKind, FootprintStudy, KlineDataPoint, KlineTrades, NPoc, PointOfControl},
-    liquidation_heatmap::{LiquidationHeatmap, LiquidationHeatmapConfig},
+    liquidation_heatmap::{LiquidationHeatmap, LiquidationHeatmapConfig, interpolate_color_themed},
 };
 use data::util::{abbr_large_numbers, count_decimals};
 use exchange::util::{Price, PriceStep};
 use exchange::{
-    Kline, OpenInterest as OIData, TickerInfo, Timeframe, Trade,
+    Kline, OpenInterest as OIData, TickerInfo, Trade,
     fetcher::{FetchRange, RequestHandler},
 };
 
@@ -27,7 +30,7 @@ use iced::widget::canvas::{self, Event, Geometry, Path, Stroke};
 use iced::{Alignment, Element, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 
 use enum_map::EnumMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 impl Chart for KlineChart {
     type IndicatorKind = KlineIndicator;
@@ -55,7 +58,16 @@ impl Chart for KlineChart {
     fn view_indicators(&'_ self, enabled: &[Self::IndicatorKind]) -> Vec<Element<'_, Message>> {
         let chart_state = self.state();
         let visible_region = chart_state.visible_region(chart_state.bounds.size());
-        let (earliest, latest) = chart_state.interval_range(&visible_region);
+        let (earliest, raw_latest) = chart_state.interval_range(&visible_region);
+        let latest = if let Some(ref rep) = self.replay {
+            if rep.active && rep.cutoff_time > 0 {
+                raw_latest.min(rep.cutoff_time)
+            } else {
+                raw_latest
+            }
+        } else {
+            raw_latest
+        };
         if earliest > latest {
             return vec![];
         }
@@ -95,6 +107,10 @@ impl Chart for KlineChart {
                         .x_to_interval(region.x + region.width)
                         .saturating_add(interval / 2),
                 );
+
+                if earliest > latest {
+                    return None;
+                }
 
                 Some((earliest, latest))
             }
@@ -238,6 +254,43 @@ impl TpoCache {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum DrawingDrag {
+    MovingDrawing {
+        start_time: u64,
+        start_price: f32,
+        initial_drawing: Drawing,
+        current_drawing: Drawing,
+    },
+    MovingHandle {
+        handle_idx: usize,
+        initial_drawing: Drawing,
+        current_drawing: Drawing,
+    },
+}
+
+impl DrawingDrag {
+    pub fn current_drawing(&self) -> &Drawing {
+        match self {
+            DrawingDrag::MovingDrawing {
+                current_drawing, ..
+            }
+            | DrawingDrag::MovingHandle {
+                current_drawing, ..
+            } => current_drawing,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DrawingState {
+    pub active_tool: DrawingTool,
+    pub in_progress: Option<Drawing>,
+    pub start_point: Option<(u64, f32)>,
+    pub selected_drawing: Option<uuid::Uuid>,
+    pub drag: Option<DrawingDrag>,
+}
+
 pub struct KlineChart {
     pub ticker_info: TickerInfo,
     chart: ViewState,
@@ -247,12 +300,18 @@ pub struct KlineChart {
     fetching_trades: (bool, Vec<Handle>),
     active_trade_fetches: usize,
     pub(crate) kind: KlineChartKind,
+    pub(crate) config: data::chart::kline::Config,
     request_handler: RequestHandler,
     study_configurator: study::Configurator<FootprintStudy>,
     last_tick: Instant,
-    #[allow(dead_code)]
     liquidation_heatmap: LiquidationHeatmap,
     pub(crate) tpo_cache: RefCell<TpoCache>,
+    last_footprint_cache_save: Option<Instant>,
+    pub drawings: Vec<Drawing>,
+    pub(crate) drawing_state: RefCell<DrawingState>,
+    pub alerts: Vec<PriceAlert>,
+    pub alert_drag_state: RefCell<Option<(uuid::Uuid, f32)>>,
+    pub replay: Option<ReplayState>,
 }
 
 impl KlineChart {
@@ -265,7 +324,9 @@ impl KlineChart {
         enabled_indicators: &[KlineIndicator],
         ticker_info: TickerInfo,
         kind: &KlineChartKind,
+        config: Option<data::chart::kline::Config>,
     ) -> Self {
+        let config = config.unwrap_or_default();
         match basis {
             Basis::Time(interval) => {
                 let step = PriceStep::from_f32(tick_size);
@@ -338,14 +399,28 @@ impl KlineChart {
                 let mut indicators = EnumMap::default();
                 for &i in enabled_indicators {
                     let mut indi = indicator::kline::make_empty(i);
+                    if i == KlineIndicator::PositionFlow
+                        && let Some(any) = indi.as_any_mut()
+                        && let Some(pf) = any.downcast_mut::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>()
+                    {
+                        pf.set_colors(config.position_flow_colors);
+                    }
+                    if i == KlineIndicator::RollingVwap
+                        && let Some(any) = indi.as_any_mut()
+                        && let Some(rv) = any.downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>()
+                    {
+                        rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
+                    }
                     indi.rebuild_from_source(&data_source);
                     indicators[i] = Some(indi);
                 }
 
                 let mut liquidation_heatmap =
                     LiquidationHeatmap::new(LiquidationHeatmapConfig::default());
+                let liq_enabled = indicators[KlineIndicator::LiquidationHeatmap].is_some();
+                liquidation_heatmap.config.enabled = liq_enabled;
                 // Rebuild heatmap from existing klines
-                if let PlotData::TimeBased(ref ts) = data_source {
+                if liq_enabled && let PlotData::TimeBased(ref ts) = data_source {
                     let kline_data: Vec<_> = ts
                         .datapoints
                         .iter()
@@ -374,10 +449,17 @@ impl KlineChart {
                     active_trade_fetches: 0,
                     request_handler: RequestHandler::new(),
                     kind: kind.clone(),
+                    config,
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     liquidation_heatmap,
                     tpo_cache: RefCell::new(TpoCache::default()),
+                    last_footprint_cache_save: None,
+                    drawings: Vec::new(),
+                    drawing_state: RefCell::new(DrawingState::default()),
+                    alerts: Vec::new(),
+                    alert_drag_state: RefCell::new(None),
+                    replay: None,
                 }
             }
             Basis::Tick(interval) => {
@@ -428,6 +510,18 @@ impl KlineChart {
                 let mut indicators = EnumMap::default();
                 for &i in enabled_indicators {
                     let mut indi = indicator::kline::make_empty(i);
+                    if i == KlineIndicator::PositionFlow
+                        && let Some(any) = indi.as_any_mut()
+                        && let Some(pf) = any.downcast_mut::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>()
+                    {
+                        pf.set_colors(config.position_flow_colors);
+                    }
+                    if i == KlineIndicator::RollingVwap
+                        && let Some(any) = indi.as_any_mut()
+                        && let Some(rv) = any.downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>()
+                    {
+                        rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
+                    }
                     indi.rebuild_from_source(&data_source);
                     indicators[i] = Some(indi);
                 }
@@ -446,12 +540,43 @@ impl KlineChart {
                     active_trade_fetches: 0,
                     request_handler: RequestHandler::new(),
                     kind: kind.clone(),
+                    config,
                     study_configurator: study::Configurator::new(),
                     last_tick: Instant::now(),
                     liquidation_heatmap,
                     tpo_cache: RefCell::new(TpoCache::default()),
+                    last_footprint_cache_save: None,
+                    drawings: Vec::new(),
+                    drawing_state: RefCell::new(DrawingState::default()),
+                    alerts: Vec::new(),
+                    alert_drag_state: RefCell::new(None),
+                    replay: None,
                 }
             }
+        }
+    }
+
+    pub fn rebuild_liquidation_heatmap(&mut self) {
+        if !self.liquidation_heatmap.config.enabled {
+            return;
+        }
+        if let PlotData::TimeBased(ref ts) = self.data_source {
+            let kline_data: Vec<_> = ts
+                .datapoints
+                .iter()
+                .map(|(time, dp)| {
+                    (
+                        *time,
+                        dp.kline.open.to_f32(),
+                        dp.kline.high.to_f32(),
+                        dp.kline.low.to_f32(),
+                        dp.kline.close.to_f32(),
+                        dp.kline.volume.0,
+                        dp.kline.volume.1,
+                    )
+                })
+                .collect();
+            self.liquidation_heatmap.rebuild_from_klines(&kline_data);
         }
     }
 
@@ -464,6 +589,18 @@ impl KlineChart {
                     .values_mut()
                     .filter_map(Option::as_mut)
                     .for_each(|indi| indi.on_insert_klines(&[*kline]));
+
+                if self.liquidation_heatmap.config.enabled {
+                    self.liquidation_heatmap.on_candle(
+                        kline.time,
+                        kline.open.to_f32(),
+                        kline.high.to_f32(),
+                        kline.low.to_f32(),
+                        kline.close.to_f32(),
+                        kline.volume.0,
+                        kline.volume.1,
+                    );
+                }
 
                 let chart = self.mut_state();
 
@@ -483,6 +620,13 @@ impl KlineChart {
 
     pub fn kind(&self) -> &KlineChartKind {
         &self.kind
+    }
+
+    pub fn current_price(&self) -> Option<f32> {
+        self.chart
+            .last_price
+            .as_ref()
+            .map(|p| p.price().to_f32_lossy())
     }
 
     fn missing_data_task(&mut self) -> Option<Action> {
@@ -509,7 +653,41 @@ impl KlineChart {
             visible_earliest.saturating_sub(visible_latest.saturating_sub(visible_earliest));
 
         // priority 1, basic kline data fetch
-        if visible_earliest < kline_earliest && visible_earliest > 0 && kline_earliest > 0 {
+        if let PlotData::TimeBased(ts) = &self.data_source {
+            let first_in_view = ts
+                .datapoints
+                .range(visible_earliest..=visible_latest)
+                .next()
+                .map(|(&k, _)| k);
+
+            if first_in_view.is_none() && visible_earliest > 0 {
+                let fetch_start = visible_earliest.saturating_sub(50 * timeframe_ms);
+                let fetch_end = fetch_start.saturating_add(1000 * timeframe_ms);
+                let range = FetchRange::Kline(fetch_start, fetch_end);
+                if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                    return Some(action);
+                }
+            } else if let Some(first) = first_in_view
+                && visible_earliest < first
+                && visible_earliest > 0
+            {
+                let range = FetchRange::Kline(earliest, first);
+                if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                    return Some(action);
+                }
+            } else {
+                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                let target_latest = visible_latest.min(now_ms);
+                if target_latest > kline_latest.saturating_add(timeframe_ms / 2) {
+                    let fetch_start = kline_latest.saturating_sub(timeframe_ms);
+                    let fetch_end = target_latest.saturating_add(timeframe_ms * 5);
+                    let range = FetchRange::Kline(fetch_start, fetch_end);
+                    if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                        return Some(action);
+                    }
+                }
+            }
+        } else if visible_earliest < kline_earliest && visible_earliest > 0 && kline_earliest > 0 {
             let range = FetchRange::Kline(earliest, kline_earliest);
 
             if let Some(action) = request_fetch(&mut self.request_handler, range) {
@@ -528,7 +706,21 @@ impl KlineChart {
             {
                 let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
                 let base_data_path = data::data_path(None);
-                let binance_data_path = data::data_path(Some("market_data/binance/"));
+                let exchange_folder = match self.ticker_info.exchange() {
+                    exchange::adapter::Exchange::BinanceSpot
+                    | exchange::adapter::Exchange::BinanceLinear
+                    | exchange::adapter::Exchange::BinanceInverse => "binance",
+                    exchange::adapter::Exchange::BybitSpot
+                    | exchange::adapter::Exchange::BybitLinear
+                    | exchange::adapter::Exchange::BybitInverse => "bybit",
+                    exchange::adapter::Exchange::OkexSpot
+                    | exchange::adapter::Exchange::OkexLinear
+                    | exchange::adapter::Exchange::OkexInverse => "okex",
+                    exchange::adapter::Exchange::HyperliquidSpot
+                    | exchange::adapter::Exchange::HyperliquidLinear => "hyperliquid",
+                };
+                let trades_data_path =
+                    data::data_path(Some(&format!("market_data/{exchange_folder}/")));
                 let interval = timeseries.interval;
                 let step = self.chart.tick_size;
 
@@ -542,7 +734,7 @@ impl KlineChart {
                     let mut loaded_any = false;
                     let today = chrono::Utc::now().date_naive();
 
-                    while cur_d <= end_d && cur_d < today {
+                    while cur_d <= end_d && cur_d <= today {
                         let cache_path = data::chart::kline::footprint_cache_path(
                             &base_data_path,
                             &symbol,
@@ -550,14 +742,41 @@ impl KlineChart {
                             step,
                             cur_d,
                         );
-                        if cache_path.exists()
+                        if cur_d < today
+                            && cache_path.exists()
                             && let Some(dps) = data::chart::kline::load_daily_footprint(&cache_path)
                         {
                             timeseries.insert_preaggregated_footprint(dps);
                             loaded_any = true;
                         } else if let Some(trades) =
-                            exchange::adapter::binance::load_raw_trades_from_cache(
-                                &binance_data_path,
+                            exchange::trades::cache::load_raw_trades_from_cache(
+                                &trades_data_path,
+                                &self.ticker_info,
+                                cur_d,
+                            )
+                        {
+                            let dps =
+                                data::aggr::time::aggregate_trades_for_day(&trades, interval, step);
+                            let interval_ms = interval.to_milliseconds();
+                            let expected_count =
+                                86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
+                            let is_day_complete = dps.len() >= expected_count
+                                && dps.iter().all(|(_, dp)| {
+                                    (dp.kline.volume.0 + dp.kline.volume.1) == 0.0
+                                        || !dp.footprint.is_empty()
+                                });
+
+                            if !dps.is_empty() {
+                                if cur_d < today && is_day_complete {
+                                    let _ =
+                                        data::chart::kline::save_daily_footprint(&cache_path, &dps);
+                                }
+                                timeseries.insert_preaggregated_footprint(dps);
+                                loaded_any = true;
+                            }
+                        } else if let Some(trades) =
+                            exchange::trades::cache::load_intraday_trades_from_cache(
+                                &trades_data_path,
                                 &self.ticker_info,
                                 cur_d,
                             )
@@ -565,8 +784,33 @@ impl KlineChart {
                             let dps =
                                 data::aggr::time::aggregate_trades_for_day(&trades, interval, step);
                             if !dps.is_empty() {
-                                let _ = data::chart::kline::save_daily_footprint(&cache_path, &dps);
+                                let interval_ms = interval.to_milliseconds();
+                                let expected_count =
+                                    86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
+                                let is_day_complete = dps.len() >= expected_count
+                                    && dps.iter().all(|(_, dp)| {
+                                        (dp.kline.volume.0 + dp.kline.volume.1) == 0.0
+                                            || !dp.footprint.is_empty()
+                                    });
+
+                                if cur_d < today && is_day_complete {
+                                    let _ =
+                                        data::chart::kline::save_daily_footprint(&cache_path, &dps);
+                                    let _ = exchange::trades::cache::save_raw_trades_to_cache(
+                                        &trades_data_path,
+                                        &self.ticker_info,
+                                        cur_d,
+                                        &trades,
+                                    );
+                                }
                                 timeseries.insert_preaggregated_footprint(dps);
+                                if cur_d == today {
+                                    self.raw_trades.extend(trades);
+                                    self.raw_trades.sort_by_key(|t| t.time);
+                                    self.raw_trades.dedup_by(|a, b| {
+                                        a.time == b.time && a.price == b.price && a.qty == b.qty
+                                    });
+                                }
                                 loaded_any = true;
                             }
                         }
@@ -705,6 +949,312 @@ impl KlineChart {
         &self.study_configurator
     }
 
+    pub fn add_drawing(&mut self, drawing: Drawing) {
+        self.drawings.push(drawing);
+        self.invalidate_all();
+    }
+
+    pub fn update_drawing(&mut self, drawing: Drawing) {
+        if let Some(existing) = self.drawings.iter_mut().find(|d| d.id == drawing.id) {
+            *existing = drawing;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn delete_drawing(&mut self, id: uuid::Uuid) {
+        self.drawings.retain(|d| d.id != id);
+        {
+            let mut d = self.drawing_state.borrow_mut();
+            if d.selected_drawing == Some(id) {
+                d.selected_drawing = None;
+            }
+        }
+        self.invalidate_all();
+    }
+
+    pub fn update_alert_price(&mut self, id: uuid::Uuid, new_price: f32) {
+        if let Some(alert) = self.alerts.iter_mut().find(|a| a.id == id) {
+            alert.target_price = new_price;
+            alert.status = AlertStatus::Active;
+        }
+        self.invalidate_all();
+    }
+
+    pub fn clear_drawings(&mut self) {
+        self.drawings.retain(|d| d.is_locked);
+        let sel_id = self.drawing_state.borrow().selected_drawing;
+        if let Some(id) = sel_id
+            && !self.drawings.iter().any(|d| d.id == id)
+        {
+            self.drawing_state.borrow_mut().selected_drawing = None;
+        }
+        self.drawing_state.borrow_mut().in_progress = None;
+        self.invalidate_all();
+    }
+
+    pub fn selected_drawing(&self) -> Option<&Drawing> {
+        let sel_id = self.drawing_state.borrow().selected_drawing;
+        sel_id.and_then(|id| self.drawings.iter().find(|d| d.id == id))
+    }
+
+    pub fn selected_drawing_mut(&mut self) -> Option<&mut Drawing> {
+        let sel_id = self.drawing_state.borrow().selected_drawing;
+        sel_id.and_then(|id| self.drawings.iter_mut().find(|d| d.id == id))
+    }
+
+    pub fn set_selected_drawing(&mut self, id: Option<uuid::Uuid>) {
+        self.drawing_state.borrow_mut().selected_drawing = id;
+        self.invalidate_all();
+    }
+
+    pub fn update_selected_drawing_color(&mut self, color: [f32; 4]) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.color = color;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn update_selected_drawing_width(&mut self, width: f32) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.width = width;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn toggle_selected_drawing_lock(&mut self) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.is_locked = !d.is_locked;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn set_active_drawing_tool(&mut self, tool: DrawingTool) {
+        {
+            let mut d = self.drawing_state.borrow_mut();
+            d.active_tool = tool;
+            d.in_progress = None;
+            d.start_point = None;
+        }
+        self.invalidate_all();
+    }
+
+    pub fn active_drawing_tool(&self) -> DrawingTool {
+        self.drawing_state.borrow().active_tool
+    }
+
+    pub fn add_alert(&mut self, alert: PriceAlert) {
+        self.alerts.push(alert);
+        self.invalidate_all();
+    }
+
+    pub fn remove_alert(&mut self, id: uuid::Uuid) {
+        self.alerts.retain(|a| a.id != id);
+        self.invalidate_all();
+    }
+
+    pub fn toggle_alert(&mut self, id: uuid::Uuid) {
+        if let Some(alert) = self.alerts.iter_mut().find(|a| a.id == id) {
+            alert.status = match alert.status {
+                AlertStatus::Active => AlertStatus::Muted,
+                AlertStatus::Muted | AlertStatus::Triggered => AlertStatus::Active,
+            };
+        }
+        self.invalidate_all();
+    }
+
+    pub fn toggle_replay(&mut self) {
+        if self.replay.is_some() {
+            self.replay = None;
+        } else {
+            let cutoff = match &self.data_source {
+                PlotData::TimeBased(ts) => ts.latest_timestamp().unwrap_or(0),
+                PlotData::TickBased(_) => 0,
+            };
+            self.replay = Some(ReplayState::new(cutoff));
+        }
+        self.invalidate_all();
+    }
+
+    pub fn is_replay_active(&self) -> bool {
+        self.replay.as_ref().is_some_and(|r| r.active)
+    }
+
+    pub fn replay_state(&self) -> Option<&ReplayState> {
+        self.replay.as_ref()
+    }
+
+    pub fn replay_play_pause(&mut self) {
+        if let Some(ref mut rep) = self.replay {
+            rep.is_playing = !rep.is_playing;
+        }
+        self.invalidate_all();
+    }
+
+    pub fn replay_step_forward(&mut self) {
+        if let Some(ref mut rep) = self.replay {
+            let step = match self.chart.basis {
+                Basis::Time(tf) => tf.to_milliseconds(),
+                Basis::Tick(_) => 10,
+            };
+            rep.cutoff_time = rep.cutoff_time.saturating_add(step);
+        }
+        self.invalidate_all();
+    }
+
+    pub fn replay_step_backward(&mut self) {
+        if let Some(ref mut rep) = self.replay {
+            let step = match self.chart.basis {
+                Basis::Time(tf) => tf.to_milliseconds(),
+                Basis::Tick(_) => 10,
+            };
+            rep.cutoff_time = rep.cutoff_time.saturating_sub(step);
+        }
+        self.invalidate_all();
+    }
+
+    pub fn replay_set_speed(&mut self, speed_ms: u64) {
+        if let Some(ref mut rep) = self.replay {
+            rep.speed_ms = speed_ms;
+        }
+    }
+
+    pub fn replay_set_cutoff(&mut self, cutoff: u64) {
+        if let Some(ref mut rep) = self.replay {
+            rep.cutoff_time = cutoff;
+        } else {
+            self.replay = Some(ReplayState::new(cutoff));
+        }
+        self.invalidate_all();
+    }
+
+    pub fn scroll_to_timestamp(&mut self, timestamp: u64) {
+        if self.chart.scaling > f32::EPSILON && self.chart.bounds.width > f32::EPSILON {
+            let base_x = match &self.kind {
+                KlineChartKind::Footprint { .. } => {
+                    0.5 * (self.chart.bounds.width / self.chart.scaling)
+                        - (self.chart.cell_width / self.chart.scaling)
+                }
+                KlineChartKind::Candles | KlineChartKind::Tpo { .. } => {
+                    0.5 * (self.chart.bounds.width / self.chart.scaling)
+                        - (8.0 * self.chart.cell_width / self.chart.scaling)
+                }
+            };
+            let x_offset = self.chart.interval_to_x(timestamp);
+            self.chart.translation.x = base_x - x_offset;
+        }
+        self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
+        self.invalidate_all();
+    }
+
+    pub fn replay_set_cutoff_and_jump(&mut self, cutoff: u64) {
+        if let Some(ref mut rep) = self.replay {
+            rep.cutoff_time = cutoff;
+            rep.is_playing = false;
+        } else {
+            self.replay = Some(ReplayState::new(cutoff));
+        }
+        self.scroll_to_timestamp(cutoff);
+    }
+
+    pub fn find_closest_bar_at_or_before(&self, timestamp: u64) -> Option<u64> {
+        match &self.data_source {
+            PlotData::TimeBased(ts) => {
+                let timeframe_ms = ts.interval.to_milliseconds();
+                if let Some((&k, _)) = ts.datapoints.range(..=timestamp).next_back()
+                    && timestamp.saturating_sub(k) <= 5 * timeframe_ms
+                {
+                    return Some(k);
+                }
+                None
+            }
+            PlotData::TickBased(tick_aggr) => tick_aggr
+                .datapoints
+                .iter()
+                .rfind(|dp| dp.kline.time <= timestamp)
+                .map(|dp| dp.kline.time),
+        }
+    }
+
+    pub fn replay_pick_random_bar(&mut self) -> Option<u64> {
+        let timestamp = match &self.data_source {
+            PlotData::TimeBased(ts) => {
+                let total = ts.datapoints.len();
+                if total == 0 {
+                    return None;
+                }
+                let timeframe_ms = ts.interval.to_milliseconds().max(60_000);
+                let (_kline_earliest, kline_latest) = ts.timerange();
+                let min_ts: u64 = 1_609_459_200_000; // 2021-01-01 00:00:00 UTC
+                let now_ts = chrono::Utc::now().timestamp_millis() as u64;
+                let max_ts = now_ts.saturating_sub(3 * 24 * 3600 * 1000);
+
+                if kline_latest >= min_ts && max_ts > min_ts {
+                    // Pick random timestamp across historical years (2021 to 3 days ago)
+                    let span = max_ts.saturating_sub(min_ts).max(timeframe_ms);
+                    let rand_bytes = uuid::Uuid::new_v4();
+                    let rand_val = u128::from_le_bytes(*rand_bytes.as_bytes());
+                    let offset = (rand_val % (span as u128)) as u64;
+                    let raw_ts = min_ts + offset;
+                    (raw_ts / timeframe_ms) * timeframe_ms
+                } else {
+                    // Fallback / mock data in unit tests
+                    let (start_idx, end_idx) = if total > 40 {
+                        (15, total.saturating_sub(15))
+                    } else if total > 2 {
+                        (0, total - 1)
+                    } else {
+                        (0, total)
+                    };
+                    let span = end_idx.saturating_sub(start_idx).max(1);
+                    let rand_bytes = uuid::Uuid::new_v4();
+                    let rand_val = u128::from_le_bytes(*rand_bytes.as_bytes());
+                    let offset = (rand_val % (span as u128)) as usize;
+                    let target_idx = start_idx + offset;
+                    ts.datapoints.keys().nth(target_idx).copied()?
+                }
+            }
+            PlotData::TickBased(tick_aggr) => {
+                let total = tick_aggr.datapoints.len();
+                if total == 0 {
+                    return None;
+                }
+                let (start_idx, end_idx) = if total > 40 {
+                    (15, total.saturating_sub(15))
+                } else if total > 2 {
+                    (0, total - 1)
+                } else {
+                    (0, total)
+                };
+                let span = end_idx.saturating_sub(start_idx).max(1);
+                let rand_bytes = uuid::Uuid::new_v4();
+                let rand_val = u128::from_le_bytes(*rand_bytes.as_bytes());
+                let offset = (rand_val % (span as u128)) as usize;
+                let target_idx = start_idx + offset;
+                tick_aggr
+                    .datapoints
+                    .get(target_idx)
+                    .map(|dp| dp.kline.time)?
+            }
+        };
+
+        self.replay_set_cutoff_and_jump(timestamp);
+        Some(timestamp)
+    }
+
+    pub fn check_price_alerts(&mut self, prev_price: f32, current_price: f32) -> Vec<PriceAlert> {
+        let mut triggered = Vec::new();
+        for alert in &mut self.alerts {
+            if alert.check_trigger(prev_price, current_price) {
+                alert.status = AlertStatus::Triggered;
+                triggered.push(alert.clone());
+            }
+        }
+        if !triggered.is_empty() {
+            self.invalidate_all();
+        }
+        triggered
+    }
+
     pub fn update_study_configurator(&mut self, message: study::Message<FootprintStudy>) {
         let KlineChartKind::Footprint {
             ref mut studies, ..
@@ -813,7 +1363,54 @@ impl KlineChart {
         self.chart.basis
     }
 
+    fn ensure_today_trades_loaded(&mut self) {
+        let today = chrono::Utc::now().date_naive();
+        let day_start = today
+            .and_hms_opt(0, 0, 0)
+            .map(|dt| dt.and_utc().timestamp_millis() as u64)
+            .unwrap_or(0);
+
+        let needs_reload = self.raw_trades.is_empty()
+            || self
+                .raw_trades
+                .first()
+                .is_some_and(|t| t.time > day_start + 60_000);
+
+        if needs_reload {
+            let exchange_folder = match self.ticker_info.exchange() {
+                exchange::adapter::Exchange::BinanceSpot
+                | exchange::adapter::Exchange::BinanceLinear
+                | exchange::adapter::Exchange::BinanceInverse => "binance",
+                exchange::adapter::Exchange::BybitSpot
+                | exchange::adapter::Exchange::BybitLinear
+                | exchange::adapter::Exchange::BybitInverse => "bybit",
+                exchange::adapter::Exchange::OkexSpot
+                | exchange::adapter::Exchange::OkexLinear
+                | exchange::adapter::Exchange::OkexInverse => "okex",
+                exchange::adapter::Exchange::HyperliquidSpot
+                | exchange::adapter::Exchange::HyperliquidLinear => "hyperliquid",
+            };
+            let trades_data_path =
+                data::data_path(Some(&format!("market_data/{exchange_folder}/")));
+            if let Some(disk_trades) = exchange::trades::cache::load_intraday_trades_from_cache(
+                &trades_data_path,
+                &self.ticker_info,
+                today,
+            ) && !disk_trades.is_empty()
+            {
+                let mut merged = std::mem::take(&mut self.raw_trades);
+                merged.extend(disk_trades);
+                merged.sort_by_key(|t| t.time);
+                merged.dedup_by(|a, b| {
+                    a.time == b.time && a.price == b.price && (a.qty - b.qty).abs() < 1e-5
+                });
+                self.raw_trades = merged;
+            }
+        }
+    }
+
     pub fn change_tick_size(&mut self, new_tick_size: f32) {
+        self.ensure_today_trades_loaded();
         self.tpo_cache.borrow_mut().clear();
         let chart = self.mut_state();
 
@@ -841,6 +1438,7 @@ impl KlineChart {
     }
 
     pub fn set_basis(&mut self, new_basis: Basis) -> Option<Action> {
+        self.ensure_today_trades_loaded();
         self.tpo_cache.borrow_mut().clear();
         self.chart.last_price = None;
         self.chart.latest_x = 0;
@@ -936,6 +1534,122 @@ impl KlineChart {
                 self.invalidate(None);
             }
         }
+
+        self.save_footprint_cache(false);
+    }
+
+    pub fn save_footprint_cache(&mut self, force: bool) {
+        if !matches!(self.kind, KlineChartKind::Footprint { .. }) {
+            return;
+        }
+        if !force
+            && let Some(last) = self.last_footprint_cache_save
+            && last.elapsed() < Duration::from_secs(60)
+        {
+            return;
+        }
+
+        let PlotData::TimeBased(ref timeseries) = self.data_source else {
+            return;
+        };
+
+        let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
+        let base_data_path = data::data_path(None);
+        let today = chrono::Utc::now().date_naive();
+        let interval = timeseries.interval;
+        let step = self.chart.tick_size;
+
+        let mut distinct_dates: Vec<chrono::NaiveDate> = Vec::new();
+        for (&t, dp) in &timeseries.datapoints {
+            if dp.footprint.is_empty() || t < 1577836800000 {
+                continue;
+            }
+            if let Some(dt) = chrono::DateTime::from_timestamp_millis(t as i64) {
+                let d = dt.date_naive();
+                if !distinct_dates.contains(&d) {
+                    distinct_dates.push(d);
+                }
+            }
+        }
+
+        for &date in &distinct_dates {
+            if date == today {
+                // Today's session is live and in progress.
+                // Raw trades are saved contiguously in the daily raw trades cache.
+                // Never freeze incomplete/live candles into the immutable daily footprint cache.
+                continue;
+            }
+            if let Some(day_start_dt) = date.and_hms_opt(0, 0, 0) {
+                let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
+                let day_end = day_start + 86_400_000 - 1;
+
+                let dps: Vec<(u64, KlineDataPoint)> = timeseries
+                    .datapoints
+                    .range(day_start..=day_end)
+                    .map(|(&t, dp)| (t, dp.clone()))
+                    .collect();
+
+                let interval_ms = interval.to_milliseconds();
+                let expected_count = 86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
+
+                let is_day_complete = dps.len() >= expected_count
+                    && !dps.is_empty()
+                    && dps.iter().all(|(_, dp)| {
+                        (dp.kline.volume.0 + dp.kline.volume.1) == 0.0
+                            || (!dp.footprint.is_empty() && dp.trades_fetched)
+                    });
+
+                if is_day_complete {
+                    let cache_path = data::chart::kline::footprint_cache_path(
+                        &base_data_path,
+                        &symbol,
+                        interval,
+                        step,
+                        date,
+                    );
+                    let _ = data::chart::kline::save_daily_footprint(&cache_path, &dps);
+                }
+            }
+        }
+
+        if let Some(day_start_dt) = today.and_hms_opt(0, 0, 0) {
+            let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
+            let today_trades: Vec<Trade> = self
+                .raw_trades
+                .iter()
+                .filter(|t| t.time >= day_start)
+                .copied()
+                .collect();
+            if !today_trades.is_empty() {
+                let exchange_folder = match self.ticker_info.exchange() {
+                    exchange::adapter::Exchange::BinanceSpot
+                    | exchange::adapter::Exchange::BinanceLinear
+                    | exchange::adapter::Exchange::BinanceInverse => "binance",
+                    exchange::adapter::Exchange::BybitSpot
+                    | exchange::adapter::Exchange::BybitLinear
+                    | exchange::adapter::Exchange::BybitInverse => "bybit",
+                    exchange::adapter::Exchange::OkexSpot
+                    | exchange::adapter::Exchange::OkexLinear
+                    | exchange::adapter::Exchange::OkexInverse => "okex",
+                    exchange::adapter::Exchange::HyperliquidSpot
+                    | exchange::adapter::Exchange::HyperliquidLinear => "hyperliquid",
+                };
+                let trades_data_path =
+                    data::data_path(Some(&format!("market_data/{exchange_folder}/")));
+                let _ = exchange::trades::cache::save_intraday_trades_to_cache(
+                    &trades_data_path,
+                    &self.ticker_info,
+                    today,
+                    &today_trades,
+                );
+            }
+        }
+
+        self.last_footprint_cache_save = Some(Instant::now());
+    }
+
+    pub fn flush_footprint_cache(&mut self) {
+        self.save_footprint_cache(true);
     }
 
     pub fn insert_raw_trades(&mut self, raw_trades: Vec<Trade>) {
@@ -1022,105 +1736,10 @@ impl KlineChart {
                 }
                 PlotData::TimeBased(ref mut timeseries) => {
                     timeseries.insert_trades_existing_buckets(&new_trades);
-
-                    if matches!(self.kind, KlineChartKind::Footprint { .. }) {
-                        let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
-                        let base_data_path = data::data_path(None);
-                        let today = chrono::Utc::now().date_naive();
-                        let interval = timeseries.interval;
-                        let step = self.chart.tick_size;
-
-                        let mut distinct_dates: Vec<chrono::NaiveDate> = Vec::new();
-                        for trade in &new_trades {
-                            if let Some(dt) =
-                                chrono::DateTime::from_timestamp_millis(trade.time as i64)
-                            {
-                                let d = dt.date_naive();
-                                if d < today && !distinct_dates.contains(&d) {
-                                    distinct_dates.push(d);
-                                }
-                            }
-                        }
-
-                        for &date in &distinct_dates {
-                            if let Some(day_start_dt) = date.and_hms_opt(0, 0, 0) {
-                                let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
-                                let day_end = day_start + 86_400_000 - 1;
-                                let dps: Vec<(u64, KlineDataPoint)> = timeseries
-                                    .datapoints
-                                    .range(day_start..=day_end)
-                                    .map(|(&t, dp)| (t, dp.clone()))
-                                    .collect();
-
-                                if !dps.is_empty() {
-                                    let cache_path = data::chart::kline::footprint_cache_path(
-                                        &base_data_path,
-                                        &symbol,
-                                        interval,
-                                        step,
-                                        date,
-                                    );
-                                    let _ =
-                                        data::chart::kline::save_daily_footprint(&cache_path, &dps);
-                                }
-                            }
-                        }
-
-                        if !distinct_dates.is_empty() {
-                            let raw_batch = new_trades.clone();
-                            let base_path_bg = base_data_path.clone();
-                            let symbol_bg = symbol.clone();
-                            let min_tick_f = self.ticker_info.min_ticksize.as_f32();
-                            let min_tick = if min_tick_f > 0.0 { min_tick_f } else { 0.1 };
-
-                            std::thread::spawn(move || {
-                                for &date in &distinct_dates {
-                                    if let Some(day_start_dt) = date.and_hms_opt(0, 0, 0) {
-                                        let day_start =
-                                            day_start_dt.and_utc().timestamp_millis() as u64;
-                                        let day_end = day_start + 86_400_000 - 1;
-                                        let day_trades: Vec<Trade> = raw_batch
-                                            .iter()
-                                            .filter(|t| t.time >= day_start && t.time <= day_end)
-                                            .copied()
-                                            .collect();
-
-                                        if day_trades.is_empty() {
-                                            continue;
-                                        }
-
-                                        for tf in [Timeframe::M15, Timeframe::H1, Timeframe::H4] {
-                                            for mult in [10, 25, 50, 100, 200, 500] {
-                                                let target_step =
-                                                    PriceStep::from_f32(min_tick * mult as f32);
-                                                let path = data::chart::kline::footprint_cache_path(
-                                                    &base_path_bg,
-                                                    &symbol_bg,
-                                                    tf,
-                                                    target_step,
-                                                    date,
-                                                );
-                                                if !path.exists() {
-                                                    let dps =
-                                                        data::aggr::time::aggregate_trades_for_day(
-                                                            &day_trades,
-                                                            tf,
-                                                            target_step,
-                                                        );
-                                                    let _ =
-                                                        data::chart::kline::save_daily_footprint(
-                                                            &path, &dps,
-                                                        );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            });
-                        }
-                    }
                 }
             }
+
+            self.save_footprint_cache(false);
 
             if self.raw_trades.is_empty() || batch_min_t >= existing_max_t {
                 self.raw_trades.extend(new_trades);
@@ -1130,8 +1749,26 @@ impl KlineChart {
                 merged.extend(std::mem::take(&mut self.raw_trades));
                 self.raw_trades = merged;
             } else {
-                self.raw_trades.extend(new_trades);
-                self.raw_trades.sort_unstable_by_key(|t| t.time);
+                let old = std::mem::take(&mut self.raw_trades);
+                let mut merged = Vec::with_capacity(old.len() + new_trades.len());
+                let mut i = 0;
+                let mut j = 0;
+                while i < old.len() && j < new_trades.len() {
+                    if old[i].time <= new_trades[j].time {
+                        merged.push(old[i]);
+                        i += 1;
+                    } else {
+                        merged.push(new_trades[j]);
+                        j += 1;
+                    }
+                }
+                if i < old.len() {
+                    merged.extend_from_slice(&old[i..]);
+                }
+                if j < new_trades.len() {
+                    merged.extend_from_slice(&new_trades[j..]);
+                }
+                self.raw_trades = merged;
             }
 
             const MAX_RAW_TRADES_IN_RAM: usize = 500_000;
@@ -1208,6 +1845,10 @@ impl KlineChart {
                     .filter_map(Option::as_mut)
                     .for_each(|indi| indi.on_insert_klines(klines_raw));
 
+                if self.liquidation_heatmap.config.enabled {
+                    self.rebuild_liquidation_heatmap();
+                }
+
                 if klines_raw.is_empty() {
                     self.request_handler
                         .mark_failed(req_id, "No data received".to_string());
@@ -1230,7 +1871,7 @@ impl KlineChart {
             }
         }
 
-        if let Some(indi) = self.indicators[KlineIndicator::OpenInterest].as_mut() {
+        for indi in self.indicators.values_mut().flatten() {
             indi.on_open_interest(oi_data);
         }
     }
@@ -1301,6 +1942,10 @@ impl KlineChart {
         step: PriceStep,
         cluster_kind: ClusterKind,
     ) -> f32 {
+        if earliest > latest {
+            return 0.0;
+        }
+
         let rounded_highest = highest.round_to_side_step(false, step).add_steps(1, step);
 
         let rounded_lowest = lowest.round_to_side_step(true, step).add_steps(-1, step);
@@ -1423,7 +2068,24 @@ impl KlineChart {
         }
 
         if let Some(t) = now {
-            self.last_tick = t;
+            if let Some(ref mut rep) = self.replay
+                && rep.active
+                && rep.is_playing
+            {
+                let interval_ms = rep.speed_ms.max(10);
+                let elapsed = t.duration_since(self.last_tick).as_millis() as u64;
+                if elapsed >= interval_ms {
+                    let step = match self.chart.basis {
+                        Basis::Time(tf) => tf.to_milliseconds(),
+                        Basis::Tick(_) => 10,
+                    };
+                    let steps = (elapsed / interval_ms).max(1);
+                    rep.cutoff_time = rep.cutoff_time.saturating_add(step * steps);
+                    self.last_tick = t;
+                }
+            } else {
+                self.last_tick = t;
+            }
             self.missing_data_task()
         } else {
             None
@@ -1447,8 +2109,28 @@ impl KlineChart {
 
         if self.indicators[indicator].is_some() {
             self.indicators[indicator] = None;
+            if indicator == KlineIndicator::LiquidationHeatmap {
+                self.liquidation_heatmap.config.enabled = false;
+                self.liquidation_heatmap.clear();
+            }
         } else {
             let mut box_indi = indicator::kline::make_empty(indicator);
+            if indicator == KlineIndicator::PositionFlow
+                && let Some(any) = box_indi.as_any_mut()
+                && let Some(pf) = any.downcast_mut::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>()
+            {
+                pf.set_colors(self.config.position_flow_colors);
+            }
+            if indicator == KlineIndicator::RollingVwap
+                && let Some(any) = box_indi.as_any_mut()
+                && let Some(rv) = any.downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>()
+            {
+                rv.set_window_hours(self.config.rolling_vwap_window_hours, &self.data_source);
+            }
+            if indicator == KlineIndicator::LiquidationHeatmap {
+                self.liquidation_heatmap.config.enabled = true;
+                self.rebuild_liquidation_heatmap();
+            }
             box_indi.rebuild_from_source(&self.data_source);
             self.indicators[indicator] = Some(box_indi);
         }
@@ -1468,6 +2150,33 @@ impl KlineChart {
                 );
             }
         }
+    }
+
+    pub fn config(&self) -> data::chart::kline::Config {
+        self.config
+    }
+
+    pub fn set_visual_config(&mut self, config: data::chart::kline::Config) {
+        self.config = config;
+        data::chart::kline::set_user_default_kline_config(config);
+
+        if let Some(indi) = self.indicators[KlineIndicator::PositionFlow].as_mut()
+            && let Some(any) = indi.as_any_mut()
+            && let Some(pf) = any.downcast_mut::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>()
+        {
+            pf.set_colors(config.position_flow_colors);
+        }
+
+        if let Some(indi) = self.indicators[KlineIndicator::RollingVwap].as_mut()
+            && let Some(any) = indi.as_any_mut()
+            && let Some(rv) = any
+                .downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>(
+                )
+        {
+            rv.set_window_hours(config.rolling_vwap_window_hours, &self.data_source);
+        }
+
+        self.invalidate(None);
     }
 }
 
@@ -1636,6 +2345,529 @@ impl canvas::Program<Message> for KlineChart {
             }
         }
 
+        // 5. Handle Drawing Tools interaction
+        {
+            let mut d_state = self.drawing_state.borrow_mut();
+            if d_state.active_tool != DrawingTool::None || d_state.in_progress.is_some() {
+                // Cancel on Escape or Right click
+                if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
+                    && matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    )
+                {
+                    d_state.active_tool = DrawingTool::None;
+                    d_state.in_progress = None;
+                    d_state.start_point = None;
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+                if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) = event {
+                    d_state.active_tool = DrawingTool::None;
+                    d_state.in_progress = None;
+                    d_state.start_point = None;
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let chart = self.state();
+                    let frame_pos = Point::new(
+                        (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
+                        (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
+                    );
+                    let time = chart.x_to_interval(frame_pos.x);
+                    let price = chart.y_to_price(frame_pos.y).to_f32();
+
+                    match event {
+                        Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                            if let Some(ref mut in_prog) = d_state.in_progress {
+                                match &mut in_prog.kind {
+                                    DrawingKind::Trendline { p2, .. } => {
+                                        *p2 = (time, price);
+                                    }
+                                    DrawingKind::Rectangle { p2, .. } => {
+                                        *p2 = (time, price);
+                                    }
+                                    DrawingKind::HorizontalLine { price: p } => {
+                                        *p = price;
+                                    }
+                                    DrawingKind::Brush { points } => {
+                                        points.push((time, price));
+                                    }
+                                    DrawingKind::Path { points } => {
+                                        if let Some(last) = points.last_mut() {
+                                            *last = (time, price);
+                                        }
+                                    }
+                                    DrawingKind::Position { stop_price, .. } => {
+                                        *stop_price = price;
+                                    }
+                                }
+                                return Some(canvas::Action::request_redraw().and_capture());
+                            }
+                        }
+                        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                            match d_state.active_tool {
+                                DrawingTool::HorizontalLine => {
+                                    let drawing =
+                                        Drawing::horizontal(price, [0.95, 0.65, 0.15, 1.0], 1.5);
+                                    d_state.active_tool = DrawingTool::None;
+                                    d_state.in_progress = None;
+                                    return Some(
+                                        canvas::Action::publish(Message::AddDrawing(drawing))
+                                            .and_capture(),
+                                    );
+                                }
+                                DrawingTool::Trendline => {
+                                    if let Some(start) = d_state.start_point.take() {
+                                        let drawing = Drawing::trendline(
+                                            start,
+                                            (time, price),
+                                            [0.3, 0.75, 1.0, 1.0],
+                                            1.5,
+                                        );
+                                        d_state.active_tool = DrawingTool::None;
+                                        d_state.in_progress = None;
+                                        return Some(
+                                            canvas::Action::publish(Message::AddDrawing(drawing))
+                                                .and_capture(),
+                                        );
+                                    } else {
+                                        d_state.start_point = Some((time, price));
+                                        d_state.in_progress = Some(Drawing::trendline(
+                                            (time, price),
+                                            (time, price),
+                                            [0.3, 0.75, 1.0, 1.0],
+                                            1.5,
+                                        ));
+                                        return Some(
+                                            canvas::Action::request_redraw().and_capture(),
+                                        );
+                                    }
+                                }
+                                DrawingTool::Rectangle => {
+                                    if let Some(start) = d_state.start_point.take() {
+                                        let drawing = Drawing::rectangle(
+                                            start,
+                                            (time, price),
+                                            [0.3, 0.6, 0.95, 0.8],
+                                            1.0,
+                                        );
+                                        d_state.active_tool = DrawingTool::None;
+                                        d_state.in_progress = None;
+                                        return Some(
+                                            canvas::Action::publish(Message::AddDrawing(drawing))
+                                                .and_capture(),
+                                        );
+                                    } else {
+                                        d_state.start_point = Some((time, price));
+                                        d_state.in_progress = Some(Drawing::rectangle(
+                                            (time, price),
+                                            (time, price),
+                                            [0.3, 0.6, 0.95, 0.8],
+                                            1.0,
+                                        ));
+                                        return Some(
+                                            canvas::Action::request_redraw().and_capture(),
+                                        );
+                                    }
+                                }
+                                DrawingTool::Brush => {
+                                    d_state.start_point = Some((time, price));
+                                    d_state.in_progress = Some(Drawing::brush(
+                                        vec![(time, price)],
+                                        [0.35, 0.7, 1.0, 1.0],
+                                        2.0,
+                                    ));
+                                    return Some(canvas::Action::request_redraw().and_capture());
+                                }
+                                DrawingTool::Path => {
+                                    if let Some(Drawing {
+                                        kind: DrawingKind::Path { points },
+                                        ..
+                                    }) = &mut d_state.in_progress
+                                    {
+                                        points.push((time, price));
+                                        if points.len() >= 4
+                                            && let Some(drawing) = d_state.in_progress.take()
+                                        {
+                                            d_state.active_tool = DrawingTool::None;
+                                            return Some(
+                                                canvas::Action::publish(Message::AddDrawing(
+                                                    drawing,
+                                                ))
+                                                .and_capture(),
+                                            );
+                                        }
+                                        return Some(
+                                            canvas::Action::request_redraw().and_capture(),
+                                        );
+                                    } else {
+                                        d_state.in_progress = Some(Drawing::path(
+                                            vec![(time, price), (time, price)],
+                                            [0.3, 0.75, 1.0, 1.0],
+                                            1.5,
+                                        ));
+                                        return Some(
+                                            canvas::Action::request_redraw().and_capture(),
+                                        );
+                                    }
+                                }
+                                DrawingTool::ShortPosition => {
+                                    let stop_price = price * 1.015;
+                                    let target_price = price * 0.955;
+                                    let drawing = Drawing::position(
+                                        (time, price),
+                                        stop_price,
+                                        target_price,
+                                        false,
+                                        [0.9, 0.3, 0.3, 1.0],
+                                        1.0,
+                                    );
+                                    d_state.active_tool = DrawingTool::None;
+                                    d_state.in_progress = None;
+                                    return Some(
+                                        canvas::Action::publish(Message::AddDrawing(drawing))
+                                            .and_capture(),
+                                    );
+                                }
+                                DrawingTool::LongPosition => {
+                                    let stop_price = price * 0.985;
+                                    let target_price = price * 1.045;
+                                    let drawing = Drawing::position(
+                                        (time, price),
+                                        stop_price,
+                                        target_price,
+                                        true,
+                                        [0.2, 0.8, 0.4, 1.0],
+                                        1.0,
+                                    );
+                                    d_state.active_tool = DrawingTool::None;
+                                    d_state.in_progress = None;
+                                    return Some(
+                                        canvas::Action::publish(Message::AddDrawing(drawing))
+                                            .and_capture(),
+                                    );
+                                }
+                                DrawingTool::None => {}
+                            }
+                        }
+                        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                            if let Some(drawing) = d_state.in_progress.take() {
+                                if matches!(drawing.kind, DrawingKind::Brush { .. }) {
+                                    d_state.active_tool = DrawingTool::None;
+                                    return Some(
+                                        canvas::Action::publish(Message::AddDrawing(drawing))
+                                            .and_capture(),
+                                    );
+                                } else {
+                                    d_state.in_progress = Some(drawing);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // 5.5. Handle Drawing Selection, Moving & Modification (TradingView style)
+        if self.drawing_state.borrow().active_tool == DrawingTool::None {
+            // Cancel / deselect on Escape
+            if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
+                if matches!(
+                    key.as_ref(),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                ) {
+                    let mut d_state = self.drawing_state.borrow_mut();
+                    if d_state.selected_drawing.take().is_some() {
+                        return Some(
+                            canvas::Action::publish(Message::SelectDrawing(None)).and_capture(),
+                        );
+                    }
+                }
+                // Delete selected drawing on Delete or Backspace
+                if matches!(
+                    key.as_ref(),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete)
+                        | iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace)
+                ) && let Some(id) = self.drawing_state.borrow_mut().selected_drawing.take()
+                {
+                    return Some(canvas::Action::publish(Message::DeleteDrawing(id)).and_capture());
+                }
+            }
+
+            // Dragging an existing drawing or handle
+            let is_drawing_drag = self.drawing_state.borrow().drag.is_some();
+            if is_drawing_drag {
+                let chart = self.state();
+                if let Some(pos) = cursor.position_in(bounds) {
+                    let frame_pos = Point::new(
+                        (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
+                        (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
+                    );
+                    let time = chart.x_to_interval(frame_pos.x);
+                    let price = chart.y_to_price(frame_pos.y).to_f32();
+
+                    match event {
+                        Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                            let mut d_state = self.drawing_state.borrow_mut();
+                            if let Some(DrawingDrag::MovingDrawing {
+                                start_time,
+                                start_price,
+                                initial_drawing,
+                                current_drawing,
+                                ..
+                            }) = &mut d_state.drag
+                            {
+                                let time_delta = time as i64 - *start_time as i64;
+                                let price_delta = price - *start_price;
+                                *current_drawing = initial_drawing.clone();
+                                current_drawing.translate(time_delta, price_delta);
+                                return Some(canvas::Action::request_redraw().and_capture());
+                            } else if let Some(DrawingDrag::MovingHandle {
+                                handle_idx,
+                                initial_drawing,
+                                current_drawing,
+                                ..
+                            }) = &mut d_state.drag
+                            {
+                                *current_drawing = initial_drawing.clone();
+                                match &mut current_drawing.kind {
+                                    DrawingKind::HorizontalLine { price: p } => *p = price,
+                                    DrawingKind::Trendline { p1, p2 } => {
+                                        if *handle_idx == 0 {
+                                            *p1 = (time, price);
+                                        } else {
+                                            *p2 = (time, price);
+                                        }
+                                    }
+                                    DrawingKind::Rectangle { p1, p2 } => {
+                                        if *handle_idx == 0 {
+                                            *p1 = (time, price);
+                                        } else if *handle_idx == 1 {
+                                            p1.1 = price;
+                                        } else if *handle_idx == 2 {
+                                            p2.0 = time;
+                                            p1.1 = price;
+                                        } else if *handle_idx == 3 {
+                                            p2.0 = time;
+                                        } else if *handle_idx == 4 {
+                                            *p2 = (time, price);
+                                        } else if *handle_idx == 5 {
+                                            p2.1 = price;
+                                        } else if *handle_idx == 6 {
+                                            p1.0 = time;
+                                            p2.1 = price;
+                                        } else if *handle_idx == 7 {
+                                            p1.0 = time;
+                                        }
+                                    }
+                                    DrawingKind::Path { points } => {
+                                        if let Some(pt) = points.get_mut(*handle_idx) {
+                                            *pt = (time, price);
+                                        }
+                                    }
+                                    DrawingKind::Brush { .. } => {}
+                                    DrawingKind::Position {
+                                        entry,
+                                        target_price,
+                                        stop_price,
+                                        ..
+                                    } => {
+                                        if *handle_idx == 0 {
+                                            *entry = (time, price);
+                                        } else if *handle_idx == 1 {
+                                            *target_price = price;
+                                        } else if *handle_idx == 2 {
+                                            *stop_price = price;
+                                        }
+                                    }
+                                }
+                                return Some(canvas::Action::request_redraw().and_capture());
+                            }
+                        }
+                        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                            let mut d_state = self.drawing_state.borrow_mut();
+                            if let Some(drag) = d_state.drag.take() {
+                                let current_drawing = match drag {
+                                    DrawingDrag::MovingDrawing {
+                                        current_drawing, ..
+                                    }
+                                    | DrawingDrag::MovingHandle {
+                                        current_drawing, ..
+                                    } => current_drawing,
+                                };
+                                return Some(
+                                    canvas::Action::publish(Message::UpdateDrawing(
+                                        current_drawing,
+                                    ))
+                                    .and_capture(),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            } else if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event {
+                // Check if an alert is near; if so, let alert dragging take precedence
+                let is_near_alert = if let Some(pos) = cursor.position_in(bounds) {
+                    let chart = self.state();
+                    self.alerts.iter().any(|a| {
+                        let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
+                        let alert_screen_y =
+                            (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
+                        (pos.y - alert_screen_y).abs() <= 8.0
+                    })
+                } else {
+                    false
+                };
+
+                if !is_near_alert && let Some(pos) = cursor.position_in(bounds) {
+                    let chart = self.state();
+                    let frame_pos = Point::new(
+                        (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
+                        (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
+                    );
+                    let time = chart.x_to_interval(frame_pos.x);
+                    let price = chart.y_to_price(frame_pos.y).to_f32();
+                    let threshold = 8.0 / chart.scaling;
+
+                    // Check handles of currently selected drawing
+                    let mut handle_hit = None;
+                    if let Some(sel_id) = self.drawing_state.borrow().selected_drawing
+                        && let Some(sel_d) = self.drawings.iter().find(|d| d.id == sel_id)
+                        && let Some(HitTarget::Handle(idx)) =
+                            hit_test_drawing(sel_d, frame_pos, chart, threshold)
+                    {
+                        handle_hit = Some((sel_d.clone(), idx));
+                    }
+
+                    if let Some((sel_d, idx)) = handle_hit {
+                        if !sel_d.is_locked {
+                            self.drawing_state.borrow_mut().drag =
+                                Some(DrawingDrag::MovingHandle {
+                                    handle_idx: idx,
+                                    initial_drawing: sel_d.clone(),
+                                    current_drawing: sel_d,
+                                });
+                        }
+                        return Some(canvas::Action::request_redraw().and_capture());
+                    }
+
+                    // Check any drawing
+                    let hit = self.drawings.iter().rev().find_map(|d| {
+                        hit_test_drawing(d, frame_pos, chart, threshold)
+                            .map(|target| (d.clone(), target))
+                    });
+
+                    if let Some((drawing, target)) = hit {
+                        let mut d_state = self.drawing_state.borrow_mut();
+                        d_state.selected_drawing = Some(drawing.id);
+                        if !drawing.is_locked {
+                            match target {
+                                HitTarget::Handle(idx) => {
+                                    d_state.drag = Some(DrawingDrag::MovingHandle {
+                                        handle_idx: idx,
+                                        initial_drawing: drawing.clone(),
+                                        current_drawing: drawing.clone(),
+                                    });
+                                }
+                                HitTarget::Body => {
+                                    d_state.drag = Some(DrawingDrag::MovingDrawing {
+                                        start_time: time,
+                                        start_price: price,
+                                        initial_drawing: drawing.clone(),
+                                        current_drawing: drawing.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        return Some(
+                            canvas::Action::publish(Message::SelectDrawing(Some(drawing.id)))
+                                .and_capture(),
+                        );
+                    } else {
+                        // Clicked empty space: deselect
+                        let mut d_state = self.drawing_state.borrow_mut();
+                        if d_state.selected_drawing.take().is_some() {
+                            return Some(
+                                canvas::Action::publish(Message::SelectDrawing(None)).and_capture(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Handle Price Alert Dragging (TradingView style)
+        if self.drawing_state.borrow().active_tool == DrawingTool::None {
+            // Cancel alert drag on Escape
+            if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
+                && matches!(
+                    key.as_ref(),
+                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                )
+                && self.alert_drag_state.borrow_mut().take().is_some()
+            {
+                return Some(canvas::Action::request_redraw().and_capture());
+            }
+
+            let is_dragging = self.alert_drag_state.borrow().is_some();
+            if is_dragging {
+                let chart = self.state();
+                let calc_price = |cursor: mouse::Cursor| -> Option<f32> {
+                    let pos = cursor.position_from(bounds.position())?;
+                    let frame_pos = Point::new(
+                        (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
+                        (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
+                    );
+                    Some(chart.y_to_price(frame_pos.y).to_f32())
+                };
+
+                match event {
+                    Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                        if let Some(price) = calc_price(cursor)
+                            && let Some(drag) = self.alert_drag_state.borrow_mut().as_mut()
+                        {
+                            drag.1 = price;
+                            return Some(canvas::Action::request_redraw().and_capture());
+                        }
+                    }
+                    Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                        if let Some((id, drag_price)) = self.alert_drag_state.borrow_mut().take() {
+                            let final_price = calc_price(cursor).unwrap_or(drag_price);
+                            return Some(
+                                canvas::Action::publish(Message::UpdateAlertPrice(id, final_price))
+                                    .and_capture(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            } else if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+                && let Some(pos) = cursor.position_in(bounds)
+            {
+                let chart = self.state();
+                let frame_pos = Point::new(
+                    (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
+                    (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
+                );
+                let current_cursor_price = chart.y_to_price(frame_pos.y).to_f32();
+
+                let found_alert = self.alerts.iter().find(|a| {
+                    let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
+                    let alert_screen_y =
+                        (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
+                    (pos.y - alert_screen_y).abs() <= 8.0
+                });
+
+                if let Some(alert) = found_alert {
+                    *self.alert_drag_state.borrow_mut() = Some((alert.id, current_cursor_price));
+                    return Some(canvas::Action::request_redraw().and_capture());
+                }
+            }
+        }
+
         super::canvas_interaction(self, interaction, event, bounds, cursor)
     }
 
@@ -1664,13 +2896,49 @@ impl canvas::Program<Message> for KlineChart {
             frame.translate(chart.translation);
 
             let region = chart.visible_region(frame.size());
-            let (earliest, latest) = chart.interval_range(&region);
+            let (earliest, raw_latest) = chart.interval_range(&region);
+            let latest = if let Some(ref rep) = self.replay {
+                if rep.active && rep.cutoff_time > 0 {
+                    raw_latest.min(rep.cutoff_time)
+                } else {
+                    raw_latest
+                }
+            } else {
+                raw_latest
+            };
+
+            if earliest > latest {
+                chart.draw_last_price_line(frame, palette, region);
+                return;
+            }
+
             let (p_high, p_low) = chart.price_range(&region);
             let visible_max_price = p_high.to_f32_lossy().max(p_low.to_f32_lossy()) as f64;
             let visible_min_price = p_high.to_f32_lossy().min(p_low.to_f32_lossy()) as f64;
 
             let price_to_y = |price| chart.price_to_y(price);
             let interval_to_x = |interval| chart.interval_to_x(interval);
+
+            if self.indicators[KlineIndicator::LiquidationHeatmap].is_some() {
+                let current_price = chart
+                    .last_price
+                    .as_ref()
+                    .map(|lp| lp.price().to_f32())
+                    .unwrap_or_else(|| chart.base_price_y.to_f32_lossy());
+                draw_liquidation_heatmap(
+                    &self.liquidation_heatmap,
+                    frame,
+                    &region,
+                    price_to_y,
+                    interval_to_x,
+                    earliest,
+                    latest,
+                    current_price,
+                    self.config.liq_show_bands,
+                    self.config.liq_show_histogram,
+                    palette.is_dark,
+                );
+            }
 
             match &self.kind {
                 KlineChartKind::Footprint {
@@ -1813,7 +3081,7 @@ impl canvas::Program<Message> for KlineChart {
                         // LOD::Candle — render plain thin candles, with optional classic bottom volume
                         let plain_candle_width = (chart.cell_width * 0.8).max(1.0);
                         let show_vol = *show_bottom_volume;
-                        let max_vol = if show_vol {
+                        let max_vol = if show_vol && earliest <= latest {
                             match &self.data_source {
                                 PlotData::TimeBased(ts) => ts
                                     .datapoints
@@ -1933,6 +3201,10 @@ impl canvas::Program<Message> for KlineChart {
                     period: _,
                     clusters,
                     split_sessions,
+                    color_scheme,
+                    ib_color,
+                    poc_color,
+                    single_prints_color,
                 } => {
                     let base_price = chart.base_price_y.to_f32_lossy() as f64;
                     let exchange_tick = chart.tick_size.to_f32_lossy() as f64;
@@ -1967,6 +3239,11 @@ impl canvas::Program<Message> for KlineChart {
                         effective_period,
                         clusters,
                         split_sessions,
+                        *color_scheme,
+                        *ib_color,
+                        *poc_color,
+                        *single_prints_color,
+                        palette,
                     );
 
                     if *show_candles {
@@ -2003,6 +3280,24 @@ impl canvas::Program<Message> for KlineChart {
                 );
             }
 
+            if self.indicators[KlineIndicator::RollingVwap].is_some() {
+                let rolling_indicator = self.indicators[KlineIndicator::RollingVwap]
+                    .as_ref()
+                    .and_then(|box_indi| box_indi.as_any())
+                    .and_then(|any| any.downcast_ref::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>());
+
+                draw_rolling_vwap_overlay(
+                    rolling_indicator,
+                    &self.data_source,
+                    frame,
+                    price_to_y,
+                    interval_to_x,
+                    earliest,
+                    latest,
+                    &self.config,
+                );
+            }
+
             if self.indicators[KlineIndicator::Tpo].is_some()
                 && !matches!(self.kind, KlineChartKind::Tpo { .. })
             {
@@ -2034,11 +3329,47 @@ impl canvas::Program<Message> for KlineChart {
                     data::chart::tpo::SessionPeriod::Daily,
                     &[],
                     &[],
+                    data::chart::kline::TpoColorScheme::default(),
+                    data::chart::kline::TpoElementColor::default(),
+                    data::chart::kline::TpoElementColor::default(),
+                    data::chart::kline::TpoElementColor::default(),
+                    palette,
                 );
             }
 
+
             chart.draw_last_price_line(frame, palette, region);
         });
+
+        // Dynamic layer for drawings and alerts (smooth 60fps rubberband & dragging)
+        let mut dynamic_frame = canvas::Frame::new(renderer, bounds_size);
+        let center = Vector::new(bounds.width / 2.0, bounds.height / 2.0);
+        dynamic_frame.translate(center);
+        dynamic_frame.scale(chart.scaling);
+        dynamic_frame.translate(chart.translation);
+
+        let region = chart.visible_region(bounds_size);
+        let d_state = self.drawing_state.borrow();
+        let selected_drawing_id = d_state.selected_drawing;
+        let drag_drawing = d_state.drag.as_ref().map(|d| d.current_drawing());
+        draw_chart_drawings(
+            &mut dynamic_frame,
+            &self.drawings,
+            &d_state.in_progress,
+            drag_drawing,
+            chart,
+            &region,
+            selected_drawing_id,
+        );
+        draw_chart_alerts(
+            &mut dynamic_frame,
+            &self.alerts,
+            chart,
+            &region,
+            &self.alert_drag_state.borrow(),
+            palette,
+        );
+        let dynamic_geometry = dynamic_frame.into_geometry();
 
         let crosshair = chart.cache.crosshair.draw(renderer, bounds_size, |frame| {
             if let Some(cursor_position) = cursor.position_in(bounds) {
@@ -2055,7 +3386,7 @@ impl canvas::Program<Message> for KlineChart {
             }
         });
 
-        let mut layers = vec![klines, crosshair];
+        let mut layers = vec![klines, dynamic_geometry, crosshair];
         let menu_opt = self.tpo_cache.borrow().context_menu.clone();
         if let Some(menu) = menu_opt {
             let mut frame = canvas::Frame::new(renderer, bounds_size);
@@ -2072,6 +3403,26 @@ impl canvas::Program<Message> for KlineChart {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> mouse::Interaction {
+        if self.alert_drag_state.borrow().is_some() {
+            return mouse::Interaction::ResizingVertically;
+        }
+
+        if let Some(pos) = cursor.position_in(bounds) {
+            let chart = self.state();
+            let is_near_alert = self.alerts.iter().any(|a| {
+                let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
+                let alert_screen_y =
+                    (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
+                (pos.y - alert_screen_y).abs() <= 8.0
+            });
+            if is_near_alert && self.drawing_state.borrow().active_tool == DrawingTool::None {
+                return mouse::Interaction::ResizingVertically;
+            }
+        }
+
+        if self.drawing_state.borrow().active_tool != DrawingTool::None {
+            return mouse::Interaction::Crosshair;
+        }
         match interaction {
             Interaction::Panning { .. } => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
@@ -2771,6 +4122,22 @@ fn draw_cluster_search_highlights(
 
         let y = price_to_y(*price);
 
+        // Volumetric scaling factor: markers scale dynamically with anomaly magnitude
+        let threshold_ref = if min_volume > 0.0 {
+            min_volume
+        } else if min_delta > 0.0 {
+            min_delta
+        } else {
+            100.0
+        };
+        let anomaly_metric = if min_volume > 0.0 {
+            total_vol
+        } else {
+            delta.abs()
+        };
+        let vol_ratio = (anomaly_metric / threshold_ref.max(1.0)).max(1.0);
+        let scale_factor = vol_ratio.sqrt().clamp(1.0, 3.0);
+
         match style {
             HighlightStyle::Border => {
                 let (rect_x, rect_y, rect_w, rect_h) = if is_thin {
@@ -2835,55 +4202,125 @@ fn draw_cluster_search_highlights(
                 );
             }
             HighlightStyle::Circle => {
-                let radius = (cell_height * 0.40).clamp(3.5 / scaling, 8.0 / scaling);
-                let center_x = if is_thin {
-                    x_position
-                } else if delta >= 0.0 {
-                    x_position + cell_width / 2.0 - radius - (2.0 / scaling)
-                } else {
-                    x_position - cell_width / 2.0 + radius + (2.0 / scaling)
-                };
-                let circle_path = Path::circle(Point::new(center_x, y), radius);
-                frame.fill(&circle_path, base_color);
+                let base_r = (cell_height * 0.85).clamp(8.0 / scaling, 18.0 / scaling);
+                let radius = (base_r * scale_factor).clamp(7.0 / scaling, 36.0 / scaling);
+                let circle_path = Path::circle(Point::new(x_position, y), radius);
+                frame.fill(&circle_path, base_color.scale_alpha(0.35));
+                frame.stroke(
+                    &circle_path,
+                    Stroke::with_color(
+                        Stroke {
+                            width: border_w,
+                            ..Default::default()
+                        },
+                        base_color.scale_alpha(0.95),
+                    ),
+                );
+            }
+            HighlightStyle::Ring => {
+                let base_r = (cell_height * 0.85).clamp(8.0 / scaling, 18.0 / scaling);
+                let radius = (base_r * scale_factor).clamp(7.0 / scaling, 36.0 / scaling);
+                let ring_path = Path::circle(Point::new(x_position, y), radius);
+                frame.stroke(
+                    &ring_path,
+                    Stroke::with_color(
+                        Stroke {
+                            width: border_w * 1.2,
+                            ..Default::default()
+                        },
+                        base_color.scale_alpha(0.95),
+                    ),
+                );
+            }
+            HighlightStyle::Concentric => {
+                let base_r = (cell_height * 0.80).clamp(7.5 / scaling, 17.0 / scaling);
+                let inner_radius = (base_r * scale_factor).clamp(6.5 / scaling, 30.0 / scaling);
+                let inner_path = Path::circle(Point::new(x_position, y), inner_radius);
+                frame.fill(&inner_path, base_color.scale_alpha(0.35));
+                frame.stroke(
+                    &inner_path,
+                    Stroke::with_color(
+                        Stroke {
+                            width: border_w,
+                            ..Default::default()
+                        },
+                        base_color.scale_alpha(0.95),
+                    ),
+                );
+
+                let outer_radius = inner_radius * 1.45;
+                let outer_path = Path::circle(Point::new(x_position, y), outer_radius);
+                frame.stroke(
+                    &outer_path,
+                    Stroke::with_color(
+                        Stroke {
+                            width: border_w * 1.1,
+                            ..Default::default()
+                        },
+                        base_color.scale_alpha(0.85),
+                    ),
+                );
             }
             HighlightStyle::Triangle => {
-                let half_size = (cell_height * 0.42).clamp(3.5 / scaling, 8.0 / scaling);
-                let center_x = if is_thin {
-                    x_position
-                } else if delta >= 0.0 {
-                    x_position + cell_width / 2.0 - half_size - (2.0 / scaling)
-                } else {
-                    x_position - cell_width / 2.0 + half_size + (2.0 / scaling)
-                };
+                let base_size = (cell_height * 0.85).clamp(8.0 / scaling, 18.0 / scaling);
+                let half_size = (base_size * scale_factor).clamp(7.0 / scaling, 34.0 / scaling);
                 let tri_path = {
                     let mut builder = canvas::path::Builder::new();
                     if delta >= 0.0 {
-                        builder.move_to(Point::new(center_x, y - half_size));
-                        builder.line_to(Point::new(center_x + half_size, y + half_size));
-                        builder.line_to(Point::new(center_x - half_size, y + half_size));
+                        // Pointing UP
+                        builder.move_to(Point::new(x_position, y - half_size));
+                        builder.line_to(Point::new(
+                            x_position + half_size * 0.866,
+                            y + half_size * 0.5,
+                        ));
+                        builder.line_to(Point::new(
+                            x_position - half_size * 0.866,
+                            y + half_size * 0.5,
+                        ));
                     } else {
-                        builder.move_to(Point::new(center_x, y + half_size));
-                        builder.line_to(Point::new(center_x + half_size, y - half_size));
-                        builder.line_to(Point::new(center_x - half_size, y - half_size));
+                        // Pointing DOWN
+                        builder.move_to(Point::new(x_position, y + half_size));
+                        builder.line_to(Point::new(
+                            x_position + half_size * 0.866,
+                            y - half_size * 0.5,
+                        ));
+                        builder.line_to(Point::new(
+                            x_position - half_size * 0.866,
+                            y - half_size * 0.5,
+                        ));
                     }
                     builder.close();
                     builder.build()
                 };
-                frame.fill(&tri_path, base_color);
+                frame.fill(&tri_path, base_color.scale_alpha(0.35));
+                frame.stroke(
+                    &tri_path,
+                    Stroke::with_color(
+                        Stroke {
+                            width: border_w,
+                            ..Default::default()
+                        },
+                        base_color.scale_alpha(0.95),
+                    ),
+                );
             }
             HighlightStyle::Square => {
-                let half_size = (cell_height * 0.38).clamp(3.0 / scaling, 7.0 / scaling);
-                let center_x = if is_thin {
-                    x_position
-                } else if delta >= 0.0 {
-                    x_position + cell_width / 2.0 - half_size - (2.0 / scaling)
-                } else {
-                    x_position - cell_width / 2.0 + half_size + (2.0 / scaling)
-                };
-                frame.fill_rectangle(
-                    Point::new(center_x - half_size, y - half_size),
+                let base_size = (cell_height * 0.75).clamp(7.0 / scaling, 16.0 / scaling);
+                let half_size = (base_size * scale_factor).clamp(6.0 / scaling, 30.0 / scaling);
+                let rect = Path::rectangle(
+                    Point::new(x_position - half_size, y - half_size),
                     Size::new(half_size * 2.0, half_size * 2.0),
-                    base_color,
+                );
+                frame.fill(&rect, base_color.scale_alpha(0.35));
+                frame.stroke(
+                    &rect,
+                    Stroke::with_color(
+                        Stroke {
+                            width: border_w,
+                            ..Default::default()
+                        },
+                        base_color.scale_alpha(0.95),
+                    ),
                 );
             }
         }
@@ -2922,7 +4359,11 @@ fn draw_imbalance_markers(
         let alpha_from_ratio = |ratio: f32| -> f32 {
             if let Some(scale) = color_scale {
                 let divisor = (scale as f32 / 10.0) - 1.0;
-                (0.2 + 0.8 * ((ratio - 1.0) / divisor).min(1.0)).min(1.0)
+                if divisor.abs() < 1e-4 {
+                    1.0
+                } else {
+                    (0.2 + 0.8 * ((ratio - 1.0) / divisor).clamp(0.0, 1.0)).min(1.0)
+                }
             } else {
                 1.0
             }
@@ -3190,7 +4631,11 @@ fn lod_level(cell_width_unscaled: f32, cell_height_unscaled: f32, min_w: f32) ->
     }
 }
 
-fn bracket_color(bracket: char) -> iced::Color {
+fn bracket_color(
+    bracket: char,
+    scheme: data::chart::kline::TpoColorScheme,
+    palette: &Extended,
+) -> iced::Color {
     let idx = if bracket.is_ascii_uppercase() {
         (bracket as u8 - b'A') as usize
     } else if bracket.is_ascii_lowercase() {
@@ -3198,17 +4643,124 @@ fn bracket_color(bracket: char) -> iced::Color {
     } else {
         0
     };
-    const PALETTE: [iced::Color; 8] = [
-        iced::Color::from_rgb(0.20, 0.65, 0.95), // Sky Blue (0h-2h)
-        iced::Color::from_rgb(0.12, 0.76, 0.80), // Teal/Cyan (2h-4h)
-        iced::Color::from_rgb(0.22, 0.76, 0.54), // Emerald Mint (4h-6h)
-        iced::Color::from_rgb(0.98, 0.74, 0.18), // Golden Amber (6h-8h)
-        iced::Color::from_rgb(0.98, 0.48, 0.22), // Sunset Orange (8h-10h)
-        iced::Color::from_rgb(0.92, 0.32, 0.45), // Coral Rose (10h-12h)
-        iced::Color::from_rgb(0.68, 0.36, 0.82), // Violet Purple (12h-14h)
-        iced::Color::from_rgb(0.42, 0.45, 0.86), // Royal Indigo (14h-16h)
-    ];
-    PALETTE[(idx / 4) % PALETTE.len()]
+
+    match scheme {
+        data::chart::kline::TpoColorScheme::Classic => {
+            const PALETTE: [iced::Color; 8] = [
+                iced::Color::from_rgb(0.20, 0.65, 0.95), // Sky Blue (0h-2h)
+                iced::Color::from_rgb(0.12, 0.76, 0.80), // Teal/Cyan (2h-4h)
+                iced::Color::from_rgb(0.22, 0.76, 0.54), // Emerald Mint (4h-6h)
+                iced::Color::from_rgb(0.98, 0.74, 0.18), // Golden Amber (6h-8h)
+                iced::Color::from_rgb(0.98, 0.48, 0.22), // Sunset Orange (8h-10h)
+                iced::Color::from_rgb(0.92, 0.32, 0.45), // Coral Rose (10h-12h)
+                iced::Color::from_rgb(0.68, 0.36, 0.82), // Violet Purple (12h-14h)
+                iced::Color::from_rgb(0.42, 0.45, 0.86), // Royal Indigo (14h-16h)
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Theme => {
+            let colors = [
+                palette.primary.base.color,
+                palette.success.base.color,
+                palette.warning.base.color,
+                palette.danger.base.color,
+                palette.primary.strong.color,
+                palette.success.weak.color,
+                palette.warning.weak.color,
+                palette.danger.weak.color,
+            ];
+            colors[(idx / 4) % colors.len()]
+        }
+        data::chart::kline::TpoColorScheme::Cyan => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.12, 0.85, 0.95),
+                iced::Color::from_rgb(0.08, 0.75, 0.88),
+                iced::Color::from_rgb(0.20, 0.65, 0.90),
+                iced::Color::from_rgb(0.00, 0.90, 0.80),
+                iced::Color::from_rgb(0.30, 0.70, 0.98),
+                iced::Color::from_rgb(0.15, 0.60, 0.85),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Emerald => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.20, 0.85, 0.55),
+                iced::Color::from_rgb(0.15, 0.75, 0.45),
+                iced::Color::from_rgb(0.10, 0.90, 0.65),
+                iced::Color::from_rgb(0.30, 0.80, 0.40),
+                iced::Color::from_rgb(0.25, 0.70, 0.50),
+                iced::Color::from_rgb(0.05, 0.65, 0.35),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Amber => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.98, 0.78, 0.18),
+                iced::Color::from_rgb(0.95, 0.65, 0.15),
+                iced::Color::from_rgb(0.98, 0.55, 0.20),
+                iced::Color::from_rgb(0.90, 0.70, 0.25),
+                iced::Color::from_rgb(0.85, 0.60, 0.10),
+                iced::Color::from_rgb(0.99, 0.82, 0.30),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Purple => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.72, 0.40, 0.92),
+                iced::Color::from_rgb(0.60, 0.30, 0.85),
+                iced::Color::from_rgb(0.80, 0.45, 0.98),
+                iced::Color::from_rgb(0.55, 0.35, 0.80),
+                iced::Color::from_rgb(0.85, 0.50, 0.90),
+                iced::Color::from_rgb(0.50, 0.25, 0.75),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Red => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.95, 0.30, 0.40),
+                iced::Color::from_rgb(0.85, 0.25, 0.35),
+                iced::Color::from_rgb(0.98, 0.40, 0.48),
+                iced::Color::from_rgb(0.80, 0.20, 0.30),
+                iced::Color::from_rgb(0.90, 0.35, 0.42),
+                iced::Color::from_rgb(0.75, 0.15, 0.25),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Blue => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.25, 0.60, 0.98),
+                iced::Color::from_rgb(0.20, 0.50, 0.90),
+                iced::Color::from_rgb(0.35, 0.70, 0.99),
+                iced::Color::from_rgb(0.15, 0.45, 0.85),
+                iced::Color::from_rgb(0.30, 0.65, 0.95),
+                iced::Color::from_rgb(0.10, 0.40, 0.80),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Monochrome => {
+            const PALETTE: [iced::Color; 6] = [
+                iced::Color::from_rgb(0.85, 0.85, 0.85),
+                iced::Color::from_rgb(0.72, 0.72, 0.72),
+                iced::Color::from_rgb(0.92, 0.92, 0.92),
+                iced::Color::from_rgb(0.65, 0.65, 0.65),
+                iced::Color::from_rgb(0.78, 0.78, 0.78),
+                iced::Color::from_rgb(0.58, 0.58, 0.58),
+            ];
+            PALETTE[(idx / 4) % PALETTE.len()]
+        }
+        data::chart::kline::TpoColorScheme::Custom([r, g, b]) => {
+            let base_r = r as f32 / 255.0;
+            let base_g = g as f32 / 255.0;
+            let base_b = b as f32 / 255.0;
+            let factors = [1.0, 0.85, 1.15, 0.75, 1.05, 0.90];
+            let f = factors[(idx / 4) % factors.len()];
+            iced::Color::from_rgb(
+                (base_r * f).min(1.0),
+                (base_g * f).min(1.0),
+                (base_b * f).min(1.0),
+            )
+        }
+    }
 }
 
 fn draw_context_menu(
@@ -3299,6 +4851,25 @@ fn draw_context_menu(
     }
 }
 
+fn resolve_tpo_element_color(
+    elem_color: data::chart::kline::TpoElementColor,
+    palette: &Extended,
+    default_color: iced::Color,
+) -> iced::Color {
+    match elem_color {
+        data::chart::kline::TpoElementColor::Auto => default_color,
+        data::chart::kline::TpoElementColor::Theme => palette.warning.base.color,
+        data::chart::kline::TpoElementColor::Custom([r, g, b]) => iced::Color::from_rgb8(r, g, b),
+        other => {
+            if let Some([r, g, b]) = other.to_rgb() {
+                iced::Color::from_rgb8(r, g, b)
+            } else {
+                default_color
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_tpo_profiles(
     data_source: &PlotData<KlineDataPoint>,
@@ -3324,6 +4895,11 @@ fn draw_tpo_profiles(
     effective_period: data::chart::tpo::SessionPeriod,
     clusters: &[data::chart::tpo::SessionCluster],
     split_sessions: &[i64],
+    color_scheme: data::chart::kline::TpoColorScheme,
+    ib_color: data::chart::kline::TpoElementColor,
+    poc_color: data::chart::kline::TpoElementColor,
+    single_prints_color: data::chart::kline::TpoElementColor,
+    palette: &Extended,
 ) {
     let ex_tick = if exchange_tick_size <= 0.0 {
         1.0
@@ -3375,6 +4951,32 @@ fn draw_tpo_profiles(
     }
     cache.session_ranges.clear();
 
+    let format_session_date = |start: i64| -> String {
+        chrono::DateTime::from_timestamp_millis(start)
+            .map(|d| {
+                use chrono::Timelike;
+                let base = d.format("%Y-%m-%d").to_string();
+                match effective_period {
+                    data::chart::tpo::SessionPeriod::TradingSessions => {
+                        let hour = d.hour();
+                        let name = if hour < 8 {
+                            "Asia"
+                        } else if hour < 16 {
+                            "London"
+                        } else {
+                            "NY"
+                        };
+                        format!("{base} {name}")
+                    }
+                    data::chart::tpo::SessionPeriod::FourHours => {
+                        format!("{base} {:02}:00", d.hour())
+                    }
+                    _ => base,
+                }
+            })
+            .unwrap_or_else(|| start.to_string())
+    };
+
     // 2. Build or fetch raw profiles from cache
     let mut raw_profiles = Vec::with_capacity(sessions.len());
     for (session_start, session_end, session_candles) in sessions {
@@ -3397,9 +4999,7 @@ fn draw_tpo_profiles(
                 {
                     Arc::clone(&entry.profile)
                 } else {
-                    let date_str = chrono::DateTime::from_timestamp_millis(session_start)
-                        .map(|d| d.format("%Y-%m-%d").to_string())
-                        .unwrap_or_else(|| session_start.to_string());
+                    let date_str = format_session_date(session_start);
                     let p = Arc::new(data::chart::tpo::build_tpo_profile(
                         &session_candles,
                         session_start,
@@ -3420,9 +5020,7 @@ fn draw_tpo_profiles(
                     p
                 }
             } else {
-                let date_str = chrono::DateTime::from_timestamp_millis(session_start)
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| session_start.to_string());
+                let date_str = format_session_date(session_start);
                 let p = Arc::new(data::chart::tpo::build_tpo_profile(
                     &session_candles,
                     session_start,
@@ -3507,29 +5105,92 @@ fn draw_tpo_profiles(
             is_clustered,
             is_split_brackets: is_session_split,
         });
+        let (va_fill_color, va_line_color, default_poc_color) = match color_scheme {
+            data::chart::kline::TpoColorScheme::Theme => (
+                palette.primary.base.color.scale_alpha(0.10),
+                palette.primary.base.color,
+                palette.warning.base.color,
+            ),
+            data::chart::kline::TpoColorScheme::Custom([r, g, b]) => {
+                let base = iced::Color::from_rgb8(r, g, b);
+                (
+                    base.scale_alpha(0.10),
+                    base,
+                    iced::Color::from_rgb(0.98, 0.74, 0.18),
+                )
+            }
+            data::chart::kline::TpoColorScheme::Cyan => (
+                iced::Color::from_rgba(0.08, 0.80, 0.90, 0.08),
+                iced::Color::from_rgb(0.08, 0.80, 0.90),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+            data::chart::kline::TpoColorScheme::Emerald => (
+                iced::Color::from_rgba(0.15, 0.80, 0.50, 0.08),
+                iced::Color::from_rgb(0.15, 0.80, 0.50),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+            data::chart::kline::TpoColorScheme::Amber => (
+                iced::Color::from_rgba(0.98, 0.70, 0.18, 0.08),
+                iced::Color::from_rgb(0.98, 0.70, 0.18),
+                iced::Color::from_rgb(0.98, 0.48, 0.22),
+            ),
+            data::chart::kline::TpoColorScheme::Purple => (
+                iced::Color::from_rgba(0.68, 0.36, 0.85, 0.08),
+                iced::Color::from_rgb(0.68, 0.36, 0.85),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+            data::chart::kline::TpoColorScheme::Red => (
+                iced::Color::from_rgba(0.92, 0.30, 0.38, 0.08),
+                iced::Color::from_rgb(0.92, 0.30, 0.38),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+            data::chart::kline::TpoColorScheme::Blue => (
+                iced::Color::from_rgba(0.20, 0.60, 0.95, 0.08),
+                iced::Color::from_rgb(0.20, 0.60, 0.95),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+            data::chart::kline::TpoColorScheme::Monochrome => (
+                iced::Color::from_rgba(0.80, 0.80, 0.80, 0.08),
+                iced::Color::from_rgb(0.80, 0.80, 0.80),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+            data::chart::kline::TpoColorScheme::Classic => (
+                iced::Color::from_rgba(0.20, 0.65, 0.95, 0.08),
+                iced::Color::from_rgb(0.20, 0.65, 0.95),
+                iced::Color::from_rgb(0.98, 0.74, 0.18),
+            ),
+        };
+        let poc_color = resolve_tpo_element_color(poc_color, palette, default_poc_color);
+        let ib_color =
+            resolve_tpo_element_color(ib_color, palette, iced::Color::from_rgb(0.98, 0.74, 0.18));
+
         // 1. Shaded Value Area (VAH to VAL)
         if show_va && let Some(ref va) = profile.value_area {
             let vah_y = price_to_y(Price::from_f32(va.vah as f32));
             let val_y = price_to_y(Price::from_f32(va.val as f32));
             let top_y = vah_y.min(val_y);
             let h = (vah_y - val_y).abs() + tpo_row_height;
-            let va_width = (profile_width + 16.0).min(max_session_draw_width);
+            let va_width = if is_session_split {
+                session_px_span
+            } else {
+                (profile_width + 16.0).min(max_session_draw_width)
+            };
 
             frame.fill_rectangle(
                 Point::new(session_start_x, top_y - tpo_row_height / 2.0),
                 Size::new(va_width, h),
-                iced::Color::from_rgba(0.20, 0.65, 0.95, 0.08),
+                va_fill_color,
             );
 
             frame.fill_rectangle(
                 Point::new(session_start_x, vah_y - 0.5),
                 Size::new(va_width, 1.5),
-                iced::Color::from_rgb(0.20, 0.65, 0.95),
+                va_line_color,
             );
             frame.fill_rectangle(
                 Point::new(session_start_x, val_y - 0.5),
                 Size::new(va_width, 1.5),
-                iced::Color::from_rgb(0.20, 0.65, 0.95),
+                va_line_color,
             );
         }
 
@@ -3540,10 +5201,26 @@ fn draw_tpo_profiles(
                     continue;
                 }
                 let y = price_to_y(Price::from_f32(sp.start_price as f32));
-                let color = if sp.is_tail {
-                    iced::Color::from_rgba(0.92, 0.32, 0.45, 0.35)
-                } else {
-                    iced::Color::from_rgba(0.68, 0.36, 0.82, 0.25)
+                let color = match single_prints_color {
+                    data::chart::kline::TpoElementColor::Auto => {
+                        if sp.is_tail {
+                            iced::Color::from_rgba(0.92, 0.32, 0.45, 0.35)
+                        } else {
+                            iced::Color::from_rgba(0.68, 0.36, 0.82, 0.25)
+                        }
+                    }
+                    custom_color => {
+                        let base = resolve_tpo_element_color(
+                            custom_color,
+                            palette,
+                            iced::Color::from_rgb(0.68, 0.36, 0.82),
+                        );
+                        if sp.is_tail {
+                            base.scale_alpha(0.40)
+                        } else {
+                            base.scale_alpha(0.28)
+                        }
+                    }
                 };
                 frame.fill_rectangle(
                     Point::new(session_start_x, y - tpo_row_height / 2.0),
@@ -3564,16 +5241,22 @@ fn draw_tpo_profiles(
                 let y = price_to_y(Price::from_f32(bin_price as f32));
                 let cell_y = y - tpo_row_height / 2.0 + row_gap / 2.0;
 
-                for &bracket in row {
-                    let b_idx = if bracket.is_ascii_uppercase() {
-                        (bracket as u8 - b'A') as usize
+                let row_indices = profile.bracket_indices.get(&t);
+
+                for (idx_in_row, &bracket) in row.iter().enumerate() {
+                    let b_idx = if let Some(indices) = row_indices
+                        && let Some(&actual_idx) = indices.get(idx_in_row)
+                    {
+                        actual_idx as i64
+                    } else if bracket.is_ascii_uppercase() {
+                        (bracket as u8 - b'A') as i64
                     } else if bracket.is_ascii_lowercase() {
-                        26 + (bracket as u8 - b'a') as usize
+                        26 + (bracket as u8 - b'a') as i64
                     } else {
                         0
                     };
 
-                    let bracket_time = session_start + (b_idx as i64) * 1_800_000;
+                    let bracket_time = session_start + b_idx * 1_800_000;
                     let col_x = interval_to_x(bracket_time as u64);
                     let next_col_x = interval_to_x((bracket_time + 1_800_000) as u64);
                     let col_span = (next_col_x - col_x).abs().max(eff_col_w);
@@ -3583,7 +5266,7 @@ fn draw_tpo_profiles(
                         continue;
                     }
 
-                    let color = bracket_color(bracket);
+                    let color = bracket_color(bracket, color_scheme, palette);
                     if render_text {
                         frame.fill_rectangle(
                             Point::new(col_x, cell_y),
@@ -3636,7 +5319,7 @@ fn draw_tpo_profiles(
                 for (col_offset, &bracket) in row[min_col..max_col].iter().enumerate() {
                     let actual_col = min_col + col_offset;
                     let x = session_start_x + (actual_col as f32) * eff_col_w;
-                    let color = bracket_color(bracket);
+                    let color = bracket_color(bracket, color_scheme, palette);
 
                     if render_text {
                         frame.fill_rectangle(
@@ -3671,11 +5354,15 @@ fn draw_tpo_profiles(
             && poc.price <= visible_max_price
         {
             let poc_y = price_to_y(Price::from_f32(poc.price as f32));
-            let poc_line_width = (profile_width + 24.0).min(max_session_draw_width);
+            let poc_line_width = if is_session_split {
+                session_px_span
+            } else {
+                (profile_width + 24.0).min(max_session_draw_width)
+            };
             frame.fill_rectangle(
                 Point::new(session_start_x, poc_y - 1.0),
                 Size::new(poc_line_width, 2.0),
-                iced::Color::from_rgb(0.98, 0.74, 0.18),
+                poc_color,
             );
         }
 
@@ -3695,7 +5382,7 @@ fn draw_tpo_profiles(
             frame.fill_rectangle(
                 Point::new(session_start_x - ib_x_offset, top_y - tpo_row_height / 2.0),
                 Size::new(bar_w, h),
-                iced::Color::from_rgb(0.98, 0.74, 0.18),
+                ib_color,
             );
 
             let ext15_y = price_to_y(Price::from_f32(ib.extension_high_1_5 as f32));
@@ -3703,15 +5390,119 @@ fn draw_tpo_profiles(
             frame.fill_rectangle(
                 Point::new(session_start_x, ext15_y - 0.5),
                 Size::new(ext_w, 1.0),
-                iced::Color::from_rgba(0.98, 0.74, 0.18, 0.60),
+                ib_color.scale_alpha(0.60),
             );
 
             let ext20_y = price_to_y(Price::from_f32(ib.extension_high_2_0 as f32));
             frame.fill_rectangle(
                 Point::new(session_start_x, ext20_y - 0.5),
                 Size::new(ext_w, 1.0),
-                iced::Color::from_rgba(0.98, 0.74, 0.18, 0.60),
+                ib_color.scale_alpha(0.60),
             );
+        }
+    }
+}
+
+fn draw_liquidation_heatmap(
+    heatmap: &LiquidationHeatmap,
+    frame: &mut canvas::Frame,
+    region: &Rectangle,
+    price_to_y: impl Fn(Price) -> f32,
+    interval_to_x: impl Fn(u64) -> f32,
+    _earliest: u64,
+    latest: u64,
+    current_price: f32,
+    show_bands: bool,
+    show_histogram: bool,
+    is_dark: bool,
+) {
+    if !show_bands && !show_histogram {
+        return;
+    }
+
+    let right_edge_x = region.x + region.width;
+
+    // 1. 2D Time x Price Liquidation Bands
+    if show_bands {
+        let max_strength = heatmap.max_segment_strength();
+        // Noise gate filter: keep low-volume single-candle noise transparent
+        let min_ratio = 0.08_f32;
+
+        for seg in heatmap.segments() {
+            let ratio = seg.strength / max_strength;
+            if ratio < min_ratio {
+                continue;
+            }
+
+            let y_top = price_to_y(seg.top);
+            let y_bottom = price_to_y(seg.bottom);
+            let y = y_top.min(y_bottom);
+            let h = (y_top - y_bottom).abs().max(1.0);
+
+            if y + h < region.y || y > region.y + region.height {
+                continue;
+            }
+
+            let start_x = interval_to_x(seg.start_time);
+            let end_x = match seg.end_time {
+                Some(t_end) => interval_to_x(t_end),
+                None => interval_to_x(latest).max(right_edge_x),
+            };
+
+            if end_x < region.x || start_x > right_edge_x {
+                continue;
+            }
+
+            let x1 = start_x.max(region.x);
+            let x2 = end_x.min(right_edge_x);
+            if x2 <= x1 {
+                continue;
+            }
+            let w = (x2 - x1).max(1.0);
+
+            let norm_ratio = ((ratio - min_ratio) / (1.0 - min_ratio)).clamp(0.0, 1.0);
+            let (r, g, b, a) = interpolate_color_themed(norm_ratio, is_dark);
+            let band_color = iced::Color::from_rgba(r, g, b, a);
+
+            frame.fill_rectangle(Point::new(x1, y), Size::new(w, h), band_color);
+        }
+    }
+
+    // 2. Right-side concentration histogram
+    if show_histogram {
+        let cells = heatmap.visible_cells(current_price, 300);
+        if !cells.is_empty() {
+            let max_strength = cells
+                .iter()
+                .map(|c| c.strength)
+                .fold(0.0_f32, f32::max)
+                .max(0.001);
+
+            let max_bar_width = (region.width * 0.18).clamp(30.0, 140.0);
+
+            for cell in &cells {
+                let y_top = price_to_y(cell.top);
+                let y_bottom = price_to_y(cell.bottom);
+                let y = y_top.min(y_bottom);
+                let h = (y_top - y_bottom).abs().max(1.5);
+
+                if y + h < region.y || y > region.y + region.height {
+                    continue;
+                }
+
+                let ratio = (cell.strength / max_strength).clamp(0.01, 1.0);
+                let (r, g, b, a) = interpolate_color_themed(ratio, is_dark);
+
+                let bar_norm = (cell.strength / max_strength).clamp(0.05, 1.0);
+                let bar_w = bar_norm * max_bar_width;
+                let bar_x = right_edge_x - bar_w;
+
+                let bar_color = iced::Color::from_rgba(r, g, b, (a * 0.85).clamp(0.20, 0.95));
+                frame.fill_rectangle(Point::new(bar_x, y), Size::new(bar_w, h), bar_color);
+
+                let border_color = iced::Color::from_rgba(r, g, b, 0.95);
+                frame.fill_rectangle(Point::new(bar_x, y), Size::new(1.5, h), border_color);
+            }
         }
     }
 }
@@ -3808,6 +5599,792 @@ fn draw_vwap_overlay(
     }
 }
 
+fn draw_rolling_vwap_overlay(
+    rolling_indicator: Option<&crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>,
+    data_source: &PlotData<KlineDataPoint>,
+    frame: &mut canvas::Frame,
+    price_to_y: impl Fn(Price) -> f32,
+    interval_to_x: impl Fn(u64) -> f32,
+    earliest: u64,
+    latest: u64,
+    config: &data::chart::kline::Config,
+) {
+    if !config.rolling_vwap_show_7d
+        && !config.rolling_vwap_show_30d
+        && !config.rolling_vwap_show_90d
+        && !config.rolling_vwap_show_365d
+    {
+        return;
+    }
+
+    let mut prev_7d: Option<(f32, f32)> = None;
+    let mut prev_30d: Option<(f32, f32)> = None;
+    let mut prev_90d: Option<(f32, f32)> = None;
+    let mut prev_365d: Option<(f32, f32)> = None;
+
+    let stroke_7d = Stroke::default()
+        .with_color(iced::Color::from_rgb(0.0, 0.9, 1.0)) // Cyan (7d)
+        .with_width(1.5);
+    let stroke_30d = Stroke::default()
+        .with_color(iced::Color::from_rgb(1.0, 0.84, 0.0)) // Gold (30d)
+        .with_width(1.5);
+    let stroke_90d = Stroke::default()
+        .with_color(iced::Color::from_rgb(1.0, 0.45, 0.1)) // Orange (90d)
+        .with_width(1.5);
+    let stroke_365d = Stroke::default()
+        .with_color(iced::Color::from_rgb(0.85, 0.15, 0.95)) // Magenta (365d)
+        .with_width(1.5);
+
+    if let Some(indicator) = rolling_indicator {
+        for (&time_u64, pt) in &indicator.data {
+            if time_u64 > latest {
+                break;
+            }
+            let x = interval_to_x(time_u64);
+
+            if config.rolling_vwap_show_7d
+                && let Some(d7) = pt.d7
+            {
+                let y = price_to_y(Price::from_f32(d7.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_7d
+                {
+                    frame.stroke(&Path::line(Point::new(px, py), Point::new(x, y)), stroke_7d);
+                }
+                prev_7d = Some((x, y));
+            }
+
+            if config.rolling_vwap_show_30d
+                && let Some(d30) = pt.d30
+            {
+                let y = price_to_y(Price::from_f32(d30.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_30d
+                {
+                    frame.stroke(
+                        &Path::line(Point::new(px, py), Point::new(x, y)),
+                        stroke_30d,
+                    );
+                }
+                prev_30d = Some((x, y));
+            }
+
+            if config.rolling_vwap_show_90d
+                && let Some(d90) = pt.d90
+            {
+                let y = price_to_y(Price::from_f32(d90.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_90d
+                {
+                    frame.stroke(
+                        &Path::line(Point::new(px, py), Point::new(x, y)),
+                        stroke_90d,
+                    );
+                }
+                prev_90d = Some((x, y));
+            }
+
+            if config.rolling_vwap_show_365d
+                && let Some(d365) = pt.d365
+            {
+                let y = price_to_y(Price::from_f32(d365.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_365d
+                {
+                    frame.stroke(
+                        &Path::line(Point::new(px, py), Point::new(x, y)),
+                        stroke_365d,
+                    );
+                }
+                prev_365d = Some((x, y));
+            }
+        }
+    } else {
+        let mut candles: Vec<(i64, f64, f64)> = Vec::new();
+        const MAX_WINDOW_MS: i64 = 365 * 86_400_000;
+        let fetch_earliest = (earliest as i64).saturating_sub(MAX_WINDOW_MS) as u64;
+
+        match data_source {
+            PlotData::TimeBased(ts) => {
+                for (time, dp) in &ts.datapoints {
+                    if *time >= fetch_earliest && *time <= latest {
+                        let tp = (dp.kline.high.to_f32()
+                            + dp.kline.low.to_f32()
+                            + dp.kline.close.to_f32()) as f64
+                            / 3.0;
+                        let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                        candles.push((*time as i64, tp, vol));
+                    }
+                }
+            }
+            PlotData::TickBased(ta) => {
+                for dp in &ta.datapoints {
+                    let time = dp.kline.time;
+                    if time >= fetch_earliest && time <= latest {
+                        let tp = (dp.kline.high.to_f32()
+                            + dp.kline.low.to_f32()
+                            + dp.kline.close.to_f32()) as f64
+                            / 3.0;
+                        let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                        candles.push((dp.kline.time as i64, tp, vol));
+                    }
+                }
+            }
+        }
+
+        if candles.len() < 2 {
+            return;
+        }
+
+        let points = data::chart::vwap::calculate_multi_rolling_vwap_series(&candles);
+        for (i, pt) in points.iter().enumerate() {
+            let time_u64 = candles[i].0 as u64;
+            let x = interval_to_x(time_u64);
+
+            if config.rolling_vwap_show_7d
+                && let Some(d7) = pt.d7
+            {
+                let y = price_to_y(Price::from_f32(d7.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_7d
+                {
+                    frame.stroke(&Path::line(Point::new(px, py), Point::new(x, y)), stroke_7d);
+                }
+                prev_7d = Some((x, y));
+            }
+
+            if config.rolling_vwap_show_30d
+                && let Some(d30) = pt.d30
+            {
+                let y = price_to_y(Price::from_f32(d30.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_30d
+                {
+                    frame.stroke(
+                        &Path::line(Point::new(px, py), Point::new(x, y)),
+                        stroke_30d,
+                    );
+                }
+                prev_30d = Some((x, y));
+            }
+
+            if config.rolling_vwap_show_90d
+                && let Some(d90) = pt.d90
+            {
+                let y = price_to_y(Price::from_f32(d90.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_90d
+                {
+                    frame.stroke(
+                        &Path::line(Point::new(px, py), Point::new(x, y)),
+                        stroke_90d,
+                    );
+                }
+                prev_90d = Some((x, y));
+            }
+
+            if config.rolling_vwap_show_365d
+                && let Some(d365) = pt.d365
+            {
+                let y = price_to_y(Price::from_f32(d365.vwap as f32));
+                if time_u64 >= earliest
+                    && let Some((px, py)) = prev_365d
+                {
+                    frame.stroke(
+                        &Path::line(Point::new(px, py), Point::new(x, y)),
+                        stroke_365d,
+                    );
+                }
+                prev_365d = Some((x, y));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HitTarget {
+    Handle(usize),
+    Body,
+}
+
+fn dist_to_segment(p: Point, a: Point, b: Point) -> f32 {
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let l2 = dx * dx + dy * dy;
+    if l2 == 0.0 {
+        return (p.x - a.x).hypot(p.y - a.y);
+    }
+    let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0);
+    let proj = Point::new(a.x + t * dx, a.y + t * dy);
+    (p.x - proj.x).hypot(p.y - proj.y)
+}
+
+fn hit_test_drawing(
+    drawing: &Drawing,
+    frame_pos: Point,
+    chart: &ViewState,
+    threshold: f32,
+) -> Option<HitTarget> {
+    // 1. Handles check
+    let handles: Vec<Point> = match &drawing.kind {
+        DrawingKind::HorizontalLine { price } => {
+            vec![Point::new(
+                frame_pos.x,
+                chart.price_to_y(Price::from_f32(*price)),
+            )]
+        }
+        DrawingKind::Trendline { p1, p2 } => {
+            vec![
+                Point::new(
+                    chart.interval_to_x(p1.0),
+                    chart.price_to_y(Price::from_f32(p1.1)),
+                ),
+                Point::new(
+                    chart.interval_to_x(p2.0),
+                    chart.price_to_y(Price::from_f32(p2.1)),
+                ),
+            ]
+        }
+        DrawingKind::Rectangle { p1, p2 } => {
+            let x1 = chart.interval_to_x(p1.0);
+            let y1 = chart.price_to_y(Price::from_f32(p1.1));
+            let x2 = chart.interval_to_x(p2.0);
+            let y2 = chart.price_to_y(Price::from_f32(p2.1));
+            let mid_x = (x1 + x2) / 2.0;
+            let mid_y = (y1 + y2) / 2.0;
+            vec![
+                Point::new(x1, y1),
+                Point::new(mid_x, y1),
+                Point::new(x2, y1),
+                Point::new(x2, mid_y),
+                Point::new(x2, y2),
+                Point::new(mid_x, y2),
+                Point::new(x1, y2),
+                Point::new(x1, mid_y),
+            ]
+        }
+        DrawingKind::Brush { .. } => Vec::new(),
+        DrawingKind::Path { points } => points
+            .iter()
+            .map(|pt| {
+                Point::new(
+                    chart.interval_to_x(pt.0),
+                    chart.price_to_y(Price::from_f32(pt.1)),
+                )
+            })
+            .collect(),
+        DrawingKind::Position {
+            entry,
+            target_price,
+            stop_price,
+            ..
+        } => {
+            let x = chart.interval_to_x(entry.0);
+            let w = 140.0 / chart.scaling;
+            vec![
+                Point::new(x, chart.price_to_y(Price::from_f32(entry.1))),
+                Point::new(
+                    x + w / 2.0,
+                    chart.price_to_y(Price::from_f32(*target_price)),
+                ),
+                Point::new(x + w / 2.0, chart.price_to_y(Price::from_f32(*stop_price))),
+            ]
+        }
+    };
+
+    for (idx, handle) in handles.iter().enumerate() {
+        if (frame_pos.x - handle.x).hypot(frame_pos.y - handle.y) <= threshold {
+            return Some(HitTarget::Handle(idx));
+        }
+    }
+
+    // 2. Body check
+    match &drawing.kind {
+        DrawingKind::HorizontalLine { price } => {
+            let y = chart.price_to_y(Price::from_f32(*price));
+            if (frame_pos.y - y).abs() <= threshold {
+                return Some(HitTarget::Body);
+            }
+        }
+        DrawingKind::Trendline { p1, p2 } => {
+            let a = Point::new(
+                chart.interval_to_x(p1.0),
+                chart.price_to_y(Price::from_f32(p1.1)),
+            );
+            let b = Point::new(
+                chart.interval_to_x(p2.0),
+                chart.price_to_y(Price::from_f32(p2.1)),
+            );
+            if dist_to_segment(frame_pos, a, b) <= threshold {
+                return Some(HitTarget::Body);
+            }
+        }
+        DrawingKind::Rectangle { p1, p2 } => {
+            let x1 = chart.interval_to_x(p1.0);
+            let y1 = chart.price_to_y(Price::from_f32(p1.1));
+            let x2 = chart.interval_to_x(p2.0);
+            let y2 = chart.price_to_y(Price::from_f32(p2.1));
+            let min_x = x1.min(x2);
+            let max_x = x1.max(x2);
+            let min_y = y1.min(y2);
+            let max_y = y1.max(y2);
+            if frame_pos.x >= min_x - threshold
+                && frame_pos.x <= max_x + threshold
+                && frame_pos.y >= min_y - threshold
+                && frame_pos.y <= max_y + threshold
+            {
+                return Some(HitTarget::Body);
+            }
+        }
+        DrawingKind::Brush { points } | DrawingKind::Path { points } => {
+            if points.len() == 1 {
+                let pt = Point::new(
+                    chart.interval_to_x(points[0].0),
+                    chart.price_to_y(Price::from_f32(points[0].1)),
+                );
+                if (frame_pos.x - pt.x).hypot(frame_pos.y - pt.y) <= threshold {
+                    return Some(HitTarget::Body);
+                }
+            }
+            for window in points.windows(2) {
+                let a = Point::new(
+                    chart.interval_to_x(window[0].0),
+                    chart.price_to_y(Price::from_f32(window[0].1)),
+                );
+                let b = Point::new(
+                    chart.interval_to_x(window[1].0),
+                    chart.price_to_y(Price::from_f32(window[1].1)),
+                );
+                if dist_to_segment(frame_pos, a, b) <= threshold {
+                    return Some(HitTarget::Body);
+                }
+            }
+        }
+        DrawingKind::Position {
+            entry,
+            target_price,
+            stop_price,
+            ..
+        } => {
+            let x = chart.interval_to_x(entry.0);
+            let w = 140.0 / chart.scaling;
+            let y_entry = chart.price_to_y(Price::from_f32(entry.1));
+            let y_tgt = chart.price_to_y(Price::from_f32(*target_price));
+            let y_stp = chart.price_to_y(Price::from_f32(*stop_price));
+            let min_y = y_tgt.min(y_stp).min(y_entry);
+            let max_y = y_tgt.max(y_stp).max(y_entry);
+            if frame_pos.x >= x - threshold
+                && frame_pos.x <= x + w + threshold
+                && frame_pos.y >= min_y - threshold
+                && frame_pos.y <= max_y + threshold
+            {
+                return Some(HitTarget::Body);
+            }
+        }
+    }
+
+    None
+}
+
+fn draw_chart_drawings(
+    frame: &mut canvas::Frame,
+    drawings: &[Drawing],
+    in_progress: &Option<Drawing>,
+    drag_drawing: Option<&Drawing>,
+    chart: &ViewState,
+    region: &Rectangle,
+    selected_id: Option<uuid::Uuid>,
+) {
+    let handle_radius = 4.0 / chart.scaling;
+    let handle_stroke_w = 1.5 / chart.scaling;
+    let sel_blue = iced::Color::from_rgb(0.16, 0.38, 1.0);
+    let handle_bg = iced::Color::from_rgb8(25, 28, 36);
+
+    let draw_round_handle = |frame: &mut canvas::Frame, pt: Point| {
+        frame.fill(&Path::circle(pt, handle_radius), handle_bg);
+        frame.stroke(
+            &Path::circle(pt, handle_radius),
+            Stroke {
+                style: canvas::Style::Solid(sel_blue),
+                width: handle_stroke_w,
+                ..Default::default()
+            },
+        );
+    };
+
+    let draw_square_handle = |frame: &mut canvas::Frame, pt: Point| {
+        let size = handle_radius * 1.8;
+        let rect_pt = Point::new(pt.x - size / 2.0, pt.y - size / 2.0);
+        let path = Path::rectangle(rect_pt, Size::new(size, size));
+        frame.fill(&path, handle_bg);
+        frame.stroke(
+            &path,
+            Stroke {
+                style: canvas::Style::Solid(sel_blue),
+                width: handle_stroke_w,
+                ..Default::default()
+            },
+        );
+    };
+
+    let drawings_iter = drawings.iter().map(|d| {
+        if let Some(drag_d) = drag_drawing
+            && drag_d.id == d.id
+        {
+            return drag_d;
+        }
+        d
+    });
+
+    for drawing in drawings_iter.chain(in_progress.iter()) {
+        let is_selected = drawing.is_selected || selected_id == Some(drawing.id);
+        let color = iced::Color::from_rgba(
+            drawing.color[0],
+            drawing.color[1],
+            drawing.color[2],
+            drawing.color[3],
+        );
+        let stroke = Stroke {
+            style: canvas::Style::Solid(color),
+            width: drawing.width,
+            ..Default::default()
+        };
+
+        match &drawing.kind {
+            DrawingKind::HorizontalLine { price } => {
+                let y = chart.price_to_y(Price::from_f32(*price));
+                frame.stroke(
+                    &Path::line(
+                        Point::new(region.x, y),
+                        Point::new(region.x + region.width, y),
+                    ),
+                    stroke,
+                );
+                if is_selected {
+                    draw_round_handle(frame, Point::new(region.x + region.width / 2.0, y));
+                }
+            }
+            DrawingKind::Trendline { p1, p2 } => {
+                let x1 = chart.interval_to_x(p1.0);
+                let y1 = chart.price_to_y(Price::from_f32(p1.1));
+                let x2 = chart.interval_to_x(p2.0);
+                let y2 = chart.price_to_y(Price::from_f32(p2.1));
+                frame.stroke(&Path::line(Point::new(x1, y1), Point::new(x2, y2)), stroke);
+                if is_selected {
+                    draw_round_handle(frame, Point::new(x1, y1));
+                    draw_round_handle(frame, Point::new(x2, y2));
+                }
+            }
+            DrawingKind::Rectangle { p1, p2 } => {
+                let x1 = chart.interval_to_x(p1.0);
+                let y1 = chart.price_to_y(Price::from_f32(p1.1));
+                let x2 = chart.interval_to_x(p2.0);
+                let y2 = chart.price_to_y(Price::from_f32(p2.1));
+
+                let min_x = x1.min(x2);
+                let min_y = y1.min(y2);
+                let w = (x1 - x2).abs();
+                let h = (y1 - y2).abs();
+
+                let fill_color = iced::Color::from_rgba(
+                    drawing.color[0],
+                    drawing.color[1],
+                    drawing.color[2],
+                    (drawing.color[3] * 0.25).max(0.08),
+                );
+                frame.fill_rectangle(Point::new(min_x, min_y), Size::new(w, h), fill_color);
+                frame.stroke(
+                    &Path::rectangle(Point::new(min_x, min_y), Size::new(w, h)),
+                    stroke,
+                );
+                if is_selected {
+                    let mid_x = (x1 + x2) / 2.0;
+                    let mid_y = (y1 + y2) / 2.0;
+                    draw_round_handle(frame, Point::new(x1, y1));
+                    draw_square_handle(frame, Point::new(mid_x, y1));
+                    draw_round_handle(frame, Point::new(x2, y1));
+                    draw_square_handle(frame, Point::new(x2, mid_y));
+                    draw_round_handle(frame, Point::new(x2, y2));
+                    draw_square_handle(frame, Point::new(mid_x, y2));
+                    draw_round_handle(frame, Point::new(x1, y2));
+                    draw_square_handle(frame, Point::new(x1, mid_y));
+                }
+            }
+            DrawingKind::Brush { points } => {
+                if points.len() >= 2 {
+                    let brush_path = Path::new(|builder| {
+                        let first = Point::new(
+                            chart.interval_to_x(points[0].0),
+                            chart.price_to_y(Price::from_f32(points[0].1)),
+                        );
+                        builder.move_to(first);
+                        for pt in &points[1..] {
+                            builder.line_to(Point::new(
+                                chart.interval_to_x(pt.0),
+                                chart.price_to_y(Price::from_f32(pt.1)),
+                            ));
+                        }
+                    });
+                    if is_selected {
+                        let highlight_stroke = Stroke {
+                            style: canvas::Style::Solid(iced::Color::from_rgba(
+                                0.16, 0.38, 1.0, 0.4,
+                            )),
+                            width: drawing.width + 4.0 / chart.scaling,
+                            ..Default::default()
+                        };
+                        frame.stroke(&brush_path, highlight_stroke);
+                    }
+                    frame.stroke(&brush_path, stroke);
+                } else if let Some(first) = points.first() {
+                    let pt = Point::new(
+                        chart.interval_to_x(first.0),
+                        chart.price_to_y(Price::from_f32(first.1)),
+                    );
+                    let r = (drawing.width / 2.0).max(2.0);
+                    if is_selected {
+                        frame.fill(
+                            &Path::circle(pt, r + 2.0 / chart.scaling),
+                            iced::Color::from_rgba(0.16, 0.38, 1.0, 0.4),
+                        );
+                    }
+                    frame.fill(&Path::circle(pt, r), color);
+                }
+            }
+            DrawingKind::Path { points } => {
+                if points.len() >= 2 {
+                    let path = Path::new(|builder| {
+                        let first = Point::new(
+                            chart.interval_to_x(points[0].0),
+                            chart.price_to_y(Price::from_f32(points[0].1)),
+                        );
+                        builder.move_to(first);
+                        for pt in &points[1..] {
+                            builder.line_to(Point::new(
+                                chart.interval_to_x(pt.0),
+                                chart.price_to_y(Price::from_f32(pt.1)),
+                            ));
+                        }
+                    });
+                    frame.stroke(&path, stroke);
+
+                    // Arrowhead on last segment
+                    let p_end = Point::new(
+                        chart.interval_to_x(points[points.len() - 1].0),
+                        chart.price_to_y(Price::from_f32(points[points.len() - 1].1)),
+                    );
+                    let p_prev = Point::new(
+                        chart.interval_to_x(points[points.len() - 2].0),
+                        chart.price_to_y(Price::from_f32(points[points.len() - 2].1)),
+                    );
+                    let angle = (p_end.y - p_prev.y).atan2(p_end.x - p_prev.x);
+                    let arrow_len = 10.0 / chart.scaling;
+                    let arrow = Path::new(|builder| {
+                        builder.move_to(Point::new(
+                            p_end.x - arrow_len * (angle - 0.5).cos(),
+                            p_end.y - arrow_len * (angle - 0.5).sin(),
+                        ));
+                        builder.line_to(p_end);
+                        builder.line_to(Point::new(
+                            p_end.x - arrow_len * (angle + 0.5).cos(),
+                            p_end.y - arrow_len * (angle + 0.5).sin(),
+                        ));
+                    });
+                    frame.stroke(&arrow, stroke);
+                }
+                if is_selected {
+                    for pt in points {
+                        draw_round_handle(
+                            frame,
+                            Point::new(
+                                chart.interval_to_x(pt.0),
+                                chart.price_to_y(Price::from_f32(pt.1)),
+                            ),
+                        );
+                    }
+                }
+            }
+            DrawingKind::Position {
+                entry,
+                target_price,
+                stop_price,
+                ..
+            } => {
+                let entry_x = chart.interval_to_x(entry.0);
+                let entry_y = chart.price_to_y(Price::from_f32(entry.1));
+                let target_y = chart.price_to_y(Price::from_f32(*target_price));
+                let stop_y = chart.price_to_y(Price::from_f32(*stop_price));
+                let box_w = 140.0 / chart.scaling;
+
+                // Profit zone
+                let p_min_y = entry_y.min(target_y);
+                let p_h = (entry_y - target_y).abs();
+                let profit_fill = iced::Color::from_rgba(0.12, 0.78, 0.42, 0.2);
+                let profit_stroke = Stroke {
+                    style: canvas::Style::Solid(iced::Color::from_rgba(0.12, 0.78, 0.42, 0.8)),
+                    width: 1.0,
+                    ..Default::default()
+                };
+                frame.fill_rectangle(
+                    Point::new(entry_x, p_min_y),
+                    Size::new(box_w, p_h),
+                    profit_fill,
+                );
+                frame.stroke(
+                    &Path::rectangle(Point::new(entry_x, p_min_y), Size::new(box_w, p_h)),
+                    profit_stroke,
+                );
+
+                // Stop zone
+                let s_min_y = entry_y.min(stop_y);
+                let s_h = (entry_y - stop_y).abs();
+                let stop_fill = iced::Color::from_rgba(0.88, 0.24, 0.24, 0.2);
+                let stop_stroke = Stroke {
+                    style: canvas::Style::Solid(iced::Color::from_rgba(0.88, 0.24, 0.24, 0.8)),
+                    width: 1.0,
+                    ..Default::default()
+                };
+                frame.fill_rectangle(
+                    Point::new(entry_x, s_min_y),
+                    Size::new(box_w, s_h),
+                    stop_fill,
+                );
+                frame.stroke(
+                    &Path::rectangle(Point::new(entry_x, s_min_y), Size::new(box_w, s_h)),
+                    stop_stroke,
+                );
+
+                // Entry line
+                frame.stroke(
+                    &Path::line(
+                        Point::new(entry_x, entry_y),
+                        Point::new(entry_x + box_w, entry_y),
+                    ),
+                    Stroke {
+                        style: canvas::Style::Solid(iced::Color::from_rgba(0.85, 0.9, 0.95, 0.9)),
+                        width: 1.2,
+                        ..Default::default()
+                    },
+                );
+
+                // R:R text
+                let risk = (entry.1 - stop_price).abs();
+                let reward = (target_price - entry.1).abs();
+                let rr = if risk > 0.000001 { reward / risk } else { 0.0 };
+                let rr_text = format!("R:R {:.2}", rr);
+                frame.fill_text(canvas::Text {
+                    content: rr_text,
+                    position: Point::new(entry_x + box_w / 2.0, entry_y),
+                    color: iced::Color::WHITE,
+                    size: iced::Pixels(11.0 / chart.scaling),
+                    font: style::AZERET_MONO,
+                    align_x: iced::alignment::Horizontal::Center.into(),
+                    align_y: iced::alignment::Vertical::Center,
+                    ..Default::default()
+                });
+
+                if is_selected {
+                    draw_round_handle(frame, Point::new(entry_x, entry_y));
+                    draw_round_handle(frame, Point::new(entry_x + box_w / 2.0, target_y));
+                    draw_round_handle(frame, Point::new(entry_x + box_w / 2.0, stop_y));
+                }
+            }
+        }
+    }
+}
+
+fn draw_chart_alerts(
+    frame: &mut canvas::Frame,
+    alerts: &[PriceAlert],
+    chart: &ViewState,
+    region: &Rectangle,
+    alert_drag: &Option<(uuid::Uuid, f32)>,
+    palette: &Extended,
+) {
+    for alert in alerts {
+        let is_being_dragged = matches!(alert_drag, Some((id, _)) if *id == alert.id);
+
+        let price_val = if is_being_dragged {
+            if let Some((_, drag_p)) = alert_drag {
+                *drag_p
+            } else {
+                alert.target_price
+            }
+        } else {
+            alert.target_price
+        };
+
+        let y = chart.price_to_y(Price::from_f32(price_val));
+        if y >= region.y && y <= region.y + region.height {
+            let alert_color = if is_being_dragged {
+                iced::Color::from_rgb(0.3, 0.8, 1.0)
+            } else if alert.status == data::chart::alert::AlertStatus::Active {
+                iced::Color::from_rgb(0.95, 0.75, 0.2)
+            } else {
+                iced::Color::from_rgb(0.5, 0.5, 0.5)
+            };
+
+            // TradingView-style draggable badge on the right edge
+            let price_str = format!("{:.*}", chart.decimals, price_val);
+            let badge_w = (72.0f32 / chart.scaling)
+                .max((price_str.len() as f32 * 8.0 + 16.0) / chart.scaling);
+            let badge_h = 18.0 / chart.scaling;
+            let badge_x = region.x + region.width - badge_w - 4.0 / chart.scaling;
+            let badge_y = y - badge_h / 2.0;
+
+            let stroke = Stroke {
+                style: canvas::Style::Solid(alert_color),
+                width: if is_being_dragged { 1.5 } else { 1.0 },
+                line_dash: canvas::LineDash {
+                    segments: &[5.0, 4.0],
+                    offset: 0,
+                },
+                ..Default::default()
+            };
+            // Alert line stops at badge boundary so it doesn't cross into or through the badge
+            frame.stroke(
+                &Path::line(
+                    Point::new(region.x, y),
+                    Point::new(badge_x.max(region.x), y),
+                ),
+                stroke,
+            );
+
+            frame.fill_rectangle(
+                Point::new(badge_x, badge_y),
+                Size::new(badge_w, badge_h),
+                if is_being_dragged {
+                    iced::Color::from_rgba(0.1, 0.35, 0.55, 0.95)
+                } else if alert.status == data::chart::alert::AlertStatus::Active {
+                    iced::Color::from_rgba(0.18, 0.15, 0.05, 0.92)
+                } else {
+                    iced::Color::from_rgba(0.15, 0.15, 0.15, 0.92)
+                },
+            );
+            // Stroke width in iced canvas is always in physical screen pixels, do not divide by scaling
+            frame.stroke(
+                &Path::rectangle(Point::new(badge_x, badge_y), Size::new(badge_w, badge_h)),
+                Stroke {
+                    style: canvas::Style::Solid(alert_color),
+                    width: if is_being_dragged { 1.5 } else { 1.0 },
+                    ..Default::default()
+                },
+            );
+
+            frame.fill_text(canvas::Text {
+                content: price_str,
+                position: Point::new(badge_x + badge_w / 2.0, badge_y + badge_h / 2.0),
+                color: palette.background.base.text,
+                size: iced::Pixels(10.0 / chart.scaling),
+                align_x: Alignment::Center.into(),
+                align_y: Alignment::Center.into(),
+                font: style::AZERET_MONO,
+                ..canvas::Text::default()
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3815,12 +6392,34 @@ mod tests {
     #[test]
     fn test_indicator_is_panel_classification() {
         assert!(!KlineIndicator::Tpo.is_panel());
+        assert!(!KlineIndicator::LiquidationHeatmap.is_panel());
         assert!(KlineIndicator::Volume.is_panel());
         assert!(KlineIndicator::OpenInterest.is_panel());
         assert!(KlineIndicator::MarketPulse.is_panel());
         assert!(KlineIndicator::NetOi.is_panel());
         assert!(KlineIndicator::Vpin.is_panel());
         assert!(KlineIndicator::Vwap.is_panel());
+        assert!(KlineIndicator::RollingVwap.is_panel());
+        assert!(KlineIndicator::Cvd.is_panel());
+        assert!(KlineIndicator::BidAskRatio.is_panel());
+        assert!(KlineIndicator::PositionFlow.is_panel());
+    }
+
+    #[test]
+    fn test_liquidation_heatmap_indicator_toggle() {
+        let mut chart = make_test_chart();
+        assert!(chart.indicators[KlineIndicator::LiquidationHeatmap].is_none());
+        assert!(!chart.liquidation_heatmap.config.enabled);
+
+        // Toggle on
+        chart.toggle_indicator(KlineIndicator::LiquidationHeatmap);
+        assert!(chart.indicators[KlineIndicator::LiquidationHeatmap].is_some());
+        assert!(chart.liquidation_heatmap.config.enabled);
+
+        // Toggle off
+        chart.toggle_indicator(KlineIndicator::LiquidationHeatmap);
+        assert!(chart.indicators[KlineIndicator::LiquidationHeatmap].is_none());
+        assert!(!chart.liquidation_heatmap.config.enabled);
     }
 
     #[test]
@@ -3837,6 +6436,7 @@ mod tests {
             &[],
             ticker_info,
             &KlineChartKind::Candles,
+            None,
         );
 
         let trade1 = Trade {
@@ -4051,6 +6651,65 @@ mod tests {
     }
 
     #[test]
+    fn test_ring_and_concentric_cluster_search_styles() {
+        use data::chart::kline::{
+            ClusterSearchSide, FootprintStudy, HighlightColor, HighlightStyle,
+        };
+
+        let ring_rule = FootprintStudy::ClusterSearch {
+            id: 5,
+            min_volume: 12000.0,
+            min_delta: 6000.0,
+            side: ClusterSearchSide::Both,
+            style: HighlightStyle::Ring,
+            color: HighlightColor::Purple,
+        };
+        let concentric_rule = FootprintStudy::ClusterSearch {
+            id: 6,
+            min_volume: 25000.0,
+            min_delta: 10000.0,
+            side: ClusterSearchSide::BuyOnly,
+            style: HighlightStyle::Concentric,
+            color: HighlightColor::Orange,
+        };
+
+        if let FootprintStudy::ClusterSearch { style, color, .. } = ring_rule {
+            assert_eq!(format!("{}", style), "Ring");
+            assert_eq!(format!("{}", color), "Purple");
+        } else {
+            panic!("Expected ClusterSearch variant");
+        }
+
+        if let FootprintStudy::ClusterSearch { style, color, .. } = concentric_rule {
+            assert_eq!(format!("{}", style), "Concentric");
+            assert_eq!(format!("{}", color), "Orange");
+        } else {
+            panic!("Expected ClusterSearch variant");
+        }
+
+        let serialized = serde_json::to_string(&concentric_rule).expect("serialize concentric");
+        let deserialized: FootprintStudy =
+            serde_json::from_str(&serialized).expect("deserialize concentric");
+        assert_eq!(concentric_rule, deserialized);
+    }
+
+    #[test]
+    fn test_cluster_search_volumetric_scaling() {
+        let threshold = 5000.0_f32;
+        let total_vol_normal = 5000.0_f32;
+        let total_vol_large = 20000.0_f32;
+        let total_vol_huge = 45000.0_f32;
+
+        let scale_normal = (total_vol_normal / threshold).sqrt().clamp(1.0, 3.0);
+        let scale_large = (total_vol_large / threshold).sqrt().clamp(1.0, 3.0);
+        let scale_huge = (total_vol_huge / threshold).sqrt().clamp(1.0, 3.0);
+
+        assert!((scale_normal - 1.0).abs() < 1e-4);
+        assert!((scale_large - 2.0).abs() < 1e-4);
+        assert!((scale_huge - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
     fn test_insert_hist_klines_no_trade_volume_multiplication() {
         let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
         let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
@@ -4069,6 +6728,7 @@ mod tests {
                 studies: Vec::new(),
                 show_bottom_volume: false,
             },
+            None,
         );
 
         let kline1 = exchange::Kline {
@@ -4138,6 +6798,7 @@ mod tests {
                 studies: Vec::new(),
                 show_bottom_volume: false,
             },
+            None,
         );
 
         let kline1 = exchange::Kline {
@@ -4207,6 +6868,7 @@ mod tests {
                 studies: Vec::new(),
                 show_bottom_volume: false,
             },
+            None,
         );
 
         if let KlineChartKind::Footprint {
@@ -4258,6 +6920,7 @@ mod tests {
                 studies: Vec::new(),
                 show_bottom_volume: false,
             },
+            None,
         );
 
         // Batch 1: middle trades at 200..202
@@ -4323,5 +6986,426 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![100, 101, 200, 202, 300, 301]
         );
+    }
+
+    fn make_test_chart() -> KlineChart {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        )
+    }
+
+    #[test]
+    fn test_kline_chart_drawings_management() {
+        let mut chart = make_test_chart();
+        assert!(chart.drawings.is_empty());
+
+        let d1 = Drawing::horizontal(100.0, [1.0, 0.0, 0.0, 1.0], 1.0);
+        chart.add_drawing(d1.clone());
+        assert_eq!(chart.drawings.len(), 1);
+        assert_eq!(chart.drawings[0], d1);
+
+        let mut d1_updated = d1.clone();
+        d1_updated.color = [0.0, 1.0, 0.0, 1.0];
+        chart.update_drawing(d1_updated.clone());
+        assert_eq!(chart.drawings[0].color, [0.0, 1.0, 0.0, 1.0]);
+
+        chart.set_active_drawing_tool(DrawingTool::Trendline);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Trendline);
+
+        chart.set_active_drawing_tool(DrawingTool::Brush);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Brush);
+
+        chart.set_active_drawing_tool(DrawingTool::Path);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Path);
+
+        chart.set_active_drawing_tool(DrawingTool::ShortPosition);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::ShortPosition);
+
+        chart.set_active_drawing_tool(DrawingTool::LongPosition);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::LongPosition);
+
+        chart.delete_drawing(d1.id);
+        assert!(chart.drawings.is_empty());
+
+        chart.add_drawing(d1);
+        chart.clear_drawings();
+        assert!(chart.drawings.is_empty());
+    }
+
+    #[test]
+    fn test_kline_chart_drawings_lock_and_clear() {
+        let mut chart = make_test_chart();
+
+        let d_unlocked = Drawing::horizontal(100.0, [1.0, 0.0, 0.0, 1.0], 1.0);
+        let mut d_locked = Drawing::horizontal(200.0, [0.0, 1.0, 0.0, 1.0], 2.0);
+        d_locked.is_locked = true;
+
+        chart.add_drawing(d_unlocked.clone());
+        chart.add_drawing(d_locked.clone());
+        assert_eq!(chart.drawings.len(), 2);
+
+        // Select d_locked and test helpers
+        chart.set_selected_drawing(Some(d_locked.id));
+        assert_eq!(chart.selected_drawing().unwrap().id, d_locked.id);
+        assert!(chart.selected_drawing().unwrap().is_locked);
+
+        // Toggle lock
+        chart.toggle_selected_drawing_lock();
+        assert!(!chart.selected_drawing().unwrap().is_locked);
+        chart.toggle_selected_drawing_lock();
+        assert!(chart.selected_drawing().unwrap().is_locked);
+
+        // Update color and width
+        chart.update_selected_drawing_color([0.5, 0.5, 0.5, 0.8]);
+        assert_eq!(
+            chart.selected_drawing().unwrap().color,
+            [0.5, 0.5, 0.5, 0.8]
+        );
+        chart.update_selected_drawing_width(3.5);
+        assert_eq!(chart.selected_drawing().unwrap().width, 3.5);
+
+        // clear_drawings should retain locked drawings and remove unlocked ones
+        chart.clear_drawings();
+        assert_eq!(chart.drawings.len(), 1);
+        assert_eq!(chart.drawings[0].id, d_locked.id);
+
+        // Deleting the specific locked drawing directly via delete_drawing
+        chart.delete_drawing(d_locked.id);
+        assert!(chart.drawings.is_empty());
+        assert!(chart.selected_drawing().is_none());
+    }
+
+    #[test]
+    fn test_kline_chart_drawing_drag_and_modification() {
+        use iced::widget::canvas::Program;
+
+        let mut chart = make_test_chart();
+        let rect = Drawing::rectangle((1000, 100.0), (2000, 110.0), [0.2, 0.5, 0.9, 1.0], 1.0);
+        let rect_id = rect.id;
+        chart.add_drawing(rect);
+
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+
+        // Select drawing manually into drawing_state
+        chart.drawing_state.borrow_mut().selected_drawing = Some(rect_id);
+
+        // Delete key press produces DeleteDrawing message
+        let delete_key_event = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Delete),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete),
+        });
+        let action = chart.update(
+            &mut interaction,
+            &delete_key_event,
+            bounds,
+            mouse::Cursor::Unavailable,
+        );
+        assert!(action.is_some());
+        assert!(chart.drawing_state.borrow().selected_drawing.is_none());
+
+        // Re-add drawing and test dragging
+        let rect2 = Drawing::rectangle((1000, 100.0), (2000, 110.0), [0.2, 0.5, 0.9, 1.0], 1.0);
+        chart.add_drawing(rect2.clone());
+
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingDrawing {
+            start_time: 1000,
+            start_price: 100.0,
+            initial_drawing: rect2.clone(),
+            current_drawing: rect2,
+        });
+
+        // Moving cursor updates current_drawing
+        let cursor = mouse::Cursor::Available(Point::new(400.0, 300.0));
+        let move_event = Event::Mouse(mouse::Event::CursorMoved {
+            position: Point::new(400.0, 300.0),
+        });
+        let move_action = chart.update(&mut interaction, &move_event, bounds, cursor);
+        assert!(move_action.is_some());
+        assert!(chart.drawing_state.borrow().drag.is_some());
+
+        // Releasing mouse publishes UpdateDrawing
+        let release_event = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        let release_action = chart.update(&mut interaction, &release_event, bounds, cursor);
+        assert!(release_action.is_some());
+        assert!(chart.drawing_state.borrow().drag.is_none());
+    }
+
+    #[test]
+    fn test_kline_chart_brush_fixed_drag_only() {
+        let chart = make_test_chart();
+        let brush = Drawing::brush(
+            vec![(1000, 100.0), (2000, 120.0), (3000, 110.0)],
+            [0.35, 0.7, 1.0, 1.0],
+            2.0,
+        );
+
+        assert!(brush.handles().is_empty());
+
+        let view_state = chart.state();
+        let pt_on_stroke = Point::new(
+            view_state.interval_to_x(2000),
+            view_state.price_to_y(Price::from_f32(120.0)),
+        );
+
+        let hit = hit_test_drawing(&brush, pt_on_stroke, view_state, 10.0);
+        assert_eq!(hit, Some(HitTarget::Body));
+
+        // Translation shifts whole brush without mutating shape
+        let mut translated = brush.clone();
+        translated.translate(500, 10.0);
+        if let DrawingKind::Brush { points } = &translated.kind {
+            assert_eq!(points[0], (1500, 110.0));
+            assert_eq!(points[1], (2500, 130.0));
+            assert_eq!(points[2], (3500, 120.0));
+        } else {
+            panic!("Expected Brush");
+        }
+    }
+
+    #[test]
+    fn test_kline_chart_price_alerts() {
+        let mut chart = make_test_chart();
+        let alert = PriceAlert::new(
+            "TEST",
+            100.0,
+            data::chart::alert::AlertCondition::CrossAbove,
+        );
+        let alert_id = alert.id;
+        chart.add_alert(alert);
+        assert_eq!(chart.alerts.len(), 1);
+
+        let triggered = chart.check_price_alerts(99.0, 101.0);
+        assert_eq!(triggered.len(), 1);
+        assert_eq!(triggered[0].id, alert_id);
+
+        chart.remove_alert(alert_id);
+        assert!(chart.alerts.is_empty());
+    }
+
+    #[test]
+    fn test_kline_chart_replay() {
+        let mut chart = make_test_chart();
+        assert!(!chart.is_replay_active());
+
+        chart.toggle_replay();
+        assert!(chart.is_replay_active());
+
+        chart.replay_set_cutoff(1000);
+        assert_eq!(chart.replay_state().unwrap().cutoff_time, 1000);
+
+        chart.replay_step_forward();
+        assert!(chart.replay_state().unwrap().cutoff_time > 1000);
+
+        chart.replay_step_backward();
+        assert_eq!(chart.replay_state().unwrap().cutoff_time, 1000);
+
+        chart.toggle_replay();
+        assert!(!chart.is_replay_active());
+    }
+
+    #[test]
+    fn test_kline_chart_replay_jump_and_random() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let klines: Vec<Kline> = (0..50)
+            .map(|i| Kline {
+                time: 1000 + i * 300_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(95.0),
+                close: Price::from_f32(102.0),
+                volume: (5.0, 5.0),
+            })
+            .collect();
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &klines,
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        chart.toggle_replay();
+        assert!(chart.is_replay_active());
+
+        // Test find_closest_bar_at_or_before
+        let closest = chart.find_closest_bar_at_or_before(1000 + 5 * 300_000 + 100);
+        assert_eq!(closest, Some(1000 + 5 * 300_000));
+
+        // Test replay_set_cutoff_and_jump
+        chart.replay_set_cutoff_and_jump(1000 + 10 * 300_000);
+        assert_eq!(
+            chart.replay_state().unwrap().cutoff_time,
+            1000 + 10 * 300_000
+        );
+
+        // Test replay_pick_random_bar
+        let rand_ts = chart.replay_pick_random_bar();
+        assert!(rand_ts.is_some());
+        let picked = rand_ts.unwrap();
+        assert!((1000..=1000 + 49 * 300_000).contains(&picked));
+        assert_eq!(chart.replay_state().unwrap().cutoff_time, picked);
+    }
+
+    #[test]
+    fn test_inverted_range_does_not_panic() {
+        let chart = make_test_chart();
+        let qty = chart.calc_qty_scales(
+            2000,
+            1000,
+            Price::from_f32(100.0),
+            Price::from_f32(90.0),
+            PriceStep::from_f32(1.0),
+            data::chart::kline::ClusterKind::VolumeProfile,
+        );
+        assert_eq!(qty, 0.0);
+    }
+
+    #[test]
+    fn test_kline_chart_alert_dragging() {
+        use iced::widget::canvas::Program;
+
+        let mut chart = make_test_chart();
+        let alert = PriceAlert::new(
+            "BTCUSDT",
+            50000.0,
+            data::chart::alert::AlertCondition::CrossAbove,
+        );
+        let alert_id = alert.id;
+        chart.add_alert(alert);
+
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+
+        // Start drag state
+        *chart.alert_drag_state.borrow_mut() = Some((alert_id, 50000.0));
+
+        // Move cursor while dragging - previously caused RefCell BorrowMutError panic (exit code 101)
+        let cursor = mouse::Cursor::Available(Point::new(400.0, 300.0));
+        let move_event = Event::Mouse(mouse::Event::CursorMoved {
+            position: Point::new(400.0, 300.0),
+        });
+        let action = chart.update(&mut interaction, &move_event, bounds, cursor);
+        assert!(action.is_some());
+        assert!(chart.alert_drag_state.borrow().is_some());
+
+        // Release mouse button - finishes drag and publishes Message::UpdateAlertPrice
+        let release_event = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        let release_action = chart.update(&mut interaction, &release_event, bounds, cursor);
+        assert!(release_action.is_some());
+        assert!(chart.alert_drag_state.borrow().is_none());
+    }
+
+    #[test]
+    fn test_kline_indicator_settings_persistence() {
+        use data::chart::kline::{Config, PositionFlowColors, TpoElementColor};
+
+        let custom_colors = PositionFlowColors {
+            new_longs: TpoElementColor::Cyan,
+            new_shorts: TpoElementColor::Orange,
+            long_forced_close: TpoElementColor::Purple,
+            short_forced_close: TpoElementColor::White,
+        };
+
+        let mut custom_cfg = Config::factory_default();
+        custom_cfg.position_flow_colors = custom_colors;
+        custom_cfg.rolling_vwap_window_hours = 48;
+
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        // 1. Initializing KlineChart::new with explicit config applies settings to indicators
+        let chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[KlineIndicator::PositionFlow],
+            ticker_info,
+            &KlineChartKind::Candles,
+            Some(custom_cfg),
+        );
+
+        assert_eq!(chart.config(), custom_cfg);
+        if let Some(indi) = chart.indicators[KlineIndicator::PositionFlow].as_ref() {
+            let pf = indi
+                .as_any()
+                .and_then(|a| a.downcast_ref::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>())
+                .unwrap();
+            assert_eq!(pf.colors, custom_colors);
+        } else {
+            panic!("PositionFlow indicator should be present");
+        }
+
+        // 2. set_visual_config updates chart config and sets global user default
+        let mut chart2 = make_test_chart();
+        let mut updated_cfg = Config::factory_default();
+        updated_cfg.position_flow_colors = custom_colors;
+        updated_cfg.rolling_vwap_window_hours = 72;
+        chart2.set_visual_config(updated_cfg);
+
+        assert_eq!(chart2.config(), updated_cfg);
+        assert_eq!(
+            data::chart::kline::user_default_kline_config(),
+            Some(updated_cfg)
+        );
+
+        // 3. New chart created with None inherits user default config
+        let chart3 = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[KlineIndicator::PositionFlow],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+        assert_eq!(chart3.config(), updated_cfg);
+        if let Some(indi) = chart3.indicators[KlineIndicator::PositionFlow].as_ref() {
+            let pf = indi
+                .as_any()
+                .and_then(|a| a.downcast_ref::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>())
+                .unwrap();
+            assert_eq!(pf.colors, custom_colors);
+        } else {
+            panic!("PositionFlow indicator should be present in chart3");
+        }
+
+        // 4. Toggling an indicator on inherits the chart's current config
+        let mut chart4 = make_test_chart();
+        chart4.set_visual_config(custom_cfg);
+        chart4.toggle_indicator(KlineIndicator::PositionFlow);
+        if let Some(indi) = chart4.indicators[KlineIndicator::PositionFlow].as_ref() {
+            let pf = indi
+                .as_any()
+                .and_then(|a| a.downcast_ref::<crate::chart::indicator::kline::position_flow::PositionFlowIndicator>())
+                .unwrap();
+            assert_eq!(pf.colors, custom_colors);
+        } else {
+            panic!("PositionFlow indicator should be present after toggle");
+        }
     }
 }

@@ -174,6 +174,14 @@ impl KlineTrades {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.trades.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.trades.len()
+    }
+
     pub fn first_trade_t(&self) -> Option<u64> {
         self.cached_first_time
     }
@@ -408,6 +416,14 @@ pub enum KlineChartKind {
         clusters: Vec<SessionCluster>,
         #[serde(default)]
         split_sessions: Vec<i64>,
+        #[serde(default)]
+        color_scheme: TpoColorScheme,
+        #[serde(default)]
+        ib_color: TpoElementColor,
+        #[serde(default)]
+        poc_color: TpoElementColor,
+        #[serde(default)]
+        single_prints_color: TpoElementColor,
     },
 }
 
@@ -517,8 +533,120 @@ impl std::fmt::Display for ClusterKind {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, PartialEq, Deserialize, Serialize)]
-pub struct Config {}
+fn default_new_longs_color() -> TpoElementColor {
+    TpoElementColor::Green
+}
+
+fn default_new_shorts_color() -> TpoElementColor {
+    TpoElementColor::Red
+}
+
+fn default_long_forced_close_color() -> TpoElementColor {
+    TpoElementColor::Magenta
+}
+
+fn default_short_forced_close_color() -> TpoElementColor {
+    TpoElementColor::Yellow
+}
+
+fn default_rolling_vwap_hours() -> u32 {
+    24
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PositionFlowColors {
+    #[serde(default = "default_new_longs_color")]
+    pub new_longs: TpoElementColor,
+    #[serde(default = "default_new_shorts_color")]
+    pub new_shorts: TpoElementColor,
+    #[serde(default = "default_long_forced_close_color")]
+    pub long_forced_close: TpoElementColor,
+    #[serde(default = "default_short_forced_close_color")]
+    pub short_forced_close: TpoElementColor,
+}
+
+impl Default for PositionFlowColors {
+    fn default() -> Self {
+        Self {
+            new_longs: default_new_longs_color(),
+            new_shorts: default_new_shorts_color(),
+            long_forced_close: default_long_forced_close_color(),
+            short_forced_close: default_short_forced_close_color(),
+        }
+    }
+}
+
+impl PositionFlowColors {
+    pub fn new_longs_rgb(&self) -> [u8; 3] {
+        self.new_longs.to_rgb().unwrap_or([0, 220, 130])
+    }
+
+    pub fn new_shorts_rgb(&self) -> [u8; 3] {
+        self.new_shorts.to_rgb().unwrap_or([255, 60, 60])
+    }
+
+    pub fn long_forced_close_rgb(&self) -> [u8; 3] {
+        self.long_forced_close.to_rgb().unwrap_or([240, 65, 180])
+    }
+
+    pub fn short_forced_close_rgb(&self) -> [u8; 3] {
+        self.short_forced_close.to_rgb().unwrap_or([255, 220, 40])
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Config {
+    #[serde(default)]
+    pub position_flow_colors: PositionFlowColors,
+    #[serde(default = "default_rolling_vwap_hours")]
+    pub rolling_vwap_window_hours: u32,
+    #[serde(default = "default_true")]
+    pub rolling_vwap_show_7d: bool,
+    #[serde(default = "default_true")]
+    pub rolling_vwap_show_30d: bool,
+    #[serde(default = "default_true")]
+    pub rolling_vwap_show_90d: bool,
+    #[serde(default = "default_true")]
+    pub rolling_vwap_show_365d: bool,
+    #[serde(default = "default_true")]
+    pub liq_show_bands: bool,
+    #[serde(default = "default_true")]
+    pub liq_show_histogram: bool,
+}
+
+static USER_DEFAULT_CONFIG: std::sync::LazyLock<std::sync::RwLock<Option<Config>>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(None));
+
+pub fn set_user_default_kline_config(config: Config) {
+    if let Ok(mut lock) = USER_DEFAULT_CONFIG.write() {
+        *lock = Some(config);
+    }
+}
+
+pub fn user_default_kline_config() -> Option<Config> {
+    USER_DEFAULT_CONFIG.read().ok().and_then(|lock| *lock)
+}
+
+impl Config {
+    pub fn factory_default() -> Self {
+        Self {
+            position_flow_colors: PositionFlowColors::default(),
+            rolling_vwap_window_hours: default_rolling_vwap_hours(),
+            rolling_vwap_show_7d: true,
+            rolling_vwap_show_30d: true,
+            rolling_vwap_show_90d: true,
+            rolling_vwap_show_365d: true,
+            liq_show_bands: true,
+            liq_show_histogram: true,
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        user_default_kline_config().unwrap_or_else(Self::factory_default)
+    }
+}
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
 pub enum ClusterScaling {
@@ -584,15 +712,19 @@ pub enum HighlightStyle {
     Border,
     Fill,
     Circle,
+    Ring,
+    Concentric,
     Triangle,
     Square,
 }
 
 impl HighlightStyle {
-    pub const ALL: [HighlightStyle; 5] = [
+    pub const ALL: [HighlightStyle; 7] = [
         HighlightStyle::Border,
         HighlightStyle::Fill,
         HighlightStyle::Circle,
+        HighlightStyle::Ring,
+        HighlightStyle::Concentric,
         HighlightStyle::Triangle,
         HighlightStyle::Square,
     ];
@@ -604,6 +736,8 @@ impl std::fmt::Display for HighlightStyle {
             HighlightStyle::Border => write!(f, "Border"),
             HighlightStyle::Fill => write!(f, "Fill"),
             HighlightStyle::Circle => write!(f, "Circle"),
+            HighlightStyle::Ring => write!(f, "Ring"),
+            HighlightStyle::Concentric => write!(f, "Concentric"),
             HighlightStyle::Triangle => write!(f, "Triangle"),
             HighlightStyle::Square => write!(f, "Square"),
         }
@@ -619,16 +753,20 @@ pub enum HighlightColor {
     Green,
     Red,
     White,
+    Purple,
+    Orange,
 }
 
 impl HighlightColor {
-    pub const ALL: [HighlightColor; 6] = [
+    pub const ALL: [HighlightColor; 8] = [
         HighlightColor::Amber,
         HighlightColor::Cyan,
         HighlightColor::Magenta,
         HighlightColor::Green,
         HighlightColor::Red,
         HighlightColor::White,
+        HighlightColor::Purple,
+        HighlightColor::Orange,
     ];
 
     pub fn to_rgb(self) -> [f32; 3] {
@@ -639,6 +777,8 @@ impl HighlightColor {
             HighlightColor::Green => [0.15, 0.85, 0.35],
             HighlightColor::Red => [1.0, 0.25, 0.25],
             HighlightColor::White => [1.0, 1.0, 1.0],
+            HighlightColor::Purple => [0.68, 0.36, 0.96],
+            HighlightColor::Orange => [1.0, 0.50, 0.05],
         }
     }
 }
@@ -652,7 +792,151 @@ impl std::fmt::Display for HighlightColor {
             HighlightColor::Green => write!(f, "Green"),
             HighlightColor::Red => write!(f, "Red"),
             HighlightColor::White => write!(f, "White"),
+            HighlightColor::Purple => write!(f, "Purple"),
+            HighlightColor::Orange => write!(f, "Orange"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TpoColorScheme {
+    #[default]
+    Classic,
+    Theme,
+    Cyan,
+    Emerald,
+    Amber,
+    Purple,
+    Red,
+    Blue,
+    Monochrome,
+    Custom([u8; 3]),
+}
+
+impl TpoColorScheme {
+    pub const ALL: [TpoColorScheme; 10] = [
+        TpoColorScheme::Classic,
+        TpoColorScheme::Theme,
+        TpoColorScheme::Cyan,
+        TpoColorScheme::Emerald,
+        TpoColorScheme::Amber,
+        TpoColorScheme::Purple,
+        TpoColorScheme::Red,
+        TpoColorScheme::Blue,
+        TpoColorScheme::Monochrome,
+        TpoColorScheme::Custom([32, 164, 243]),
+    ];
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Classic => "Classic (Rainbow)".to_string(),
+            Self::Theme => "Match Theme".to_string(),
+            Self::Cyan => "Neon Cyan".to_string(),
+            Self::Emerald => "Emerald Green".to_string(),
+            Self::Amber => "Amber Gold".to_string(),
+            Self::Purple => "Violet Purple".to_string(),
+            Self::Red => "Coral Red".to_string(),
+            Self::Blue => "Sky Blue".to_string(),
+            Self::Monochrome => "Monochrome".to_string(),
+            Self::Custom(_) => "Custom RGB".to_string(),
+        }
+    }
+
+    pub fn custom_rgb(self) -> Option<[u8; 3]> {
+        match self {
+            Self::Custom(rgb) => Some(rgb),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TpoColorScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TpoElementColor {
+    #[default]
+    Auto,
+    Theme,
+    Amber,
+    Yellow,
+    Orange,
+    Red,
+    Green,
+    Cyan,
+    Blue,
+    Purple,
+    Magenta,
+    White,
+    Custom([u8; 3]),
+}
+
+impl TpoElementColor {
+    pub const ALL: [TpoElementColor; 13] = [
+        TpoElementColor::Auto,
+        TpoElementColor::Theme,
+        TpoElementColor::Amber,
+        TpoElementColor::Yellow,
+        TpoElementColor::Orange,
+        TpoElementColor::Red,
+        TpoElementColor::Green,
+        TpoElementColor::Cyan,
+        TpoElementColor::Blue,
+        TpoElementColor::Purple,
+        TpoElementColor::Magenta,
+        TpoElementColor::White,
+        TpoElementColor::Custom([255, 180, 0]),
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto (Default)",
+            Self::Theme => "Match Theme",
+            Self::Amber => "Amber",
+            Self::Yellow => "Yellow",
+            Self::Orange => "Orange",
+            Self::Red => "Red",
+            Self::Green => "Green",
+            Self::Cyan => "Cyan",
+            Self::Blue => "Blue",
+            Self::Purple => "Purple",
+            Self::Magenta => "Magenta",
+            Self::White => "White",
+            Self::Custom(_) => "Custom RGB",
+        }
+    }
+
+    pub fn to_rgb(self) -> Option<[u8; 3]> {
+        match self {
+            Self::Amber => Some([250, 188, 46]),
+            Self::Yellow => Some([255, 220, 40]),
+            Self::Orange => Some([255, 130, 30]),
+            Self::Red => Some([235, 75, 75]),
+            Self::Green => Some([40, 210, 110]),
+            Self::Cyan => Some([20, 215, 235]),
+            Self::Blue => Some([50, 140, 245]),
+            Self::Purple => Some([170, 85, 225]),
+            Self::Magenta => Some([240, 65, 180]),
+            Self::White => Some([240, 240, 240]),
+            Self::Custom(rgb) => Some(rgb),
+            Self::Auto | Self::Theme => None,
+        }
+    }
+
+    pub fn custom_rgb(self) -> Option<[u8; 3]> {
+        match self {
+            Self::Custom(rgb) => Some(rgb),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for TpoElementColor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
     }
 }
 
@@ -940,6 +1224,11 @@ pub fn decode_footprint_datapoints(
             u32::from_le_bytes(decompressed[cursor..cursor + 4].try_into().unwrap()) as usize;
         cursor += 4;
 
+        const CLUSTER_RECORD_SIZE: usize = 40;
+        if clusters_count > (decompressed.len() - cursor) / CLUSTER_RECORD_SIZE {
+            return Err("Corrupted cache: clusters count exceeds available buffer".into());
+        }
+
         let mut trades_map = FxHashMap::default();
         trades_map.reserve(clusters_count);
 
@@ -996,12 +1285,15 @@ pub fn decode_footprint_datapoints(
             volume: (vol_buy, vol_sell),
         };
 
+        let valid_fetched =
+            trades_fetched && (!footprint.is_empty() || (vol_buy + vol_sell) == 0.0);
+
         datapoints.push((
             timestamp,
             KlineDataPoint {
                 kline,
                 footprint,
-                trades_fetched,
+                trades_fetched: valid_fetched,
             },
         ));
     }
@@ -1034,7 +1326,20 @@ pub fn load_daily_footprint(path: &Path) -> Option<Vec<(u64, KlineDataPoint)>> {
     }
     match std::fs::read(path) {
         Ok(bytes) => match decode_footprint_datapoints(&bytes) {
-            Ok(dps) => Some(dps),
+            Ok(dps) => {
+                let has_empty_volume_candles = dps.iter().any(|(_, dp)| {
+                    (dp.kline.volume.0 + dp.kline.volume.1) > 0.0 && dp.footprint.is_empty()
+                });
+                if has_empty_volume_candles {
+                    log::warn!(
+                        "Footprint cache {:?} has missing candle clusters, removing incomplete cache",
+                        path
+                    );
+                    let _ = std::fs::remove_file(path);
+                    return None;
+                }
+                Some(dps)
+            }
             Err(e) => {
                 log::warn!("Corrupted footprint cache {:?}: {}, removing", path, e);
                 let _ = std::fs::remove_file(path);
@@ -1096,6 +1401,10 @@ mod tests {
             period: SessionPeriod::Daily,
             clusters: vec![],
             split_sessions: vec![],
+            color_scheme: TpoColorScheme::Classic,
+            ib_color: TpoElementColor::Auto,
+            poc_color: TpoElementColor::Auto,
+            single_prints_color: TpoElementColor::Auto,
         };
 
         assert_eq!(tpo.min_cell_width(), 1.0);
@@ -1117,6 +1426,10 @@ mod tests {
             period: SessionPeriod::Weekly,
             clusters: vec![],
             split_sessions: vec![],
+            color_scheme: TpoColorScheme::Classic,
+            ib_color: TpoElementColor::Auto,
+            poc_color: TpoElementColor::Auto,
+            single_prints_color: TpoElementColor::Auto,
         };
         assert_eq!(combined_weekly.view_mode(), ViewMode::Combined);
         assert_eq!(
@@ -1135,6 +1448,10 @@ mod tests {
             period: SessionPeriod::Weekly,
             clusters: vec![SessionCluster::new(vec![100, 200])],
             split_sessions: vec![100],
+            color_scheme: TpoColorScheme::Classic,
+            ib_color: TpoElementColor::Auto,
+            poc_color: TpoElementColor::Auto,
+            single_prints_color: TpoElementColor::Auto,
         };
         assert_eq!(pure_tpo.view_mode(), ViewMode::TpoOnly);
         assert_eq!(pure_tpo.effective_tpo_period(), SessionPeriod::Weekly);
@@ -1264,5 +1581,42 @@ mod tests {
             assert_eq!(group_orig.buy_count, group_dec.buy_count);
             assert_eq!(group_orig.sell_count, group_dec.sell_count);
         }
+    }
+
+    #[test]
+    fn test_load_daily_footprint_rejects_incomplete_cache() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_incomplete_fp_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let fp_file = temp_dir.join("BTCUSDT-fp-2026-09-16.bin");
+
+        // Create a datapoint with volume > 0 but empty footprint (incomplete)
+        let dp = KlineDataPoint {
+            kline: Kline {
+                time: 1789516800000,
+                open: Price::from_f32(60000.0),
+                high: Price::from_f32(61000.0),
+                low: Price::from_f32(59000.0),
+                close: Price::from_f32(60500.0),
+                volume: (100.0, 100.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: true,
+        };
+
+        let dps = vec![(1789516800000, dp)];
+        save_daily_footprint(&fp_file, &dps).expect("save failed");
+        assert!(fp_file.exists());
+
+        // load_daily_footprint must detect empty footprint with volume > 0, reject it, and delete the file
+        let loaded = load_daily_footprint(&fp_file);
+        assert!(loaded.is_none());
+        assert!(!fp_file.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

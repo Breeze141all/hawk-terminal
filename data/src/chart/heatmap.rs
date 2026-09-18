@@ -245,12 +245,11 @@ impl HistoricalDepth {
         highest: Price,
         lowest: Price,
     ) -> impl Iterator<Item = (&Price, &Vec<OrderRun>)> {
-        self.price_levels
-            .range(lowest..=highest)
-            .filter(move |(_, runs)| {
-                runs.iter()
-                    .any(|run| run.until_time >= earliest && run.start_time <= latest)
-            })
+        let (lo, hi) = (lowest.min(highest), lowest.max(highest));
+        self.price_levels.range(lo..=hi).filter(move |(_, runs)| {
+            runs.iter()
+                .any(|run| run.until_time >= earliest && run.start_time <= latest)
+        })
     }
 
     pub fn latest_order_runs(
@@ -259,8 +258,9 @@ impl HistoricalDepth {
         lowest: Price,
         latest_timestamp: u64,
     ) -> impl Iterator<Item = (&Price, &OrderRun)> {
+        let (lo, hi) = (lowest.min(highest), lowest.max(highest));
         self.price_levels
-            .range(lowest..=highest)
+            .range(lo..=hi)
             .filter_map(move |(price, runs)| {
                 runs.last()
                     .filter(|run| run.until_time >= latest_timestamp)
@@ -287,7 +287,8 @@ impl HistoricalDepth {
         coalesce_kind: CoalesceKind,
     ) -> Vec<(Price, OrderRun)> {
         // Pre-allocate with estimated capacity: ~2 runs per price level on average
-        let estimated_capacity = self.price_levels.range(lowest..=highest).count() * 2;
+        let (lo, hi) = (lowest.min(highest), lowest.max(highest));
+        let estimated_capacity = self.price_levels.range(lo..=hi).count() * 2;
         let mut result_runs = Vec::with_capacity(estimated_capacity);
 
         let threshold_pct = match coalesce_kind {

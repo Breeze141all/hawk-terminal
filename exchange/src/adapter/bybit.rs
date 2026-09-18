@@ -19,10 +19,21 @@ use iced_futures::{
     stream,
 };
 use serde_json::{Value, json};
-use sonic_rs::{Deserialize, JsonValueTrait, to_object_iter_unchecked};
+use sonic_rs::{Deserialize, JsonValueTrait};
 use tokio::sync::Mutex;
 
-use std::{collections::HashMap, sync::LazyLock, time::Duration};
+use std::{
+    collections::HashMap,
+    io::BufReader,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    time::Duration,
+};
+
+use crate::trades::cache::{
+    USE_BINARY_CACHE, find_gap_index, load_intraday_trades_from_cache, load_raw_trades_from_cache,
+    save_intraday_trades_to_cache, save_raw_trades_to_cache,
+};
 
 const WS_DOMAIN: &str = "stream.bybit.com";
 const FETCH_DOMAIN: &str = "https://api.bybit.com";
@@ -163,7 +174,7 @@ fn feed_de(
     let mut data_type = String::new();
     let mut topic_ticker: Option<Ticker> = ticker;
 
-    let iter: sonic_rs::ObjectJsonIter = unsafe { to_object_iter_unchecked(slice) };
+    let iter: sonic_rs::ObjectJsonIter = sonic_rs::to_object_iter(slice);
 
     for elem in iter {
         let (k, v) = elem.map_err(|e| AdapterError::ParseError(e.to_string()))?;
@@ -632,8 +643,17 @@ pub async fn fetch_historical_oi(
     );
 
     if let Some((start, end)) = range {
-        let interval_ms = period.to_milliseconds();
-        let num_intervals = ((end - start) / interval_ms).min(200);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Could not get system time")
+            .as_millis() as u64;
+        let end = end.min(now_ms);
+        if start >= end {
+            return Ok(Vec::new());
+        }
+
+        let interval_ms = period.to_milliseconds().max(1);
+        let num_intervals = ((end - start) / interval_ms).clamp(1, 200);
 
         url.push_str(&format!(
             "&startTime={start}&endTime={end}&limit={num_intervals}"
@@ -945,4 +965,397 @@ pub async fn fetch_ticker_prices(
     }
 
     Ok(ticker_prices_map)
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
+struct BybitRecentTradeItem {
+    pub price: String,
+    pub size: String,
+    pub side: String,
+    pub time: String,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
+struct BybitRecentTradeResult {
+    pub list: Vec<BybitRecentTradeItem>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
+struct BybitRecentTradeResponse {
+    pub result: BybitRecentTradeResult,
+}
+
+pub async fn fetch_intraday_trades(
+    ticker_info: TickerInfo,
+    from: u64,
+) -> Result<Vec<Trade>, AdapterError> {
+    let ticker = ticker_info.ticker;
+    let (symbol_str, market_type) = ticker.to_full_symbol_and_type();
+
+    let category = match market_type {
+        MarketKind::Spot => "spot",
+        MarketKind::LinearPerps => "linear",
+        MarketKind::InversePerps => "inverse",
+    };
+
+    let url = format!(
+        "{FETCH_DOMAIN}/v5/market/recent-trade?category={category}&symbol={}&limit=1000",
+        symbol_str.to_uppercase()
+    );
+
+    let parsed: BybitRecentTradeResponse =
+        limiter::http_parse_with_limiter(&url, &BYBIT_LIMITER, 1, None, None).await?;
+
+    let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
+
+    let mut trades: Vec<Trade> = parsed
+        .result
+        .list
+        .into_iter()
+        .filter_map(|item| {
+            let time = item.time.parse::<u64>().ok()?;
+            if time < from {
+                return None;
+            }
+            let price_f32 = item.price.parse::<f32>().ok()?;
+            let mut qty = item.size.parse::<f32>().ok()?;
+            if size_in_quote_ccy {
+                qty = (qty * price_f32).round();
+            }
+            let is_sell = item.side.eq_ignore_ascii_case("sell");
+            let price = Price::from_f32(price_f32).round_to_min_tick(ticker_info.min_ticksize);
+
+            Some(Trade {
+                time,
+                is_sell,
+                price,
+                qty,
+            })
+        })
+        .collect();
+
+    trades.sort_by_key(|t| t.time);
+    Ok(trades)
+}
+
+pub async fn get_hist_trades(
+    ticker_info: TickerInfo,
+    date: chrono::NaiveDate,
+    base_path: PathBuf,
+) -> Result<Vec<Trade>, AdapterError> {
+    if USE_BINARY_CACHE
+        && let Some(trades) = load_raw_trades_from_cache(&base_path, &ticker_info, date)
+    {
+        log::info!(
+            "Using binary cached Bybit trades for {date} ({} trades)",
+            trades.len()
+        );
+        return Ok(trades);
+    }
+
+    let ticker = ticker_info.ticker;
+    let (symbol, market_type) = ticker.to_full_symbol_and_type();
+    let symbol_upper = symbol.to_uppercase();
+
+    let category = match market_type {
+        MarketKind::Spot => "spot",
+        MarketKind::LinearPerps | MarketKind::InversePerps => "trading",
+    };
+    let date_str = date.format("%Y-%m-%d");
+    let file_name = format!("{symbol_upper}_{date_str}.csv.gz");
+    let url = format!("https://public.bybit.com/{category}/{symbol_upper}/{file_name}");
+
+    log::info!("Downloading Bybit historical trades from {url}");
+    let resp = reqwest::get(&url).await.map_err(AdapterError::FetchError)?;
+    if !resp.status().is_success() {
+        return Err(AdapterError::InvalidRequest(format!(
+            "Failed to fetch Bybit trades from {url}: status {}",
+            resp.status()
+        )));
+    }
+
+    let body = resp.bytes().await.map_err(AdapterError::FetchError)?;
+    let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
+    let min_ticksize = ticker_info.min_ticksize;
+
+    let trades = tokio::task::spawn_blocking(move || -> Result<Vec<Trade>, AdapterError> {
+        let gz_decoder = flate2::read::GzDecoder::new(&body[..]);
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(BufReader::new(gz_decoder));
+
+        let headers = rdr
+            .headers()
+            .map_err(|e| {
+                AdapterError::ParseError(format!("Failed to read Bybit CSV headers: {e}"))
+            })?
+            .clone();
+
+        let time_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("timestamp"))
+            .unwrap_or(0);
+        let side_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("side"))
+            .unwrap_or(2);
+        let size_col = headers
+            .iter()
+            .position(|h| {
+                h.eq_ignore_ascii_case("size")
+                    || h.eq_ignore_ascii_case("volume")
+                    || h.eq_ignore_ascii_case("qty")
+            })
+            .unwrap_or(3);
+        let price_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("price"))
+            .unwrap_or(4);
+
+        let mut trades = Vec::new();
+        for result in rdr.records() {
+            let record = match result {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            let raw_time = match record.get(time_col) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let time = if raw_time.contains('.') {
+                (raw_time.parse::<f64>().unwrap_or(0.0) * 1000.0) as u64
+            } else {
+                let t = raw_time.parse::<u64>().unwrap_or(0);
+                if t < 100_000_000_000 {
+                    t * 1000
+                } else if t > 100_000_000_000_000 {
+                    t / 1000
+                } else {
+                    t
+                }
+            };
+
+            let is_sell = record
+                .get(side_col)
+                .map(|s| s.eq_ignore_ascii_case("sell"))
+                .unwrap_or(false);
+
+            let price_f32 = match record.get(price_col).and_then(|p| p.parse::<f32>().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let mut qty = match record.get(size_col).and_then(|q| q.parse::<f32>().ok()) {
+                Some(q) => q,
+                None => continue,
+            };
+
+            if size_in_quote_ccy {
+                qty = (qty * price_f32).round();
+            }
+
+            let price = Price::from_f32(price_f32).round_to_min_tick(min_ticksize);
+
+            trades.push(Trade {
+                time,
+                is_sell,
+                price,
+                qty,
+            });
+        }
+
+        trades.sort_by_key(|t| t.time);
+        trades.dedup_by(|a, b| a.time == b.time && a.price == b.price && a.qty == b.qty);
+        Ok(trades)
+    })
+    .await
+    .map_err(|e| {
+        AdapterError::ParseError(format!("Join error during Bybit trades parsing: {e}"))
+    })??;
+
+    if USE_BINARY_CACHE
+        && !trades.is_empty()
+        && let Err(e) = save_raw_trades_to_cache(&base_path, &ticker_info, date, &trades)
+    {
+        log::warn!("Failed to save Bybit binary cache: {e}");
+    }
+
+    Ok(trades)
+}
+
+async fn fetch_trades_from_intraday_cache_or_rest(
+    ticker_info: TickerInfo,
+    from_time: u64,
+    target_date: chrono::NaiveDate,
+    data_path: &Path,
+    day_end_fallback: u64,
+) -> Result<(Vec<Trade>, u64), AdapterError> {
+    let cached =
+        load_intraday_trades_from_cache(data_path, &ticker_info, target_date).unwrap_or_default();
+    if !cached.is_empty() {
+        let t_first = cached.first().unwrap().time;
+        let t_last = cached.last().unwrap().time;
+
+        if from_time < t_first {
+            let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+            if !new_trades.is_empty() {
+                let next_from = new_trades
+                    .last()
+                    .map(|t| t.time.saturating_add(1))
+                    .unwrap_or(t_first);
+                let _ = save_intraday_trades_to_cache(
+                    data_path,
+                    &ticker_info,
+                    target_date,
+                    &new_trades,
+                );
+                return Ok((new_trades, next_from));
+            } else {
+                let end_idx = find_gap_index(&cached, 0, 60_000).unwrap_or(cached.len() - 1);
+                let trades = cached[0..=end_idx].to_vec();
+                let next_from = cached[end_idx].time.saturating_add(1);
+                return Ok((trades, next_from));
+            }
+        }
+
+        if from_time <= t_last {
+            let start_idx = cached.partition_point(|t| t.time < from_time);
+            let in_gap = start_idx < cached.len()
+                && cached[start_idx].time.saturating_sub(from_time) > 60_000;
+
+            if in_gap {
+                let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+                if !new_trades.is_empty() {
+                    let next_from = new_trades
+                        .last()
+                        .map(|t| t.time.saturating_add(1))
+                        .unwrap_or_else(|| cached[start_idx].time);
+                    let _ = save_intraday_trades_to_cache(
+                        data_path,
+                        &ticker_info,
+                        target_date,
+                        &new_trades,
+                    );
+                    return Ok((new_trades, next_from));
+                } else {
+                    let end_idx =
+                        find_gap_index(&cached, start_idx, 60_000).unwrap_or(cached.len() - 1);
+                    let trades = cached[start_idx..=end_idx].to_vec();
+                    let next_from = cached[end_idx].time.saturating_add(1);
+                    return Ok((trades, next_from));
+                }
+            }
+
+            if let Some(end_idx) = find_gap_index(&cached, start_idx, 60_000) {
+                let trades = cached[start_idx..=end_idx].to_vec();
+                let next_from = cached[end_idx].time.saturating_add(1);
+                return Ok((trades, next_from));
+            }
+
+            let trades = cached[start_idx..].to_vec();
+            let next_from = t_last.saturating_add(1);
+            return Ok((trades, next_from));
+        }
+    }
+
+    let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+    let next_from = new_trades
+        .last()
+        .map(|t| t.time.saturating_add(1))
+        .unwrap_or(day_end_fallback);
+
+    if !new_trades.is_empty() {
+        let _ = save_intraday_trades_to_cache(data_path, &ticker_info, target_date, &new_trades);
+    }
+    Ok((new_trades, next_from))
+}
+
+pub async fn fetch_trades(
+    ticker_info: TickerInfo,
+    from_time: u64,
+    data_path: PathBuf,
+) -> Result<(Vec<Trade>, u64), AdapterError> {
+    let today_date = chrono::Utc::now().date_naive();
+    let today_midnight = today_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+
+    if from_time as i64 >= today_midnight.timestamp_millis() {
+        return fetch_trades_from_intraday_cache_or_rest(
+            ticker_info,
+            from_time,
+            today_date,
+            &data_path,
+            from_time.saturating_add(60_000),
+        )
+        .await;
+    }
+
+    let from_date = chrono::DateTime::from_timestamp_millis(from_time as i64)
+        .ok_or_else(|| AdapterError::ParseError("Invalid timestamp".into()))?
+        .date_naive();
+
+    let next_day_start = from_date
+        .succ_opt()
+        .unwrap_or(from_date)
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+
+    let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
+    let max_days: i64 = if symbol.to_uppercase().starts_with("BTC") {
+        130
+    } else {
+        30
+    };
+    let cutoff_date = chrono::Utc::now().date_naive() - chrono::Duration::days(max_days);
+    if from_date < cutoff_date {
+        return Ok((Vec::new(), next_day_start));
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let is_recent = from_time >= now_ms.saturating_sub(48 * 3600 * 1000);
+
+    // Check if recent past day is already completely cached in intraday cache
+    if is_recent
+        && let Some(cached) = load_intraday_trades_from_cache(&data_path, &ticker_info, from_date)
+        && let Some(day_start_dt) = from_date.and_hms_opt(0, 0, 0)
+    {
+        let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
+        let day_end = day_start + 86_400_000 - 1;
+        let is_full = !cached.is_empty()
+            && cached.first().map(|t| t.time).unwrap_or(0) <= day_start + 600_000
+            && cached.last().map(|t| t.time).unwrap_or(0) >= day_end - 600_000;
+        if is_full {
+            let _ = save_raw_trades_to_cache(&data_path, &ticker_info, from_date, &cached);
+            return Ok((cached, next_day_start));
+        }
+    }
+
+    match get_hist_trades(ticker_info, from_date, data_path.clone()).await {
+        Ok(trades) => Ok((trades, next_day_start)),
+        Err(e) => {
+            log::warn!(
+                "Bybit historical trades fetch failed for {}: {}, falling back to intraday fetch if recent",
+                from_date,
+                e
+            );
+            if is_recent {
+                fetch_trades_from_intraday_cache_or_rest(
+                    ticker_info,
+                    from_time,
+                    from_date,
+                    &data_path,
+                    next_day_start,
+                )
+                .await
+            } else {
+                Err(e)
+            }
+        }
+    }
 }

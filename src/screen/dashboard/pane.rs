@@ -1,12 +1,12 @@
 use crate::{
-    chart::{self, comparison::ComparisonChart, heatmap::HeatmapChart, kline::KlineChart},
+    chart::{self, Chart, comparison::ComparisonChart, heatmap::HeatmapChart, kline::KlineChart},
     modal::{
         self, ModifierKind,
         pane::{
             Modal,
             mini_tickers_list::MiniPanel,
             settings::{comparison_cfg_view, heatmap_cfg_view, kline_cfg_view},
-            stack_modal,
+            stack_modal, stack_modal_positioned,
         },
     },
     screen::dashboard::{
@@ -44,6 +44,7 @@ pub enum Effect {
     RequestFetch(FetchRequests),
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
+    TakeScreenshot(window::Id),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -104,6 +105,34 @@ pub enum Event {
     TpoKindChanged(data::chart::KlineChartKind),
     /// Footprint bottom volume toggle
     FootprintShowBottomVolumeToggled(bool),
+    /// Select drawing tool
+    SelectDrawingTool(data::chart::drawing::DrawingTool),
+    /// Drawing toolbar dragged to new position
+    DrawingToolbarMoved(iced::Point),
+    /// Selected drawing toolbar dragged to new position
+    SelectedDrawingToolbarMoved(iced::Point),
+    /// Action on selected drawing toolbar
+    SelectedDrawingAction(widget::chart::drawing_selection_toolbar::SelectionToolbarAction),
+    /// Clear all drawings
+    ClearDrawings,
+    /// Screenshot to clipboard
+    TakeScreenshot(window::Id),
+    /// Market Replay
+    ToggleReplay,
+    ReplayPlayPause,
+    ReplayStepForward,
+    ReplayStepBackward,
+    ReplaySetSpeed(u64),
+    ToggleReplayDatePicker,
+    ReplayDatePickerAction(modal::pane::replay_calendar::Action),
+    /// Price Alerts
+    AddPriceAlert(f32),
+    DeletePriceAlert(uuid::Uuid),
+    TogglePriceAlert(uuid::Uuid),
+    AlertPriceInput(String),
+    AlertConditionSelected(data::chart::alert::AlertCondition),
+    AlertFilterSelected(data::chart::alert::AlertFilter),
+    ClearTriggeredAlerts,
 }
 
 pub struct State {
@@ -115,6 +144,12 @@ pub struct State {
     pub streams: ResolvedStream,
     pub status: Status,
     pub link_group: Option<LinkGroup>,
+    pub alert_price_input: String,
+    pub alert_condition: data::chart::alert::AlertCondition,
+    pub alert_filter: data::chart::alert::AlertFilter,
+    pub drawing_toolbar_pos: Option<iced::Point>,
+    pub selected_drawing_toolbar_pos: Option<iced::Point>,
+    pub selected_drawing_show_settings: bool,
 }
 
 impl State {
@@ -461,6 +496,7 @@ impl State {
                 } else {
                     let (raw_trades, tick_size) = (chart.raw_trades(), chart.tick_size());
                     let layout = chart.chart_layout();
+                    let current_config = chart.config();
 
                     *chart = KlineChart::new(
                         layout,
@@ -471,6 +507,7 @@ impl State {
                         indicators,
                         ticker_info,
                         chart.kind(),
+                        Some(current_config),
                     );
                 }
             }
@@ -520,6 +557,7 @@ impl State {
         main_window: &'a Window,
         timezone: UserTimezone,
         tickers_table: &'a TickersTable,
+        show_toolbar: bool,
     ) -> pane_grid::Content<'a, Message, Theme, Renderer> {
         let mut stream_info_element = if Content::Starter == self.content {
             row![]
@@ -598,9 +636,15 @@ impl State {
 
         let compact_controls = if self.modal == Some(Modal::Controls) {
             Some(
-                container(self.view_controls(id, panes, maximized, window != main_window.id))
-                    .style(style::chart_modal)
-                    .into(),
+                container(self.view_controls(
+                    id,
+                    panes,
+                    maximized,
+                    window != main_window.id,
+                    window,
+                ))
+                .style(style::chart_modal)
+                .into(),
             )
         } else {
             None
@@ -651,6 +695,7 @@ impl State {
                     || column![].into(),
                     None,
                     tickers_table,
+                    false,
                 )
             }
             Content::Comparison(chart) => {
@@ -680,6 +725,7 @@ impl State {
                         settings_modal,
                         Some(c.selected_tickers()),
                         tickers_table,
+                        false,
                     )
                 } else {
                     let base = uninitialized_base(ContentKind::ComparisonChart);
@@ -691,6 +737,7 @@ impl State {
                         || column![].into(),
                         None,
                         tickers_table,
+                        false,
                     )
                 }
             }
@@ -711,6 +758,7 @@ impl State {
                         settings_modal,
                         None,
                         tickers_table,
+                        false,
                     )
                 } else {
                     let base = uninitialized_base(ContentKind::TimeAndSales);
@@ -722,6 +770,7 @@ impl State {
                         || column![].into(),
                         None,
                         tickers_table,
+                        false,
                     )
                 }
             }
@@ -764,6 +813,7 @@ impl State {
                         settings_modal,
                         None,
                         tickers_table,
+                        false,
                     )
                 } else {
                     let base = uninitialized_base(ContentKind::Ladder);
@@ -775,6 +825,7 @@ impl State {
                         || column![].into(),
                         None,
                         tickers_table,
+                        false,
                     )
                 }
             }
@@ -844,6 +895,7 @@ impl State {
                         settings_modal,
                         None,
                         tickers_table,
+                        false,
                     )
                 } else {
                     let base = uninitialized_base(ContentKind::HeatmapChart);
@@ -855,6 +907,7 @@ impl State {
                         || column![].into(),
                         None,
                         tickers_table,
+                        false,
                     )
                 }
             }
@@ -917,6 +970,10 @@ impl State {
                             period,
                             clusters,
                             split_sessions,
+                            color_scheme,
+                            ib_color,
+                            poc_color,
+                            single_prints_color,
                         } => {
                             let selected_basis = self
                                 .settings
@@ -932,6 +989,10 @@ impl State {
                             let ssp = *show_single_prints;
                             let st = *tick_step;
                             let cur_period = *period;
+                            let cs = *color_scheme;
+                            let cib = *ib_color;
+                            let cpoc = *poc_color;
+                            let csp = *single_prints_color;
                             let cur_clusters = clusters.clone();
                             let cur_split_sessions = split_sessions.clone();
 
@@ -955,6 +1016,10 @@ impl State {
                                             period: cur_period,
                                             clusters: cur_clusters.clone(),
                                             split_sessions: s_sessions_toggle,
+                                            color_scheme: cs,
+                                            ib_color: cib,
+                                            poc_color: cpoc,
+                                            single_prints_color: csp,
                                         }),
                                     ));
 
@@ -978,6 +1043,10 @@ impl State {
                                             period: new_p,
                                             clusters: clusters_for_period.clone(),
                                             split_sessions: s_sessions_period.clone(),
+                                            color_scheme: cs,
+                                            ib_color: cib,
+                                            poc_color: cpoc,
+                                            single_prints_color: csp,
                                         }),
                                     )
                                 },
@@ -1002,7 +1071,7 @@ impl State {
                     let settings_modal = || {
                         kline_cfg_view(
                             chart.study_configurator(),
-                            data::chart::kline::Config {},
+                            chart.config(),
                             chart_kind,
                             id,
                             chart.basis(),
@@ -1029,6 +1098,7 @@ impl State {
                         settings_modal,
                         None,
                         tickers_table,
+                        show_toolbar,
                     )
                 } else {
                     let content_kind = match chart_kind {
@@ -1047,6 +1117,7 @@ impl State {
                         || column![].into(),
                         None,
                         tickers_table,
+                        false,
                     )
                 }
             }
@@ -1099,7 +1170,7 @@ impl State {
                 pane_grid::Controls::new(compact_control)
             } else {
                 pane_grid::Controls::dynamic(
-                    self.view_controls(id, panes, maximized, window != main_window.id),
+                    self.view_controls(id, panes, maximized, window != main_window.id, window),
                     compact_control,
                 )
             }
@@ -1162,6 +1233,30 @@ impl State {
                     chart::Message::ToggleSplitBrackets(s) => {
                         c.toggle_split_brackets(*s);
                         *kind = c.kind.clone();
+                    }
+                    chart::Message::AddDrawing(drawing) => {
+                        c.add_drawing(drawing.clone());
+                    }
+                    chart::Message::UpdateDrawing(drawing) => {
+                        c.update_drawing(drawing.clone());
+                    }
+                    chart::Message::DeleteDrawing(id) => {
+                        c.delete_drawing(*id);
+                        self.selected_drawing_show_settings = false;
+                    }
+                    chart::Message::ClearDrawings => {
+                        c.clear_drawings();
+                        self.selected_drawing_show_settings = false;
+                    }
+                    chart::Message::SelectDrawing(id) => {
+                        c.set_selected_drawing(*id);
+                        if id.is_none() {
+                            self.selected_drawing_show_settings = false;
+                        }
+                    }
+                    chart::Message::UpdateAlertPrice(id, price) => {
+                        c.update_alert_price(*id, *price);
+                        data::AlertStore::update_price(*id, *price);
                     }
                     _ => {
                         super::chart::update(c, &msg);
@@ -1503,6 +1598,257 @@ impl State {
                     panel.set_trade_size_input(input);
                 }
             }
+            Event::SelectDrawingTool(tool) => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.set_active_drawing_tool(tool);
+                }
+            }
+            Event::ClearDrawings => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.clear_drawings();
+                    self.selected_drawing_show_settings = false;
+                }
+            }
+            Event::DrawingToolbarMoved(pos) => {
+                self.drawing_toolbar_pos = Some(pos);
+            }
+            Event::SelectedDrawingToolbarMoved(pos) => {
+                self.selected_drawing_toolbar_pos = Some(pos);
+            }
+            Event::SelectedDrawingAction(action) => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    match action {
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleSettings => {
+                            self.selected_drawing_show_settings = !self.selected_drawing_show_settings;
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleLock => {
+                            c.toggle_selected_drawing_lock();
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::Delete => {
+                            if let Some(d) = c.selected_drawing() {
+                                let id = d.id;
+                                c.delete_drawing(id);
+                                self.selected_drawing_show_settings = false;
+                            }
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetColor(color) => {
+                            c.update_selected_drawing_color(color);
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetWidth(w) => {
+                            c.update_selected_drawing_width(w);
+                        }
+                    }
+                }
+            }
+            Event::TakeScreenshot(window_id) => {
+                return Some(Effect::TakeScreenshot(window_id));
+            }
+            Event::ToggleReplay => {
+                if matches!(self.modal, Some(Modal::ReplayDatePicker(_))) {
+                    self.modal = None;
+                }
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.toggle_replay();
+                }
+            }
+            Event::ToggleReplayDatePicker => {
+                if matches!(self.modal, Some(Modal::ReplayDatePicker(_))) {
+                    self.modal = None;
+                } else if let Content::Kline { chart: Some(c), .. } = &self.content {
+                    let cutoff = c.replay_state().map(|r| r.cutoff_time).unwrap_or(0);
+                    let state = modal::pane::replay_calendar::ReplayDatePickerState::new(cutoff);
+                    self.modal = Some(Modal::ReplayDatePicker(state));
+                }
+            }
+            Event::ReplayDatePickerAction(action) => {
+                use modal::pane::replay_calendar::Action;
+                match action {
+                    Action::PrevMonth => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            if state.view_month == 1 {
+                                state.view_year -= 1;
+                                state.view_month = 12;
+                            } else {
+                                state.view_month -= 1;
+                            }
+                        }
+                    }
+                    Action::NextMonth => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            if state.view_month == 12 {
+                                state.view_year += 1;
+                                state.view_month = 1;
+                            } else {
+                                state.view_month += 1;
+                            }
+                        }
+                    }
+                    Action::PrevYear => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            state.view_year -= 1;
+                        }
+                    }
+                    Action::NextYear => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            state.view_year += 1;
+                        }
+                    }
+                    Action::SelectDate(date) => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            state.selected_date = date;
+                            if let Some(target_ts) = state.to_timestamp_millis()
+                                && let Content::Kline { chart: Some(c), .. } = &mut self.content
+                            {
+                                let actual_ts = c
+                                    .find_closest_bar_at_or_before(target_ts)
+                                    .unwrap_or(target_ts);
+                                c.replay_set_cutoff_and_jump(actual_ts);
+                            }
+                        }
+                    }
+                    Action::AdjustHour(delta) => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            let curr = state.hour as i32;
+                            state.hour = (curr + delta).rem_euclid(24) as u32;
+                            if let Some(target_ts) = state.to_timestamp_millis()
+                                && let Content::Kline { chart: Some(c), .. } = &mut self.content
+                            {
+                                let actual_ts = c
+                                    .find_closest_bar_at_or_before(target_ts)
+                                    .unwrap_or(target_ts);
+                                c.replay_set_cutoff_and_jump(actual_ts);
+                            }
+                        }
+                    }
+                    Action::AdjustMinute(delta) => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            let curr = state.minute as i32;
+                            state.minute = (curr + delta).rem_euclid(60) as u32;
+                            if let Some(target_ts) = state.to_timestamp_millis()
+                                && let Content::Kline { chart: Some(c), .. } = &mut self.content
+                            {
+                                let actual_ts = c
+                                    .find_closest_bar_at_or_before(target_ts)
+                                    .unwrap_or(target_ts);
+                                c.replay_set_cutoff_and_jump(actual_ts);
+                            }
+                        }
+                    }
+                    Action::SetTime(h, m) => {
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            state.hour = h.min(23);
+                            state.minute = m.min(59);
+                            if let Some(target_ts) = state.to_timestamp_millis()
+                                && let Content::Kline { chart: Some(c), .. } = &mut self.content
+                            {
+                                let actual_ts = c
+                                    .find_closest_bar_at_or_before(target_ts)
+                                    .unwrap_or(target_ts);
+                                c.replay_set_cutoff_and_jump(actual_ts);
+                            }
+                        }
+                    }
+                    Action::RandomBar => {
+                        if let Content::Kline { chart: Some(c), .. } = &mut self.content
+                            && let Some(rand_ts) = c.replay_pick_random_bar()
+                            && let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal
+                        {
+                            *state =
+                                modal::pane::replay_calendar::ReplayDatePickerState::new(rand_ts);
+                        }
+                    }
+                    Action::JumpToToday => {
+                        let now = chrono::Utc::now();
+                        let target_ts = now.timestamp_millis() as u64;
+                        if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                            let actual_ts = c
+                                .find_closest_bar_at_or_before(target_ts)
+                                .unwrap_or(target_ts);
+                            c.replay_set_cutoff_and_jump(actual_ts);
+                        }
+                        if let Some(Modal::ReplayDatePicker(ref mut state)) = self.modal {
+                            *state =
+                                modal::pane::replay_calendar::ReplayDatePickerState::new(target_ts);
+                        }
+                    }
+                    Action::Close => {
+                        self.modal = None;
+                    }
+                }
+            }
+            Event::ReplayPlayPause => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.replay_play_pause();
+                }
+            }
+            Event::ReplayStepForward => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.replay_step_forward();
+                }
+            }
+            Event::ReplayStepBackward => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.replay_step_backward();
+                }
+            }
+            Event::ReplaySetSpeed(speed) => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.replay_set_speed(speed);
+                }
+            }
+            Event::AddPriceAlert(price) => {
+                let ticker_info = self.stream_pair();
+                let ticker = ticker_info.map(|ti| ti.ticker);
+                let symbol = ticker_info
+                    .map(|ti| ti.ticker.display_symbol_and_type().0)
+                    .unwrap_or_else(|| "Symbol".to_string());
+                let initial_price = if let Content::Kline { chart: Some(c), .. } = &self.content {
+                    c.current_price()
+                } else {
+                    None
+                };
+                let alert = data::chart::alert::PriceAlert::with_details(
+                    ticker,
+                    symbol,
+                    price,
+                    initial_price,
+                    self.alert_condition,
+                );
+                data::AlertStore::add(alert.clone());
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.add_alert(alert);
+                }
+                self.alert_price_input.clear();
+            }
+            Event::DeletePriceAlert(id) => {
+                data::AlertStore::remove(id);
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.remove_alert(id);
+                }
+            }
+            Event::TogglePriceAlert(id) => {
+                data::AlertStore::toggle(id);
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.toggle_alert(id);
+                }
+            }
+            Event::AlertPriceInput(val) => {
+                self.alert_price_input = val;
+            }
+            Event::AlertConditionSelected(cond) => {
+                self.alert_condition = cond;
+            }
+            Event::AlertFilterSelected(filter) => {
+                self.alert_filter = filter;
+            }
+            Event::ClearTriggeredAlerts => {
+                data::AlertStore::clear_triggered();
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.alerts
+                        .retain(|a| a.status != data::chart::alert::AlertStatus::Triggered);
+                    c.invalidate_all();
+                }
+            }
         }
         None
     }
@@ -1513,6 +1859,7 @@ impl State {
         total_panes: usize,
         is_maximized: bool,
         is_popout: bool,
+        window: window::Id,
     ) -> Element<'_, Message> {
         let modal_btn_style = |modal: Modal| {
             let is_active = self.modal == Some(modal);
@@ -1558,6 +1905,37 @@ impl State {
                 modal_btn_style(Modal::Indicators),
             ));
         }
+
+        if !treat_as_starter && matches!(&self.content, Content::Kline { .. }) {
+            buttons = buttons.push(button_with_tooltip(
+                icon_text(Icon::SpeakerHigh, 12),
+                show_modal(Modal::Alerts),
+                Some("Price Alerts"),
+                tooltip_pos,
+                modal_btn_style(Modal::Alerts),
+            ));
+
+            let is_replay_active = if let Content::Kline { chart: Some(c), .. } = &self.content {
+                c.is_replay_active()
+            } else {
+                false
+            };
+            buttons = buttons.push(button_with_tooltip(
+                icon_text(Icon::Return, 12),
+                Message::PaneEvent(pane, Event::ToggleReplay),
+                Some("Market Replay"),
+                tooltip_pos,
+                control_btn_style(is_replay_active),
+            ));
+        }
+
+        buttons = buttons.push(button_with_tooltip(
+            icon_text(Icon::Clone, 12),
+            Message::PaneEvent(pane, Event::TakeScreenshot(window)),
+            Some("Screenshot to Clipboard"),
+            tooltip_pos,
+            control_btn_style(false),
+        ));
 
         if is_popout {
             buttons = buttons.push(button_with_tooltip(
@@ -1617,6 +1995,7 @@ impl State {
         settings_modal: F,
         selected_tickers: Option<&'a [TickerInfo]>,
         tickers_table: &'a TickersTable,
+        show_toolbar: bool,
     ) -> Element<'a, Message>
     where
         F: FnOnce() -> Element<'a, Message>,
@@ -1629,7 +2008,7 @@ impl State {
 
         let on_blur = Message::PaneEvent(pane, Event::HideModal);
 
-        match &self.modal {
+        let mut view: Element<'a, Message> = match &self.modal {
             Some(Modal::LinkGroup) => {
                 let content = link_group_modal(pane, self.link_group);
 
@@ -1671,6 +2050,43 @@ impl State {
                     Alignment::Start,
                 )
             }
+            Some(Modal::Alerts) => {
+                let current_price = if let Content::Kline { chart: Some(c), .. } = &self.content {
+                    c.current_price()
+                } else {
+                    None
+                };
+                let ticker_symbol = self
+                    .stream_pair()
+                    .map(|ti| ti.ticker.display_symbol_and_type().0)
+                    .unwrap_or_else(|| "Symbol".to_string());
+
+                let all_alerts = data::AlertStore::all();
+                let this_chart_alerts: Vec<_> = all_alerts
+                    .iter()
+                    .filter(|a| a.ticker_symbol == ticker_symbol)
+                    .cloned()
+                    .collect();
+
+                let content = crate::modal::pane::alerts::alerts_view(
+                    pane,
+                    &ticker_symbol,
+                    current_price,
+                    &this_chart_alerts,
+                    &all_alerts,
+                    self.alert_filter,
+                    &self.alert_price_input,
+                    self.alert_condition,
+                );
+
+                stack_modal(
+                    base,
+                    content,
+                    on_blur,
+                    padding::right(12).left(12),
+                    Alignment::End,
+                )
+            }
             Some(Modal::Settings) => stack_modal(
                 base,
                 settings_modal(),
@@ -1696,7 +2112,198 @@ impl State {
                 padding::left(12),
                 Alignment::End,
             ),
+            Some(Modal::ReplayDatePicker(picker_state)) => stack_modal_positioned(
+                base,
+                modal::pane::replay_calendar::view(pane, picker_state),
+                on_blur,
+                padding::bottom(50),
+                Alignment::Center,
+                Alignment::End,
+            ),
             None => base,
+        };
+
+        if show_toolbar && let Content::Kline { chart: Some(c), .. } = &self.content {
+            let active_tool = c.active_drawing_tool();
+            let has_drawings = !c.drawings.is_empty();
+
+            let toolbar =
+                widget::chart::drawing_toolbar::view(active_tool, has_drawings, move |action| {
+                    match action {
+                        widget::chart::drawing_toolbar::ToolbarAction::SelectTool(tool) => {
+                            Message::PaneEvent(pane, Event::SelectDrawingTool(tool))
+                        }
+                        widget::chart::drawing_toolbar::ToolbarAction::ClearDrawings => {
+                            Message::PaneEvent(pane, Event::ClearDrawings)
+                        }
+                    }
+                });
+
+            let toolbar_pos = self
+                .drawing_toolbar_pos
+                .unwrap_or(iced::Point::new(16.0, 48.0));
+            let draggable_toolbar =
+                widget::DraggableOverlay::new(toolbar, toolbar_pos, move |new_pos| {
+                    Message::PaneEvent(pane, Event::DrawingToolbarMoved(new_pos))
+                })
+                .drag_handle_width(32.0);
+
+            view = iced::widget::stack![view, draggable_toolbar].into();
+        }
+
+        if let Content::Kline { chart: Some(c), .. } = &self.content
+            && let Some(sel_d) = c.selected_drawing()
+        {
+            let sel_toolbar = widget::chart::drawing_selection_toolbar::view(
+                sel_d,
+                self.selected_drawing_show_settings,
+                move |action| Message::PaneEvent(pane, Event::SelectedDrawingAction(action)),
+            );
+
+            let sel_toolbar_pos = self
+                .selected_drawing_toolbar_pos
+                .unwrap_or(iced::Point::new(260.0, 48.0));
+            let draggable_sel_toolbar =
+                widget::DraggableOverlay::new(sel_toolbar, sel_toolbar_pos, move |new_pos| {
+                    Message::PaneEvent(pane, Event::SelectedDrawingToolbarMoved(new_pos))
+                })
+                .drag_handle_width(32.0);
+
+            view = iced::widget::stack![view, draggable_sel_toolbar].into();
+        }
+
+        if let Content::Kline { chart: Some(c), .. } = &self.content
+            && let Some(rep) = c.replay_state()
+            && rep.active
+        {
+            let dt_str = chrono::DateTime::from_timestamp_millis(rep.cutoff_time as i64)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "--".to_string());
+
+            let speed_btn = |speed_ms: u64, label: &'static str| {
+                let is_selected = rep.speed_ms == speed_ms;
+                button(text(label).size(10).font(style::AZERET_MONO))
+                    .style(move |theme, status| style::button::modifier(theme, status, is_selected))
+                    .on_press(Message::PaneEvent(pane, Event::ReplaySetSpeed(speed_ms)))
+                    .padding([2, 6])
+            };
+
+            let play_btn_text = if rep.is_playing { "PAUSE" } else { "PLAY" };
+            let is_picker_open = matches!(self.modal, Some(Modal::ReplayDatePicker(_)));
+
+            let replay_bar = container(
+                row![
+                    container(text("REPLAY").size(10).font(style::AZERET_MONO))
+                        .padding([2, 6])
+                        .style(|theme: &Theme| {
+                            let p = theme.extended_palette();
+                            container::Style {
+                                background: Some(p.primary.weak.color.into()),
+                                text_color: Some(p.primary.weak.text),
+                                border: iced::Border {
+                                    radius: 2.0.into(),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                        }),
+                    button(modal::pane::replay_calendar::step_backward_icon(
+                        None, 12.0, 10.0
+                    ))
+                    .style(|theme, status| style::button::transparent(theme, status, false))
+                    .on_press(Message::PaneEvent(pane, Event::ReplayStepBackward))
+                    .padding([3, 7]),
+                    button(text(play_btn_text).size(10).font(style::AZERET_MONO))
+                        .style(|theme, status| style::button::modifier(
+                            theme,
+                            status,
+                            rep.is_playing
+                        ))
+                        .on_press(Message::PaneEvent(pane, Event::ReplayPlayPause))
+                        .padding([3, 10]),
+                    button(modal::pane::replay_calendar::step_forward_icon(
+                        None, 12.0, 10.0
+                    ))
+                    .style(|theme, status| style::button::transparent(theme, status, false))
+                    .on_press(Message::PaneEvent(pane, Event::ReplayStepForward))
+                    .padding([3, 7]),
+                    row![
+                        speed_btn(1000, "1x"),
+                        speed_btn(500, "2x"),
+                        speed_btn(200, "5x"),
+                        speed_btn(100, "10x"),
+                    ]
+                    .spacing(2),
+                    button(
+                        row![
+                            modal::pane::replay_calendar::calendar_icon(None, is_picker_open, 12.0),
+                            text(dt_str).size(11).font(style::AZERET_MONO),
+                        ]
+                        .spacing(5)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding([2, 8])
+                    .style(move |theme: &Theme, status| {
+                        let p = theme.extended_palette();
+                        let is_hovered = matches!(status, button::Status::Hovered);
+                        let bg = if is_picker_open {
+                            p.primary.weak.color
+                        } else if is_hovered {
+                            p.background.strong.color
+                        } else {
+                            p.background.weak.color
+                        };
+                        let border_color = if is_picker_open {
+                            p.primary.strong.color
+                        } else {
+                            p.background.strong.color
+                        };
+                        button::Style {
+                            background: Some(bg.into()),
+                            text_color: if is_picker_open {
+                                p.primary.weak.text
+                            } else {
+                                p.background.base.text
+                            },
+                            border: iced::Border {
+                                radius: 2.0.into(),
+                                width: 1.0,
+                                color: border_color,
+                            },
+                            ..Default::default()
+                        }
+                    })
+                    .on_press(Message::PaneEvent(pane, Event::ToggleReplayDatePicker)),
+                    button(modal::pane::replay_calendar::random_icon(None, 12.0))
+                        .style(|theme, status| style::button::transparent(theme, status, false))
+                        .on_press(Message::PaneEvent(
+                            pane,
+                            Event::ReplayDatePickerAction(
+                                modal::pane::replay_calendar::Action::RandomBar
+                            ),
+                        ))
+                        .padding([3, 6]),
+                    button(icon_text(Icon::Close, 11))
+                        .style(|theme, status| style::button::transparent(theme, status, false))
+                        .on_press(Message::PaneEvent(pane, Event::ToggleReplay))
+                        .padding([3, 5]),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .padding([4, 8])
+            .style(style::chart_modal);
+
+            let dock = container(replay_bar)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::End)
+                .padding(padding::bottom(10));
+
+            iced::widget::stack![view, dock].into()
+        } else {
+            view
         }
     }
 
@@ -1754,7 +2361,17 @@ impl State {
 
     pub fn update_interval(&self) -> Option<u64> {
         match &self.content {
-            Content::Kline { .. } | Content::Comparison(_) => Some(1000),
+            Content::Kline { chart, .. } => {
+                if let Some(chart) = chart
+                    && let Some(rep) = &chart.replay
+                    && rep.active
+                    && rep.is_playing
+                {
+                    return Some(rep.speed_ms.min(100));
+                }
+                Some(1000)
+            }
+            Content::Comparison(_) => Some(1000),
             Content::Heatmap { chart, .. } => {
                 if let Some(chart) = chart {
                     chart.basis_interval()
@@ -1821,6 +2438,12 @@ impl Default for State {
             notifications: vec![],
             status: Status::Ready,
             link_group: None,
+            alert_price_input: String::new(),
+            alert_condition: data::chart::alert::AlertCondition::Crossing,
+            alert_filter: data::chart::alert::AlertFilter::ThisChart,
+            drawing_toolbar_pos: None,
+            selected_drawing_toolbar_pos: None,
+            selected_drawing_show_settings: false,
         }
     }
 }
@@ -1912,7 +2535,7 @@ impl Content {
         settings: &Settings,
         tick_size: f32,
     ) -> Self {
-        let (prev_indis, prev_layout, prev_kind_opt) = if let Content::Kline {
+        let (prev_indis, prev_layout, prev_kind_opt, prev_config) = if let Content::Kline {
             chart,
             indicators,
             kind,
@@ -1923,9 +2546,10 @@ impl Content {
                 Some(indicators.clone()),
                 Some(chart.as_ref().map_or(layout.clone(), |c| c.chart_layout())),
                 Some(chart.as_ref().map_or(kind.clone(), |c| c.kind().clone())),
+                chart.as_ref().map(|c| c.config()),
             )
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
         let prev_was_footprint = prev_kind_opt
@@ -1960,6 +2584,10 @@ impl Content {
                         period: Default::default(),
                         clusters: Vec::new(),
                         split_sessions: Vec::new(),
+                        color_scheme: Default::default(),
+                        ib_color: Default::default(),
+                        poc_color: Default::default(),
+                        single_prints_color: Default::default(),
                     }),
             ),
             _ => unreachable!("invalid content kind for kline chart"),
@@ -2017,7 +2645,13 @@ impl Content {
                 autoscale: Some(data::chart::Autoscale::FitToVisible),
             });
 
-        let chart = KlineChart::new(
+        let kline_config = settings
+            .visual_config
+            .as_ref()
+            .and_then(|cfg| cfg.kline())
+            .or(prev_config);
+
+        let mut chart = KlineChart::new(
             layout.clone(),
             basis,
             tick_size,
@@ -2026,7 +2660,10 @@ impl Content {
             &enabled_indicators,
             ticker_info,
             &determined_chart_kind,
+            kline_config,
         );
+        chart.alerts =
+            data::AlertStore::for_symbol(&ticker_info.ticker.display_symbol_and_type().0);
 
         Content::Kline {
             chart: Some(chart),
@@ -2062,6 +2699,10 @@ impl Content {
                     period: Default::default(),
                     clusters: Vec::new(),
                     split_sessions: Vec::new(),
+                    color_scheme: Default::default(),
+                    ib_color: Default::default(),
+                    poc_color: Default::default(),
+                    single_prints_color: Default::default(),
                 },
                 layout: ViewConfig {
                     splits: vec![],
@@ -2170,6 +2811,9 @@ impl Content {
 
     pub fn change_visual_config(&mut self, config: VisualConfig) {
         match (self, config) {
+            (Content::Kline { chart: Some(c), .. }, VisualConfig::Kline(cfg)) => {
+                c.set_visual_config(cfg);
+            }
             (Content::Heatmap { chart: Some(c), .. }, VisualConfig::Heatmap(cfg)) => {
                 c.set_visual_config(cfg);
             }

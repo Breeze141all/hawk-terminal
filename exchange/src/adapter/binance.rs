@@ -20,11 +20,15 @@ use iced_futures::{
     stream,
 };
 use serde::Deserialize;
-use sonic_rs::{FastStr, JsonContainerTrait, JsonValueTrait, to_object_iter_unchecked};
+use sonic_rs::{FastStr, JsonContainerTrait, JsonValueTrait};
 use tokio::sync::Mutex;
 
 use std::{
-    collections::HashMap, io::BufReader, path::Path, path::PathBuf, sync::LazyLock, time::Duration,
+    collections::HashMap,
+    io::BufReader,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    time::Duration,
 };
 
 const SPOT_DOMAIN: &str = "https://api.binance.com";
@@ -230,7 +234,7 @@ fn feed_de(slice: &[u8], market: MarketKind) -> Result<StreamData, AdapterError>
     let exchange = exchange_from_market_type(market);
 
     let mut stream_type: Option<StreamWrapper> = None;
-    let iter: sonic_rs::ObjectJsonIter = unsafe { to_object_iter_unchecked(slice) };
+    let iter: sonic_rs::ObjectJsonIter = sonic_rs::to_object_iter(slice);
 
     for elem in iter {
         let (k, v) = elem.map_err(|e| AdapterError::ParseError(e.to_string()))?;
@@ -942,12 +946,13 @@ pub async fn fetch_klines(
 
     let limit_param = if let Some((start, end)) = range {
         let interval_ms = timeframe.to_milliseconds();
-        let num_intervals = ((end - start) / interval_ms).min(1000);
+        let num_intervals = (((end.saturating_sub(start)) / interval_ms) + 5).clamp(10, 1000);
 
-        if num_intervals < 3 {
-            let new_start = start - (interval_ms * 5);
-            let new_end = end + (interval_ms * 5);
-            let num_intervals = ((new_end - new_start) / interval_ms).min(1000);
+        if (end.saturating_sub(start)) / interval_ms < 3 {
+            let new_start = start.saturating_sub(interval_ms * 5);
+            let new_end = end.saturating_add(interval_ms * 5);
+            let num_intervals =
+                (((new_end.saturating_sub(new_start)) / interval_ms) + 5).clamp(10, 1000);
 
             url.push_str(&format!(
                 "&startTime={new_start}&endTime={new_end}&limit={num_intervals}"
@@ -1242,12 +1247,13 @@ pub async fn fetch_historical_oi(
     let mut url = format!("{base_url}{pair_str}&period={period_str}",);
 
     if let Some((start, end)) = range {
-        // API is limited to 30 days of historical data
-        let thirty_days_ago = std::time::SystemTime::now()
+        let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("Could not get system time")
-            .as_millis() as u64
-            - THIRTY_DAYS_MS;
+            .as_millis() as u64;
+
+        // API is limited to 30 days of historical data
+        let thirty_days_ago = now_ms.saturating_sub(THIRTY_DAYS_MS);
 
         if end < thirty_days_ago {
             let err_msg = format!(
@@ -1256,6 +1262,8 @@ pub async fn fetch_historical_oi(
             log::error!("{}", err_msg);
             return Err(AdapterError::InvalidRequest(err_msg));
         }
+
+        let end = end.min(now_ms);
 
         let adjusted_start = if start < thirty_days_ago {
             log::warn!(
@@ -1268,8 +1276,12 @@ pub async fn fetch_historical_oi(
             start
         };
 
-        let interval_ms = period.to_milliseconds();
-        let num_intervals = ((end - adjusted_start) / interval_ms).min(500);
+        if adjusted_start >= end {
+            return Ok(Vec::new());
+        }
+
+        let interval_ms = period.to_milliseconds().max(1);
+        let num_intervals = ((end - adjusted_start) / interval_ms).clamp(1, 500);
 
         url.push_str(&format!(
             "&startTime={adjusted_start}&endTime={end}&limit={num_intervals}"
@@ -1281,15 +1293,37 @@ pub async fn fetch_historical_oi(
     let limiter = limiter_from_market_type(market);
     let text = crate::limiter::http_request_with_limiter(&url, limiter, weight, None, None).await?;
 
-    let binance_oi: Vec<DeOpenInterest> = serde_json::from_str(&text).map_err(|e| {
-        log::error!(
-            "Failed to parse response from {}: {}\nResponse: {}",
-            url,
-            e,
-            text
-        );
-        AdapterError::ParseError(format!("Failed to parse open interest: {e}"))
-    })?;
+    let binance_oi: Vec<DeOpenInterest> = match serde_json::from_str(&text) {
+        Ok(oi) => oi,
+        Err(e) => {
+            #[derive(serde::Deserialize)]
+            struct BinanceApiError {
+                code: i64,
+                msg: String,
+            }
+            if let Ok(api_err) = serde_json::from_str::<BinanceApiError>(&text) {
+                log::error!(
+                    "Binance OI API error for {}: ({}) {}",
+                    url,
+                    api_err.code,
+                    api_err.msg
+                );
+                return Err(AdapterError::InvalidRequest(format!(
+                    "Binance API error ({}): {}",
+                    api_err.code, api_err.msg
+                )));
+            }
+            log::error!(
+                "Failed to parse response from {}: {}\nResponse: {}",
+                url,
+                e,
+                text
+            );
+            return Err(AdapterError::ParseError(format!(
+                "Failed to parse open interest: {e}"
+            )));
+        }
+    };
 
     let contract_size = get_contract_size(&ticker, market);
 
@@ -1304,24 +1338,121 @@ pub async fn fetch_historical_oi(
     Ok(open_interest)
 }
 
+pub fn find_gap_index(trades: &[Trade], from_idx: usize, max_gap_ms: u64) -> Option<usize> {
+    if trades.is_empty() || from_idx >= trades.len() - 1 {
+        return None;
+    }
+    (from_idx..trades.len() - 1)
+        .find(|&i| trades[i + 1].time.saturating_sub(trades[i].time) > max_gap_ms)
+}
+
+async fn fetch_trades_from_intraday_cache_or_rest(
+    ticker_info: TickerInfo,
+    from_time: u64,
+    target_date: chrono::NaiveDate,
+    data_path: &Path,
+    day_end_fallback: u64,
+) -> Result<(Vec<Trade>, u64), AdapterError> {
+    let cached =
+        load_intraday_trades_from_cache(data_path, &ticker_info, target_date).unwrap_or_default();
+    if !cached.is_empty() {
+        let t_first = cached.first().unwrap().time;
+        let t_last = cached.last().unwrap().time;
+
+        if from_time < t_first {
+            let new_trades =
+                fetch_intraday_trades_raw(ticker_info, from_time, Some(t_first)).await?;
+            if !new_trades.is_empty() {
+                let next_from = new_trades
+                    .last()
+                    .map(|t| t.time.saturating_add(1))
+                    .unwrap_or(t_first);
+                let _ = save_intraday_trades_to_cache(
+                    data_path,
+                    &ticker_info,
+                    target_date,
+                    &new_trades,
+                );
+                return Ok((new_trades, next_from));
+            } else {
+                let end_idx = find_gap_index(&cached, 0, 60_000).unwrap_or(cached.len() - 1);
+                let trades = cached[0..=end_idx].to_vec();
+                let next_from = cached[end_idx].time.saturating_add(1);
+                return Ok((trades, next_from));
+            }
+        }
+
+        if from_time <= t_last {
+            let start_idx = cached.partition_point(|t| t.time < from_time);
+            let in_gap = start_idx < cached.len()
+                && cached[start_idx].time.saturating_sub(from_time) > 60_000;
+
+            if in_gap {
+                let target_end = cached[start_idx].time;
+                let new_trades =
+                    fetch_intraday_trades_raw(ticker_info, from_time, Some(target_end)).await?;
+                if !new_trades.is_empty() {
+                    let next_from = new_trades
+                        .last()
+                        .map(|t| t.time.saturating_add(1))
+                        .unwrap_or(target_end);
+                    let _ = save_intraday_trades_to_cache(
+                        data_path,
+                        &ticker_info,
+                        target_date,
+                        &new_trades,
+                    );
+                    return Ok((new_trades, next_from));
+                } else {
+                    let end_idx =
+                        find_gap_index(&cached, start_idx, 60_000).unwrap_or(cached.len() - 1);
+                    let trades = cached[start_idx..=end_idx].to_vec();
+                    let next_from = cached[end_idx].time.saturating_add(1);
+                    return Ok((trades, next_from));
+                }
+            }
+
+            if let Some(end_idx) = find_gap_index(&cached, start_idx, 60_000) {
+                let trades = cached[start_idx..=end_idx].to_vec();
+                let next_from = cached[end_idx].time.saturating_add(1);
+                return Ok((trades, next_from));
+            }
+
+            let trades = cached[start_idx..].to_vec();
+            let next_from = t_last.saturating_add(1);
+            return Ok((trades, next_from));
+        }
+    }
+
+    let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+    let next_from = new_trades
+        .last()
+        .map(|t| t.time.saturating_add(1))
+        .unwrap_or(day_end_fallback);
+
+    if !new_trades.is_empty() {
+        let _ = save_intraday_trades_to_cache(data_path, &ticker_info, target_date, &new_trades);
+    }
+    Ok((new_trades, next_from))
+}
+
 pub async fn fetch_trades(
     ticker_info: TickerInfo,
     from_time: u64,
     data_path: PathBuf,
 ) -> Result<(Vec<Trade>, u64), AdapterError> {
-    let today_midnight = chrono::Utc::now()
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .unwrap()
-        .and_utc();
+    let today_date = chrono::Utc::now().date_naive();
+    let today_midnight = today_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
 
     if from_time as i64 >= today_midnight.timestamp_millis() {
-        let trades = fetch_intraday_trades(ticker_info, from_time).await?;
-        let next_from = trades
-            .last()
-            .map(|t| t.time.saturating_add(1))
-            .unwrap_or(from_time);
-        return Ok((trades, next_from));
+        return fetch_trades_from_intraday_cache_or_rest(
+            ticker_info,
+            from_time,
+            today_date,
+            &data_path,
+            from_time.saturating_add(60_000),
+        )
+        .await;
     }
 
     let from_date = chrono::DateTime::from_timestamp_millis(from_time as i64)
@@ -1347,6 +1478,25 @@ pub async fn fetch_trades(
         return Ok((Vec::new(), next_day_start));
     }
 
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let is_recent = from_time >= now_ms.saturating_sub(48 * 3600 * 1000);
+
+    // Check if recent past day is already completely cached in intraday cache
+    if is_recent
+        && let Some(cached) = load_intraday_trades_from_cache(&data_path, &ticker_info, from_date)
+        && let Some(day_start_dt) = from_date.and_hms_opt(0, 0, 0)
+    {
+        let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
+        let day_end = day_start + 86_400_000 - 1;
+        let is_full = !cached.is_empty()
+            && cached.first().map(|t| t.time).unwrap_or(0) <= day_start + 600_000
+            && cached.last().map(|t| t.time).unwrap_or(0) >= day_end - 600_000;
+        if is_full {
+            let _ = save_raw_trades_to_cache(&data_path, &ticker_info, from_date, &cached);
+            return Ok((cached, next_day_start));
+        }
+    }
+
     match get_hist_trades(ticker_info, from_date, data_path.clone()).await {
         Ok(trades) => Ok((trades, next_day_start)),
         Err(e) => {
@@ -1355,14 +1505,15 @@ pub async fn fetch_trades(
                 from_date,
                 e
             );
-            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-            if from_time >= now_ms.saturating_sub(48 * 3600 * 1000) {
-                let trades = fetch_intraday_trades(ticker_info, from_time).await?;
-                let next_from = trades
-                    .last()
-                    .map(|t| t.time.saturating_add(1))
-                    .unwrap_or(next_day_start);
-                Ok((trades, next_from))
+            if is_recent {
+                fetch_trades_from_intraday_cache_or_rest(
+                    ticker_info,
+                    from_time,
+                    from_date,
+                    &data_path,
+                    next_day_start,
+                )
+                .await
             } else {
                 Err(e)
             }
@@ -1423,116 +1574,12 @@ pub async fn fetch_intraday_trades(
     fetch_intraday_trades_raw(ticker_info, from, None).await
 }
 
-pub const USE_BINARY_CACHE: bool = true;
-pub const BINARY_CACHE_MAGIC: &[u8; 4] = b"FST1";
-pub const TRADE_RECORD_SIZE: usize = 24;
-
-pub fn encode_trades_binary(trades: &[Trade]) -> Vec<u8> {
-    let num_trades = trades.len();
-    let mut raw = Vec::with_capacity(8 + num_trades * TRADE_RECORD_SIZE);
-    raw.extend_from_slice(BINARY_CACHE_MAGIC);
-    raw.extend_from_slice(&(num_trades as u32).to_le_bytes());
-
-    for t in trades {
-        raw.extend_from_slice(&t.time.to_le_bytes());
-        raw.extend_from_slice(&t.price.units.to_le_bytes());
-        raw.extend_from_slice(&t.qty.to_le_bytes());
-        raw.push(if t.is_sell { 1 } else { 0 });
-        raw.extend_from_slice(&[0u8; 3]);
-    }
-
-    lz4_flex::compress_prepend_size(&raw)
-}
-
-pub fn decode_trades_binary(compressed_bytes: &[u8]) -> Result<Vec<Trade>, AdapterError> {
-    let decompressed = lz4_flex::decompress_size_prepended(compressed_bytes)
-        .map_err(|e| AdapterError::ParseError(format!("Failed to decompress binary cache: {e}")))?;
-
-    if decompressed.len() < 8 {
-        return Err(AdapterError::ParseError(
-            "Binary cache header too short".into(),
-        ));
-    }
-
-    if &decompressed[0..4] != BINARY_CACHE_MAGIC {
-        return Err(AdapterError::ParseError(
-            "Binary cache magic mismatch".into(),
-        ));
-    }
-
-    let count = u32::from_le_bytes(
-        decompressed[4..8]
-            .try_into()
-            .map_err(|_| AdapterError::ParseError("Failed to parse trade count".into()))?,
-    ) as usize;
-
-    let payload = &decompressed[8..];
-    if payload.len() != count * TRADE_RECORD_SIZE {
-        return Err(AdapterError::ParseError(format!(
-            "Binary cache payload size mismatch: expected {} bytes for {} trades, got {}",
-            count * TRADE_RECORD_SIZE,
-            count,
-            payload.len()
-        )));
-    }
-
-    let mut trades = Vec::with_capacity(count);
-    for chunk in payload.chunks_exact(TRADE_RECORD_SIZE) {
-        let time = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
-        let price_units = i64::from_le_bytes(chunk[8..16].try_into().unwrap());
-        let qty = f32::from_le_bytes(chunk[16..20].try_into().unwrap());
-        let is_sell = chunk[20] != 0;
-
-        trades.push(Trade {
-            time,
-            is_sell,
-            price: Price { units: price_units },
-            qty,
-        });
-    }
-
-    Ok(trades)
-}
-
-pub fn raw_trade_subpath(ticker_info: &TickerInfo) -> String {
-    let ticker = ticker_info.ticker;
-    let (symbol, market_type) = ticker.to_full_symbol_and_type();
-    let symbol_upper = symbol.to_uppercase();
-
-    match market_type {
-        MarketKind::Spot => format!("data/spot/daily/aggTrades/{symbol_upper}"),
-        MarketKind::LinearPerps => format!("data/futures/um/daily/aggTrades/{symbol_upper}"),
-        MarketKind::InversePerps => format!("data/futures/cm/daily/aggTrades/{symbol_upper}"),
-    }
-}
-
-pub fn raw_trade_bin_path(
-    base_data_path: &Path,
-    ticker_info: &TickerInfo,
-    date: chrono::NaiveDate,
-) -> PathBuf {
-    let ticker = ticker_info.ticker;
-    let (symbol, _) = ticker.to_full_symbol_and_type();
-    let symbol_upper = symbol.to_uppercase();
-    let market_subpath = raw_trade_subpath(ticker_info);
-    let bin_file_name = format!("{symbol_upper}-aggTrades-{}.bin", date.format("%Y-%m-%d"));
-    base_data_path.join(market_subpath).join(bin_file_name)
-}
-
-pub fn load_raw_trades_from_cache(
-    base_data_path: &Path,
-    ticker_info: &TickerInfo,
-    date: chrono::NaiveDate,
-) -> Option<Vec<Trade>> {
-    let bin_path = raw_trade_bin_path(base_data_path, ticker_info, date);
-    if bin_path.exists()
-        && let Ok(bytes) = std::fs::read(&bin_path)
-        && let Ok(trades) = decode_trades_binary(&bytes)
-    {
-        return Some(trades);
-    }
-    None
-}
+pub use crate::trades::cache::{
+    BINARY_CACHE_MAGIC, TRADE_RECORD_SIZE, USE_BINARY_CACHE, decode_trades_binary,
+    encode_trades_binary, intraday_raw_trade_bin_path, load_intraday_trades_from_cache,
+    load_raw_trades_from_cache, raw_trade_bin_path, raw_trade_subpath,
+    save_intraday_trades_to_cache, save_raw_trades_to_cache,
+};
 
 pub async fn get_hist_trades(
     ticker_info: TickerInfo,
@@ -1543,24 +1590,41 @@ pub async fn get_hist_trades(
     let (symbol, _) = ticker.to_full_symbol_and_type();
     let symbol_upper = symbol.to_uppercase();
     let market_subpath = raw_trade_subpath(&ticker_info);
-    let base_path = base_path.join(&market_subpath);
+    let base_market_path = base_path.join(&market_subpath);
 
-    std::fs::create_dir_all(&base_path)
+    std::fs::create_dir_all(&base_market_path)
         .map_err(|e| AdapterError::ParseError(format!("Failed to create directories: {e}")))?;
 
     let bin_file_name = format!("{symbol_upper}-aggTrades-{}.bin", date.format("%Y-%m-%d"));
-    let base_bin_path = base_path.join(&bin_file_name);
+    let base_bin_path = base_market_path.join(&bin_file_name);
 
     if USE_BINARY_CACHE && base_bin_path.exists() {
         match std::fs::read(&base_bin_path) {
             Ok(bytes) => match decode_trades_binary(&bytes) {
                 Ok(trades) => {
-                    log::info!(
-                        "Using binary cached {} ({} trades)",
-                        base_bin_path.display(),
-                        trades.len()
-                    );
-                    return Ok(trades);
+                    let is_full = date.and_hms_opt(0, 0, 0).is_some_and(|dt| {
+                        let day_start = dt.and_utc().timestamp_millis() as u64;
+                        let day_end = day_start + 86_400_000 - 1;
+                        !trades.is_empty()
+                            && trades.first().map(|t| t.time).unwrap_or(0) <= day_start + 600_000
+                            && trades.last().map(|t| t.time).unwrap_or(0) >= day_end - 600_000
+                    });
+
+                    if is_full {
+                        log::info!(
+                            "Using binary cached {} ({} trades)",
+                            base_bin_path.display(),
+                            trades.len()
+                        );
+                        return Ok(trades);
+                    } else {
+                        log::warn!(
+                            "Cached binary archive {:?} is incomplete ({} trades), removing to download full archive",
+                            base_bin_path,
+                            trades.len()
+                        );
+                        let _ = std::fs::remove_file(&base_bin_path);
+                    }
                 }
                 Err(e) => {
                     log::warn!(
@@ -1587,7 +1651,7 @@ pub async fn get_hist_trades(
         date.format("%Y-%m-%d"),
     );
     let zip_path = format!("{market_subpath}/{zip_file_name}");
-    let base_zip_path = base_path.join(&zip_file_name);
+    let base_zip_path = base_market_path.join(&zip_file_name);
 
     if std::fs::metadata(&base_zip_path).is_ok() {
         log::info!("Using cached {}", zip_path);
@@ -1679,30 +1743,16 @@ pub async fn get_hist_trades(
         }
     };
 
-    if USE_BINARY_CACHE && !trades.is_empty() {
-        let compressed = encode_trades_binary(&trades);
-        let temp_bin_path = base_bin_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
-        if let Err(e) = std::fs::write(&temp_bin_path, &compressed) {
-            log::warn!(
-                "Failed to write temp binary cache {:?}: {}",
-                temp_bin_path,
-                e
-            );
-        } else {
-            if base_bin_path.exists() {
-                let _ = std::fs::remove_file(&base_bin_path);
-            }
-            if let Err(e) = std::fs::rename(&temp_bin_path, &base_bin_path) {
-                log::warn!("Failed to rename {temp_bin_path:?} to {base_bin_path:?}: {e}");
-                let _ = std::fs::remove_file(&temp_bin_path);
-            } else {
-                log::info!(
-                    "Saved {} trades to binary cache {:?}",
-                    trades.len(),
-                    base_bin_path
-                );
-            }
-        }
+    if USE_BINARY_CACHE
+        && !trades.is_empty()
+        && let Err(e) = save_raw_trades_to_cache(&base_path, &ticker_info, date, &trades)
+    {
+        log::warn!("Failed to save binary cache: {e}");
+    }
+
+    let intraday_path = intraday_raw_trade_bin_path(&base_path, &ticker_info, date);
+    if intraday_path.exists() {
+        let _ = std::fs::remove_file(&intraday_path);
     }
 
     Ok(trades)
@@ -1864,5 +1914,168 @@ pub fn perp_to_spot_symbol(ticker: &Ticker) -> Option<String> {
             symbol.split('_').next().map(|s| format!("{}T", s))
         }
         MarketKind::Spot => Some(symbol),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_intraday_cache_path_does_not_collide_with_archive() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+        let base_path = PathBuf::from("test_data");
+
+        let archive_path = raw_trade_bin_path(&base_path, &ticker_info, date);
+        let intraday_path = intraday_raw_trade_bin_path(&base_path, &ticker_info, date);
+
+        assert_ne!(archive_path, intraday_path);
+        assert!(
+            archive_path
+                .to_string_lossy()
+                .contains("BTCUSDT-aggTrades-2026-09-16.bin")
+        );
+        assert!(
+            intraday_path
+                .to_string_lossy()
+                .contains("BTCUSDT-intraday-2026-09-16.bin")
+        );
+    }
+
+    #[test]
+    fn test_load_raw_trades_rejects_partial_day_archive() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_partial_raw_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+
+        // 944 trades only at 13:25 UTC (not spanning full day)
+        let trades = vec![Trade {
+            time: 1789565147000,
+            price: Price::from_f32(60000.0),
+            qty: 1.0,
+            is_sell: false,
+        }];
+
+        save_raw_trades_to_cache(&temp_dir, &ticker_info, date, &trades).expect("save failed");
+        let bin_path = raw_trade_bin_path(&temp_dir, &ticker_info, date);
+        assert!(bin_path.exists());
+
+        // load_raw_trades_from_cache must detect that trades do not span the day, reject, and delete the file
+        let loaded = load_raw_trades_from_cache(&temp_dir, &ticker_info, date);
+        assert!(loaded.is_none());
+        assert!(!bin_path.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_save_and_load_intraday_trades_cache() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_intraday_cache_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 17).unwrap();
+
+        let trades = vec![
+            Trade {
+                time: 1789600000000,
+                price: Price::from_f32(60000.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: 1789600010000,
+                price: Price::from_f32(60001.0),
+                qty: 2.0,
+                is_sell: true,
+            },
+        ];
+
+        save_intraday_trades_to_cache(&temp_dir, &ticker_info, date, &trades).expect("save failed");
+        let intraday_path = intraday_raw_trade_bin_path(&temp_dir, &ticker_info, date);
+        assert!(intraday_path.exists());
+
+        let loaded =
+            load_intraday_trades_from_cache(&temp_dir, &ticker_info, date).expect("load failed");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].time, 1789600000000);
+        assert_eq!(loaded[1].time, 1789600010000);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_gap_traversal_in_intraday_cache() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "test_gap_traversal_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let today_date = chrono::Utc::now().date_naive();
+        let base_t = today_date
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        // Gap dataset: [00:00:00, 00:00:10] (chunk 1), then 10-hour gap, then [10:00:00, 10:00:10] (chunk 2)
+        let trades = vec![
+            Trade {
+                time: base_t,
+                price: Price::from_f32(60000.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: base_t + 10_000,
+                price: Price::from_f32(60010.0),
+                qty: 1.0,
+                is_sell: true,
+            },
+            Trade {
+                time: base_t + 10 * 3_600_000,
+                price: Price::from_f32(60050.0),
+                qty: 2.0,
+                is_sell: false,
+            },
+            Trade {
+                time: base_t + 10 * 3_600_000 + 10_000,
+                price: Price::from_f32(60060.0),
+                qty: 2.0,
+                is_sell: true,
+            },
+        ];
+
+        save_intraday_trades_to_cache(&temp_dir, &ticker_info, today_date, &trades).unwrap();
+
+        // 1. Fetching from base_t should return trades up to the gap at 00:00:10
+        let (batch1, next1) = fetch_trades(ticker_info, base_t, temp_dir.clone())
+            .await
+            .expect("fetch batch1 failed");
+        assert_eq!(batch1.len(), 2);
+        assert_eq!(batch1[0].time, base_t);
+        assert_eq!(batch1[1].time, base_t + 10_000);
+        // next1 must step immediately past the pre-gap trade into the missing region (base_t + 10_001)
+        assert_eq!(next1, base_t + 10_001);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

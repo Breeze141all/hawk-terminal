@@ -1,4 +1,6 @@
 pub mod comparison;
+pub mod drawing_selection_toolbar;
+pub mod drawing_toolbar;
 
 use chrono::{TimeZone, Utc};
 use exchange::TickerInfo;

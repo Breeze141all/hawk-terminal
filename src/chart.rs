@@ -46,7 +46,7 @@ pub enum AxisScaleClicked {
     Y,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Message {
     Translated(Vector),
     Scaled(f32, Vector),
@@ -60,6 +60,14 @@ pub enum Message {
     MergeSessions(i64, i64),
     SplitCluster(i64),
     ToggleSplitBrackets(i64),
+    AddDrawing(data::chart::drawing::Drawing),
+    UpdateDrawing(data::chart::drawing::Drawing),
+    DeleteDrawing(uuid::Uuid),
+    ClearDrawings,
+    SelectDrawing(Option<uuid::Uuid>),
+    AddPriceAlert(f32),
+    UpdateAlertPrice(uuid::Uuid, f32),
+    ReplayCutoff(u64),
 }
 
 pub trait Chart: PlotConstants + canvas::Program<Message> {
@@ -489,7 +497,15 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
         Message::CrosshairMoved => return chart.invalidate_crosshair(),
         Message::MergeSessions(_, _)
         | Message::SplitCluster(_)
-        | Message::ToggleSplitBrackets(_) => return,
+        | Message::ToggleSplitBrackets(_)
+        | Message::AddDrawing(_)
+        | Message::UpdateDrawing(_)
+        | Message::DeleteDrawing(_)
+        | Message::ClearDrawings
+        | Message::SelectDrawing(_)
+        | Message::AddPriceAlert(_)
+        | Message::UpdateAlertPrice(_, _)
+        | Message::ReplayCutoff(_) => return,
     }
     chart.invalidate_all();
 }
@@ -753,7 +769,7 @@ impl ViewState {
         (highest, lowest)
     }
 
-    fn interval_to_x(&self, value: u64) -> f32 {
+    pub(crate) fn interval_to_x(&self, value: u64) -> f32 {
         match self.basis {
             Basis::Time(timeframe) => {
                 let interval = timeframe.to_milliseconds() as f64;
@@ -766,7 +782,7 @@ impl ViewState {
         }
     }
 
-    fn x_to_interval(&self, x: f32) -> u64 {
+    pub(crate) fn x_to_interval(&self, x: f32) -> u64 {
         match self.basis {
             Basis::Time(timeframe) => {
                 let interval = timeframe.to_milliseconds();
@@ -786,7 +802,7 @@ impl ViewState {
         }
     }
 
-    fn price_to_y(&self, price: Price) -> f32 {
+    pub(crate) fn price_to_y(&self, price: Price) -> f32 {
         if self.tick_size.units == 0 {
             let one = Self::price_unit() as f32;
             let delta_units = (self.base_price_y.units - price.units) as f32;

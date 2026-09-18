@@ -3,6 +3,7 @@ pub mod connect;
 pub mod depth;
 pub mod fetcher;
 mod limiter;
+pub mod trades;
 pub mod util;
 
 use crate::util::{ContractSize, MinQtySize, MinTicksize, Price};
@@ -807,9 +808,14 @@ mod tests {
             min_qty: util::MinQtySize { power: -3 },
             contract_size: None,
         };
-        let data_path = std::path::PathBuf::from(
-            r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+        let mut data_path = std::path::PathBuf::from(
+            r"C:\Users\Breeze\AppData\Roaming\hawk-terminal\market_data\binance",
         );
+        if !data_path.exists() {
+            data_path = std::path::PathBuf::from(
+                r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+            );
+        }
         if !data_path.exists() {
             return;
         }
@@ -920,9 +926,14 @@ mod tests {
             min_qty: util::MinQtySize { power: -3 },
             contract_size: None,
         };
-        let data_path = std::path::PathBuf::from(
-            r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+        let mut data_path = std::path::PathBuf::from(
+            r"C:\Users\Breeze\AppData\Roaming\hawk-terminal\market_data\binance",
         );
+        if !data_path.exists() {
+            data_path = std::path::PathBuf::from(
+                r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+            );
+        }
         if !data_path.exists() {
             return;
         }
@@ -953,9 +964,14 @@ mod tests {
             min_qty: util::MinQtySize { power: -3 },
             contract_size: None,
         };
-        let data_path = std::path::PathBuf::from(
-            r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+        let mut data_path = std::path::PathBuf::from(
+            r"C:\Users\Breeze\AppData\Roaming\hawk-terminal\market_data\binance",
         );
+        if !data_path.exists() {
+            data_path = std::path::PathBuf::from(
+                r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
+            );
+        }
         let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
         let trades = adapter::binance::get_hist_trades(ticker_info, date, data_path).await;
         match &trades {
@@ -963,5 +979,245 @@ mod tests {
             Err(e) => println!("Aug 21 ERROR: {:?}", e),
         }
         assert!(trades.is_ok());
+    }
+
+    #[test]
+    fn test_find_gap_index() {
+        let trades = vec![
+            Trade {
+                time: 1000,
+                is_sell: false,
+                price: util::Price { units: 100 },
+                qty: 1.0,
+            },
+            Trade {
+                time: 2000,
+                is_sell: true,
+                price: util::Price { units: 101 },
+                qty: 2.0,
+            },
+            // Gap > 60_000 ms
+            Trade {
+                time: 100_000,
+                is_sell: false,
+                price: util::Price { units: 102 },
+                qty: 1.5,
+            },
+            Trade {
+                time: 101_000,
+                is_sell: true,
+                price: util::Price { units: 103 },
+                qty: 0.5,
+            },
+        ];
+
+        // Searching from index 0 should find the gap between index 1 (2000) and index 2 (100_000)
+        assert_eq!(
+            adapter::binance::find_gap_index(&trades, 0, 60_000),
+            Some(1)
+        );
+        // Searching from index 1 should still find the gap at index 1
+        assert_eq!(
+            adapter::binance::find_gap_index(&trades, 1, 60_000),
+            Some(1)
+        );
+        // Searching from index 2 should find no gap
+        assert_eq!(adapter::binance::find_gap_index(&trades, 2, 60_000), None);
+        // Searching past end
+        assert_eq!(adapter::binance::find_gap_index(&trades, 3, 60_000), None);
+    }
+
+    #[test]
+    fn test_bybit_gz_csv_parsing() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let csv_content = b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n1672531200.123,BTCUSDT,Buy,0.5,60000.5,PlusTick,1,30000,0.5,30000\n1672531201.456,BTCUSDT,Sell,1.25,60001.0,MinusTick,2,75000,1.25,75000\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(csv_content).unwrap();
+        let gz_bytes = encoder.finish().unwrap();
+
+        let gz_decoder = flate2::read::GzDecoder::new(&gz_bytes[..]);
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(std::io::BufReader::new(gz_decoder));
+
+        let headers = rdr.headers().unwrap().clone();
+        let time_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("timestamp"))
+            .unwrap();
+        let side_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("side"))
+            .unwrap();
+        let size_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("size"))
+            .unwrap();
+        let price_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("price"))
+            .unwrap();
+
+        let mut trades = Vec::new();
+        for res in rdr.records() {
+            let record = res.unwrap();
+            let raw_time = &record[time_col];
+            let time = (raw_time.parse::<f64>().unwrap() * 1000.0) as u64;
+            let is_sell = record[side_col].eq_ignore_ascii_case("sell");
+            let price_f32 = record[price_col].parse::<f32>().unwrap();
+            let qty = record[size_col].parse::<f32>().unwrap();
+            trades.push(Trade {
+                time,
+                is_sell,
+                price: Price::from_f32(price_f32),
+                qty,
+            });
+        }
+
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].time, 1672531200123);
+        assert!(!trades[0].is_sell);
+        assert_eq!(trades[0].qty, 0.5);
+        assert_eq!(trades[1].time, 1672531201456);
+        assert!(trades[1].is_sell);
+        assert_eq!(trades[1].qty, 1.25);
+    }
+
+    #[test]
+    fn test_okx_zip_csv_parsing() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let csv_content = b"tradeId,px,sz,side,ts\n1001,65000.25,1.5,sell,1672531200000\n1002,65001.0,0.8,buy,1672531201000\n";
+        let mut zip_buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip_writer = zip::ZipWriter::new(&mut zip_buffer);
+            zip_writer
+                .start_file("BTC-USDT-trades.csv", SimpleFileOptions::default())
+                .unwrap();
+            zip_writer.write_all(csv_content).unwrap();
+            zip_writer.finish().unwrap();
+        }
+
+        let zip_bytes = zip_buffer.into_inner();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+        let file = archive.by_index(0).unwrap();
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(std::io::BufReader::new(file));
+
+        let headers = rdr.headers().unwrap().clone();
+        let time_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("ts"))
+            .unwrap();
+        let side_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("side"))
+            .unwrap();
+        let size_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("sz"))
+            .unwrap();
+        let price_col = headers
+            .iter()
+            .position(|h| h.eq_ignore_ascii_case("px"))
+            .unwrap();
+
+        let mut trades = Vec::new();
+        for res in rdr.records() {
+            let record = res.unwrap();
+            let time = record[time_col].parse::<u64>().unwrap();
+            let is_sell = record[side_col].eq_ignore_ascii_case("sell");
+            let price_f32 = record[price_col].parse::<f32>().unwrap();
+            let qty = record[size_col].parse::<f32>().unwrap();
+            trades.push(Trade {
+                time,
+                is_sell,
+                price: Price::from_f32(price_f32),
+                qty,
+            });
+        }
+
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].time, 1672531200000);
+        assert!(trades[0].is_sell);
+        assert_eq!(trades[0].qty, 1.5);
+        assert_eq!(trades[1].time, 1672531201000);
+        assert!(!trades[1].is_sell);
+        assert_eq!(trades[1].qty, 0.8);
+    }
+
+    #[test]
+    fn test_hyperliquid_recent_trades_json() {
+        let json_data = r#"[
+            {"coin":"BTC","side":"A","sz":"0.015","px":"98450.5","time":1725648785150,"hash":"0xabc","tid":123},
+            {"coin":"BTC","side":"B","sz":"0.1","px":"98445.0","time":1725648784900,"hash":"0xdef","tid":122}
+        ]"#;
+
+        #[derive(serde::Deserialize)]
+        struct Item {
+            side: String,
+            sz: String,
+            px: String,
+            time: u64,
+        }
+
+        let items: Vec<Item> = serde_json::from_str(json_data).unwrap();
+        let trades: Vec<Trade> = items
+            .into_iter()
+            .map(|it| Trade {
+                time: it.time,
+                is_sell: it.side == "A",
+                price: Price::from_f32(it.px.parse::<f32>().unwrap()),
+                qty: it.sz.parse::<f32>().unwrap(),
+            })
+            .collect();
+
+        assert_eq!(trades.len(), 2);
+        assert_eq!(trades[0].time, 1725648785150);
+        assert!(trades[0].is_sell); // Ask == Sell
+        assert_eq!(trades[0].qty, 0.015);
+        assert_eq!(trades[1].time, 1725648784900);
+        assert!(!trades[1].is_sell); // Bid == Buy
+        assert_eq!(trades[1].qty, 0.1);
+    }
+
+    #[test]
+    fn test_unified_binary_cache_paths() {
+        let base_path = std::path::PathBuf::from("C:/data");
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 18).unwrap();
+
+        let binance_ticker = TickerInfo {
+            ticker: Ticker::new("btcusdt", Exchange::BinanceLinear),
+            min_ticksize: util::MinTicksize { power: -1 },
+            min_qty: util::MinQtySize { power: -3 },
+            contract_size: None,
+        };
+        let bybit_ticker = TickerInfo {
+            ticker: Ticker::new("BTCUSDT", Exchange::BybitLinear),
+            min_ticksize: util::MinTicksize { power: -1 },
+            min_qty: util::MinQtySize { power: -3 },
+            contract_size: None,
+        };
+
+        let binance_path = trades::cache::raw_trade_bin_path(&base_path, &binance_ticker, date);
+        assert!(
+            binance_path
+                .to_str()
+                .unwrap()
+                .contains("aggTrades-2026-09-18.bin")
+        );
+
+        let bybit_path = trades::cache::raw_trade_bin_path(&base_path, &bybit_ticker, date);
+        assert!(
+            bybit_path
+                .to_str()
+                .unwrap()
+                .contains("trades-2026-09-18.bin")
+        );
     }
 }

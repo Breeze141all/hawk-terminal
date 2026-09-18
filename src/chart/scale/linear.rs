@@ -120,6 +120,12 @@ impl PriceInfoLabel {
         }
     }
 
+    pub fn price(&self) -> Price {
+        match *self {
+            PriceInfoLabel::Up(p) | PriceInfoLabel::Down(p) | PriceInfoLabel::Neutral(p) => p,
+        }
+    }
+
     pub fn get_with_color(self, palette: &iced::theme::palette::Extended) -> (Price, iced::Color) {
         match self {
             PriceInfoLabel::Up(p) => (p, palette.success.base.color),

@@ -137,7 +137,9 @@ impl KlineIndicatorImpl for OpenInterestIndicator {
             return Some(FetchRange::OpenInterest(ctx.prefetch_earliest, oi_earliest));
         }
 
-        if oi_latest < ctx.kline_latest {
+        if oi_latest < ctx.kline_latest
+            && ctx.kline_latest.saturating_sub(oi_latest) >= ctx.timeframe.to_milliseconds()
+        {
             return Some(FetchRange::OpenInterest(
                 oi_latest.max(ctx.prefetch_earliest),
                 ctx.kline_latest,

@@ -19,12 +19,12 @@ impl TpoCandle for Kline {
 
     #[inline]
     fn high_price(&self) -> f64 {
-        self.high.to_f32() as f64
+        self.high.to_f64()
     }
 
     #[inline]
     fn low_price(&self) -> f64 {
-        self.low.to_f32() as f64
+        self.low.to_f64()
     }
 }
 
@@ -36,12 +36,12 @@ impl TpoCandle for &Kline {
 
     #[inline]
     fn high_price(&self) -> f64 {
-        self.high.to_f32() as f64
+        self.high.to_f64()
     }
 
     #[inline]
     fn low_price(&self) -> f64 {
-        self.low.to_f32() as f64
+        self.low.to_f64()
     }
 }
 
@@ -53,12 +53,12 @@ impl TpoCandle for KlineDataPoint {
 
     #[inline]
     fn high_price(&self) -> f64 {
-        self.kline.high.to_f32() as f64
+        self.kline.high.to_f64()
     }
 
     #[inline]
     fn low_price(&self) -> f64 {
-        self.kline.low.to_f32() as f64
+        self.kline.low.to_f64()
     }
 }
 
@@ -70,12 +70,12 @@ impl TpoCandle for &KlineDataPoint {
 
     #[inline]
     fn high_price(&self) -> f64 {
-        self.kline.high.to_f32() as f64
+        self.kline.high.to_f64()
     }
 
     #[inline]
     fn low_price(&self) -> f64 {
-        self.kline.low.to_f32() as f64
+        self.kline.low.to_f64()
     }
 }
 
@@ -146,6 +146,8 @@ pub struct TpoProfile {
     pub session_end: i64,
     pub tick_size: f64,
     pub matrix: BTreeMap<i64, Vec<char>>,
+    #[serde(default)]
+    pub bracket_indices: BTreeMap<i64, Vec<u32>>,
     pub ib: Option<InitialBalance>,
     pub poc: Option<PriceLevel>,
     pub value_area: Option<ValueArea>,
@@ -194,14 +196,18 @@ pub fn get_tpo_bracket_continuous(candle_time: i64, session_start: i64) -> Optio
 pub enum SessionPeriod {
     #[default]
     Daily,
+    TradingSessions,
+    FourHours,
     Weekly,
     Monthly,
     CustomDays(u32),
 }
 
 impl SessionPeriod {
-    pub const ALL: [SessionPeriod; 7] = [
+    pub const ALL: [SessionPeriod; 9] = [
         SessionPeriod::Daily,
+        SessionPeriod::TradingSessions,
+        SessionPeriod::FourHours,
         SessionPeriod::Weekly,
         SessionPeriod::Monthly,
         SessionPeriod::CustomDays(2),
@@ -213,6 +219,8 @@ impl SessionPeriod {
     pub fn label(self) -> String {
         match self {
             Self::Daily => "Daily".to_string(),
+            Self::TradingSessions => "Sessions (Asia/LDN/NY)".to_string(),
+            Self::FourHours => "4H".to_string(),
             Self::Weekly => "Weekly".to_string(),
             Self::Monthly => "Monthly".to_string(),
             Self::CustomDays(days) => format!("{}D", days.max(1)),
@@ -233,6 +241,22 @@ pub fn period_bounds_utc(ts: i64, period: SessionPeriod) -> (i64, i64) {
             let day_ms = 86_400_000i64;
             let start = ts.div_euclid(day_ms) * day_ms;
             let end = start + day_ms;
+            (start, end)
+        }
+        SessionPeriod::TradingSessions => {
+            let day_ms = 86_400_000i64;
+            let day_start = ts.div_euclid(day_ms) * day_ms;
+            let hour_ms = 3_600_000i64;
+            let delta = ts - day_start;
+            let session_idx = (delta / (8 * hour_ms)).clamp(0, 2);
+            let start = day_start + session_idx * 8 * hour_ms;
+            let end = start + 8 * hour_ms;
+            (start, end)
+        }
+        SessionPeriod::FourHours => {
+            let span_ms = 4 * 3_600_000i64;
+            let start = ts.div_euclid(span_ms) * span_ms;
+            let end = start + span_ms;
             (start, end)
         }
         SessionPeriod::Weekly => {
@@ -626,6 +650,7 @@ pub fn build_tpo_profile<C: TpoCandle>(
         tick_size
     };
     let mut matrix: BTreeMap<i64, Vec<char>> = BTreeMap::new();
+    let mut bracket_indices: BTreeMap<i64, Vec<u32>> = BTreeMap::new();
     let is_extended_period = (session_end - session_start) > 52 * 30 * 60_000;
 
     let mut ib_high = f64::NEG_INFINITY;
@@ -680,6 +705,10 @@ pub fn build_tpo_profile<C: TpoCandle>(
                 for t in low_tick..=high_tick {
                     if last_bracket_per_tick.get(&t).copied() != Some(bracket_idx) {
                         matrix.entry(t).or_default().push(bracket);
+                        bracket_indices
+                            .entry(t)
+                            .or_default()
+                            .push(bracket_idx as u32);
                         last_bracket_per_tick.insert(t, bracket_idx);
                     }
                 }
@@ -688,6 +717,10 @@ pub fn build_tpo_profile<C: TpoCandle>(
                     let row = matrix.entry(t).or_default();
                     if !row.contains(&bracket) {
                         row.push(bracket);
+                        bracket_indices
+                            .entry(t)
+                            .or_default()
+                            .push(bracket_idx as u32);
                     }
                 }
             }
@@ -730,6 +763,7 @@ pub fn build_tpo_profile<C: TpoCandle>(
         session_end,
         tick_size: tick,
         matrix,
+        bracket_indices,
         ib,
         poc,
         value_area,
@@ -770,17 +804,40 @@ pub fn merge_tpo_profiles(profiles: &[TpoProfile]) -> Option<TpoProfile> {
     let session_date = format!("{}+", sorted[0].session_date);
 
     let mut composite_matrix: BTreeMap<i64, Vec<char>> = BTreeMap::new();
+    let mut composite_indices: BTreeMap<i64, Vec<u32>> = BTreeMap::new();
     let mut ib_candidates = Vec::new();
 
     for p in &sorted {
         if let Some(ref ib) = p.ib {
             ib_candidates.push(ib.clone());
         }
+        let p_offset_brackets =
+            ((p.session_start - session_start).max(0) / (30 * 60 * 1_000)) as u32;
+
         for (&t, row) in &p.matrix {
+            let row_indices = p.bracket_indices.get(&t);
             let entry = composite_matrix.entry(t).or_default();
-            for &ch in row {
-                if !entry.contains(&ch) {
+            let entry_indices = composite_indices.entry(t).or_default();
+
+            for (idx_in_row, &ch) in row.iter().enumerate() {
+                let actual_idx = if let Some(indices) = row_indices
+                    && let Some(&stored_idx) = indices.get(idx_in_row)
+                {
+                    p_offset_brackets + stored_idx
+                } else {
+                    let b_idx = if ch.is_ascii_uppercase() {
+                        (ch as u8 - b'A') as u32
+                    } else if ch.is_ascii_lowercase() {
+                        26 + (ch as u8 - b'a') as u32
+                    } else {
+                        0
+                    };
+                    p_offset_brackets + b_idx
+                };
+
+                if !entry_indices.contains(&actual_idx) {
                     entry.push(ch);
+                    entry_indices.push(actual_idx);
                 }
             }
         }
@@ -843,6 +900,7 @@ pub fn merge_tpo_profiles(profiles: &[TpoProfile]) -> Option<TpoProfile> {
         session_end,
         tick_size,
         matrix: composite_matrix,
+        bracket_indices: composite_indices,
         ib,
         poc,
         value_area,

@@ -251,6 +251,9 @@ impl AxisLabelsX<'_> {
                 let Some(interval_keys) = &self.interval_keys else {
                     return None;
                 };
+                if interval_keys.is_empty() {
+                    return None;
+                }
 
                 let (crosshair_pos, _, cell_index) = self.calc_crosshair_pos(cursor_pos, region);
 

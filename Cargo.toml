@@ -1,5 +1,5 @@
 [package]
-name = "flowsurface"
+name = "hawk-terminal"
 version = "0.8.6"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -10,11 +10,11 @@ repository.workspace = true
 homepage.workspace = true
 
 [lib]
-name = "flowsurface"
+name = "hawk_terminal"
 path = "src/lib.rs"
 
 [[bin]]
-name = "flowsurface"
+name = "hawk-terminal"
 path = "src/main.rs"
 
 [workspace.package]
@@ -38,7 +38,7 @@ palette = "0.7.6"
 num-traits = "0.2.19"
 rustc-hash = "2.1.1"
 enum-map = "2.7.3"
-uuid = { version = "1.11.0", features = ["v4"] }
+uuid = { version = "1.11.0", features = ["v4", "serde"] }
 lz4_flex = "0.11"
 
 
@@ -68,9 +68,14 @@ rustc-hash.workspace = true
 enum-map.workspace = true
 fern = "0.7.1"
 rodio = { version = "0.20.1", default-features = false, features = [ "wav" ]}
+tokio = { version = "1.43", default-features = false, features = ["time"] }
 
-exchange = { version = "0.1.0", path = "exchange", package = "flowsurface-exchange" }
-data = { version = "0.1.0", path = "data", package = "flowsurface-data" }
+exchange = { version = "0.1.0", path = "exchange", package = "hawk-exchange" }
+data = { version = "0.1.0", path = "data", package = "hawk-data" }
+arboard = "3.6.1"
 
 [features]
 debug = ["iced/hot"]
+
+[build-dependencies]
+winres = "0.1.12"

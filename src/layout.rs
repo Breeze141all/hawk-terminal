@@ -30,6 +30,7 @@ pub struct SavedState {
     pub custom_theme: Option<data::Theme>,
     pub audio_cfg: data::AudioStream,
     pub volume_size_unit: exchange::SizeUnit,
+    pub journal_mode: data::JournalMode,
 }
 
 impl SavedState {
@@ -65,6 +66,7 @@ impl Default for SavedState {
             custom_theme: None,
             audio_cfg: data::AudioStream::default(),
             volume_size_unit: exchange::SizeUnit::Base,
+            journal_mode: data::JournalMode::default(),
         }
     }
 }
@@ -142,14 +144,24 @@ impl From<&pane::State> for data::Pane {
                 kind,
                 layout,
                 ..
-            } => data::Pane::KlineChart {
-                layout: chart.as_ref().map_or(layout.clone(), |c| c.chart_layout()),
-                kind: kind.clone(),
-                stream_type: streams,
-                settings: pane.settings.clone(),
-                indicators: indicators.clone(),
-                link_group: pane.link_group,
-            },
+            } => {
+                let settings = data::layout::pane::Settings {
+                    visual_config: chart
+                        .as_ref()
+                        .map(|c| data::layout::pane::VisualConfig::Kline(c.config()))
+                        .or_else(|| pane.settings.visual_config.clone()),
+                    ..pane.settings.clone()
+                };
+
+                data::Pane::KlineChart {
+                    layout: chart.as_ref().map_or(layout.clone(), |c| c.chart_layout()),
+                    kind: kind.clone(),
+                    stream_type: streams,
+                    settings,
+                    indicators: indicators.clone(),
+                    link_group: pane.link_group,
+                }
+            }
             pane::Content::TimeAndSales(_) => data::Pane::TimeAndSales {
                 stream_type: streams,
                 settings: pane.settings.clone(),
@@ -337,6 +349,10 @@ pub fn load_saved_state() -> SavedState {
             exchange::fetcher::toggle_trade_fetch(state.trade_fetch_enabled);
             exchange::set_preferred_currency(state.size_in_quote_ccy);
 
+            if let Some(kline_cfg) = state.default_kline_config {
+                data::chart::kline::set_user_default_kline_config(kline_cfg);
+            }
+
             SavedState {
                 theme: state.selected_theme,
                 custom_theme: state.custom_theme,
@@ -347,6 +363,7 @@ pub fn load_saved_state() -> SavedState {
                 scale_factor: state.scale_factor,
                 audio_cfg: state.audio_cfg,
                 volume_size_unit: state.size_in_quote_ccy,
+                journal_mode: state.journal_mode,
             }
         }
         Err(e) => {

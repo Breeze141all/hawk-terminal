@@ -1,6 +1,7 @@
 use super::ScaleFactor;
 use super::sidebar::Sidebar;
 use super::timezone::UserTimezone;
+use crate::journal::JournalMode;
 use crate::layout::WindowSpec;
 use crate::{AudioStream, Layout, Theme};
 
@@ -25,6 +26,9 @@ pub struct State {
     pub audio_cfg: AudioStream,
     pub trade_fetch_enabled: bool,
     pub size_in_quote_ccy: exchange::SizeUnit,
+    pub journal_mode: JournalMode,
+    #[serde(default)]
+    pub default_kline_config: Option<crate::chart::kline::Config>,
 }
 
 impl State {
@@ -38,6 +42,8 @@ impl State {
         scale_factor: ScaleFactor,
         audio_cfg: AudioStream,
         volume_size_unit: exchange::SizeUnit,
+        journal_mode: JournalMode,
+        default_kline_config: Option<crate::chart::kline::Config>,
     ) -> Self {
         State {
             layout_manager,
@@ -50,6 +56,8 @@ impl State {
             audio_cfg,
             trade_fetch_enabled: exchange::fetcher::is_trade_fetch_enabled(),
             size_in_quote_ccy: volume_size_unit,
+            journal_mode,
+            default_kline_config,
         }
     }
 }

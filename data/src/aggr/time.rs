@@ -91,6 +91,10 @@ impl<D: DataPoint> TimeSeries<D> {
         earliest: u64,
         latest: u64,
     ) -> Option<(Price, Price)> {
+        if earliest > latest {
+            return None;
+        }
+
         let mut it = self.datapoints.range(earliest..=latest);
 
         let (_, first) = it.next()?;
@@ -128,6 +132,10 @@ impl<D: DataPoint> TimeSeries<D> {
         latest: u64,
         interval: u64,
     ) -> Option<Vec<u64>> {
+        if earliest >= latest || interval == 0 {
+            return None;
+        }
+
         let mut time = earliest;
         let mut missing_count = 0;
 
@@ -263,7 +271,9 @@ impl TimeSeries<KlineDataPoint> {
             let start_bucket = (min_trade_time / aggr_time) * aggr_time;
             let end_bucket = (max_trade_time / aggr_time) * aggr_time;
             for (_, dp) in self.datapoints.range_mut(start_bucket..=end_bucket) {
-                dp.trades_fetched = true;
+                if !dp.footprint.is_empty() || (dp.kline.volume.0 + dp.kline.volume.1) == 0.0 {
+                    dp.trades_fetched = true;
+                }
             }
         }
 
@@ -278,11 +288,18 @@ impl TimeSeries<KlineDataPoint> {
         if dps.is_empty() {
             return;
         }
-        for (time, new_dp) in dps {
+        for (time, mut new_dp) in dps {
             if let Some(existing) = self.datapoints.get_mut(&time) {
-                existing.footprint = new_dp.footprint;
-                existing.trades_fetched = true;
+                if !new_dp.footprint.is_empty() {
+                    existing.footprint = new_dp.footprint;
+                    existing.trades_fetched = true;
+                }
             } else {
+                if new_dp.footprint.is_empty()
+                    && (new_dp.kline.volume.0 + new_dp.kline.volume.1) > 0.0
+                {
+                    new_dp.trades_fetched = false;
+                }
                 self.datapoints.insert(time, new_dp);
             }
         }
@@ -302,8 +319,13 @@ impl TimeSeries<KlineDataPoint> {
             return;
         }
 
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
         for (&time, dp) in self.datapoints.range_mut(rounded_from..=to_time) {
-            if time.saturating_add(aggr_time) > from_time {
+            let candle_end = time.saturating_add(aggr_time);
+            if candle_end <= to_time
+                || (candle_end > now_ms && to_time >= now_ms.saturating_sub(120_000))
+            {
                 dp.trades_fetched = true;
             }
         }
@@ -325,6 +347,7 @@ impl TimeSeries<KlineDataPoint> {
                 entry.add_trade(trade, self.tick_size);
             } else if latest_ts.is_none_or(|latest| rounded_time >= latest) {
                 updated_times.insert(rounded_time);
+                let is_near_candle_start = trade.time.saturating_sub(rounded_time) <= 120_000;
                 let entry = self
                     .datapoints
                     .entry(rounded_time)
@@ -338,7 +361,7 @@ impl TimeSeries<KlineDataPoint> {
                             volume: (0.0, 0.0),
                         },
                         footprint: KlineTrades::new(),
-                        trades_fetched: true,
+                        trades_fetched: is_near_candle_start,
                     });
                 entry.add_trade(trade, self.tick_size);
             }
@@ -487,65 +510,53 @@ impl TimeSeries<KlineDataPoint> {
             return None;
         }
 
-        // 1. Priority 1: Unfetched candles within the visible range [visible_earliest, visible_latest]
+        let aligned_earliest = (visible_earliest / interval_ms) * interval_ms;
+        let aligned_latest = (visible_latest / interval_ms) * interval_ms;
+
+        // 1. Priority 1: Unfetched candles within the visible range [aligned_earliest, aligned_latest]
         let mut visible_unfetched = self
             .datapoints
-            .range(visible_earliest..=visible_latest)
+            .range(aligned_earliest..=aligned_latest)
             .filter(|(_, dp)| !dp.trades_fetched && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0)
             .map(|(&t, _)| t);
 
         if let Some(first_unfetched) = visible_unfetched.next() {
             let last_unfetched = visible_unfetched.next_back().unwrap_or(first_unfetched);
-            let fetch_from = first_unfetched.max(visible_earliest);
-            let fetch_to = last_unfetched
-                .saturating_add(interval_ms)
-                .min(visible_latest);
-
-            if fetch_from < fetch_to {
-                return Some((fetch_from, fetch_to));
-            } else if fetch_from <= visible_latest {
-                return Some((fetch_from, visible_latest.max(fetch_from + 1)));
-            }
+            let fetch_from = first_unfetched;
+            let fetch_to = last_unfetched.saturating_add(interval_ms);
+            return Some((fetch_from, fetch_to));
         }
 
         // 2. Priority 2: Prefetch earlier candles preceding the visible range
-        let prefetch_earliest = visible_earliest.saturating_sub(7 * 24 * 3600 * 1000);
+        let prefetch_earliest = aligned_earliest.saturating_sub(7 * 24 * 3600 * 1000);
+        let aligned_prefetch_earliest = (prefetch_earliest / interval_ms) * interval_ms;
         let mut past_unfetched = self
             .datapoints
-            .range(prefetch_earliest..visible_earliest)
+            .range(aligned_prefetch_earliest..aligned_earliest)
             .filter(|(_, dp)| !dp.trades_fetched && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0)
             .map(|(&t, _)| t);
 
         if let Some(first_unfetched) = past_unfetched.next() {
             let last_unfetched = past_unfetched.next_back().unwrap_or(first_unfetched);
-            let fetch_from = first_unfetched.max(prefetch_earliest);
-            let fetch_to = last_unfetched
-                .saturating_add(interval_ms)
-                .min(visible_earliest);
-
-            if fetch_from < fetch_to {
-                return Some((fetch_from, fetch_to));
-            }
+            let fetch_from = first_unfetched;
+            let fetch_to = last_unfetched.saturating_add(interval_ms);
+            return Some((fetch_from, fetch_to));
         }
 
         // 3. Priority 3: Prefetch candles succeeding the visible range
-        let prefetch_latest = visible_latest.saturating_add(7 * 24 * 3600 * 1000);
+        let prefetch_latest = aligned_latest.saturating_add(7 * 24 * 3600 * 1000);
+        let aligned_prefetch_latest = (prefetch_latest / interval_ms) * interval_ms;
         let mut future_unfetched = self
             .datapoints
-            .range(visible_latest + 1..=prefetch_latest)
+            .range(aligned_latest.saturating_add(interval_ms)..=aligned_prefetch_latest)
             .filter(|(_, dp)| !dp.trades_fetched && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0)
             .map(|(&t, _)| t);
 
         if let Some(first_unfetched) = future_unfetched.next() {
             let last_unfetched = future_unfetched.next_back().unwrap_or(first_unfetched);
-            let fetch_from = first_unfetched.max(visible_latest);
-            let fetch_to = last_unfetched
-                .saturating_add(interval_ms)
-                .min(prefetch_latest);
-
-            if fetch_from < fetch_to {
-                return Some((fetch_from, fetch_to));
-            }
+            let fetch_from = first_unfetched;
+            let fetch_to = last_unfetched.saturating_add(interval_ms);
+            return Some((fetch_from, fetch_to));
         }
 
         None
@@ -559,6 +570,10 @@ impl TimeSeries<KlineDataPoint> {
         highest: Price,
         lowest: Price,
     ) -> f32 {
+        if earliest > latest {
+            return 0.0;
+        }
+
         let mut max_cluster_qty: f32 = 0.0;
 
         self.datapoints
@@ -585,6 +600,10 @@ pub fn aggregate_trades_for_day(
         return Vec::new();
     }
 
+    let min_trade_t = trades.first().map(|t| t.time).unwrap_or(0);
+    let max_trade_t = trades.last().map(|t| t.time).unwrap_or(0);
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+
     let mut map: BTreeMap<u64, KlineDataPoint> = BTreeMap::new();
 
     for trade in trades {
@@ -599,14 +618,29 @@ pub fn aggregate_trades_for_day(
                 volume: (0.0, 0.0),
             },
             footprint: KlineTrades::new(),
-            trades_fetched: true,
+            trades_fetched: false,
         });
 
         entry.add_trade(trade, step);
     }
 
-    for dp in map.values_mut() {
+    let today_date = chrono::Utc::now().date_naive();
+    let today_midnight = today_date
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+
+    for (&time, dp) in map.iter_mut() {
         dp.calculate_poc();
+        let candle_end = time.saturating_add(interval_ms);
+        let is_historical_day = time < today_midnight && candle_end <= today_midnight;
+        if is_historical_day
+            || (min_trade_t <= time && max_trade_t >= candle_end)
+            || (candle_end > now_ms && max_trade_t >= now_ms.saturating_sub(120_000))
+        {
+            dp.trades_fetched = true;
+        }
     }
 
     map.into_iter().collect()
@@ -627,6 +661,10 @@ impl TimeSeries<HeatmapDataPoint> {
     }
 
     pub fn max_trade_qty_and_aggr_volume(&self, earliest: u64, latest: u64) -> (f32, f32) {
+        if earliest > latest {
+            return (0.0, 0.0);
+        }
+
         let mut max_trade_qty = 0.0f32;
         let mut max_aggr_volume = 0.0f32;
 
@@ -777,7 +815,7 @@ mod tests {
 
         // All datapoints have empty footprint trades
         let range = ts.suggest_trade_fetch_range(200_000, 800_000);
-        assert_eq!(range, Some((300_000, 800_000)));
+        assert_eq!(range, Some((300_000, 900_000)));
     }
 
     #[test]
@@ -804,10 +842,10 @@ mod tests {
         let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
 
         let range = ts.suggest_trade_fetch_range(200_000, 800_000);
-        assert_eq!(range, Some((300_000, 800_000)));
+        assert_eq!(range, Some((300_000, 900_000)));
 
         // After marking the range fetched, no more gap should be suggested
-        ts.mark_trades_fetched(300_000, 800_000);
+        ts.mark_trades_fetched(300_000, 900_000);
         let next_range = ts.suggest_trade_fetch_range(200_000, 800_000);
         assert_eq!(next_range, None);
     }
@@ -938,9 +976,9 @@ mod tests {
         assert!(!ts.datapoints.get(&0).unwrap().trades_fetched);
         assert!(!ts.datapoints.get(&300_000).unwrap().trades_fetched);
 
-        // If user scrolls to past range 0..400_000, it MUST suggest fetching 0..400_000
+        // If user scrolls to past range 0..400_000, it MUST suggest fetching 0..600_000 (aligned candle end)
         let suggested = ts.suggest_trade_fetch_range(0, 400_000);
-        assert_eq!(suggested, Some((0, 400_000)));
+        assert_eq!(suggested, Some((0, 600_000)));
     }
 
     #[test]

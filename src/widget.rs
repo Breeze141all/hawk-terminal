@@ -15,8 +15,11 @@ pub mod chart;
 pub mod color_picker;
 pub mod column_drag;
 pub mod decorate;
+pub mod floating;
 pub mod multi_split;
 pub mod toast;
+
+pub use floating::DraggableOverlay;
 
 #[allow(dead_code)]
 pub const DEFAULT_TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);

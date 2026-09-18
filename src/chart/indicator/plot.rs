@@ -30,6 +30,9 @@ impl<Y> Series for &BTreeMap<u64, Y> {
     type Y = Y;
 
     fn for_each_in<F: FnMut(u64, &Self::Y)>(&self, range: RangeInclusive<u64>, mut f: F) {
+        if range.start() > range.end() {
+            return;
+        }
         for (k, v) in (**self).range(range) {
             f(*k, v);
         }
@@ -63,8 +66,14 @@ impl<'m, Y> Series for ReversedBTreeSeries<'m, Y> {
     type Y = Y;
 
     fn for_each_in<F: FnMut(u64, &Self::Y)>(&self, range: RangeInclusive<u64>, mut f: F) {
+        if range.start() > range.end() {
+            return;
+        }
         let earliest = self.offset.saturating_sub(*range.end());
         let latest = self.offset.saturating_sub(*range.start());
+        if earliest > latest {
+            return;
+        }
 
         for (k, v) in self.inner.range(earliest..=latest).rev() {
             f(self.offset - *k, v);

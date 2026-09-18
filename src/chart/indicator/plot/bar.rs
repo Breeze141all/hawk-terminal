@@ -27,6 +27,8 @@ pub enum BarClass {
     Single,
     /// draw two bars, a success/danger colored (alpha) and an overlay using full color.
     Overlay { overlay: f32 }, // signed; sign decides color
+    /// draw a single bar using an explicit color
+    Colored(iced::Color),
 }
 
 pub struct BarPlot<V, CL, T> {
@@ -162,6 +164,13 @@ where
                         Point::new(left, top_y),
                         Size::new(bar_width, h_total),
                         palette.secondary.strong.color,
+                    );
+                }
+                BarClass::Colored(color) => {
+                    frame.fill_rectangle(
+                        Point::new(left, top_y),
+                        Size::new(bar_width, h_total),
+                        color,
                     );
                 }
                 BarClass::Overlay { overlay } => {

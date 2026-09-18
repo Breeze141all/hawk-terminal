@@ -3,7 +3,27 @@ use std::collections::HashMap;
 use data::layout::WindowSpec;
 use iced::{Point, Size, Subscription, Task, window};
 
-pub use iced::window::{Id, Position, Settings, close, open};
+pub use iced::window::{Id, Position, Screenshot, Settings, close, open, screenshot};
+
+pub fn copy_screenshot_to_clipboard(screenshot: &Screenshot) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    let image_data = arboard::ImageData {
+        width: screenshot.size.width as usize,
+        height: screenshot.size.height as usize,
+        bytes: std::borrow::Cow::Borrowed(&screenshot.rgba),
+    };
+    clipboard.set_image(image_data).map_err(|e| e.to_string())
+}
+
+pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(text).map_err(|e| e.to_string())
+}
+
+pub fn read_text_from_clipboard() -> Result<String, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.get_text().map_err(|e| e.to_string())
+}
 use iced_futures::MaybeSend;
 
 #[derive(Debug, Clone, Copy)]
@@ -92,9 +112,15 @@ where
         })
 }
 
+pub fn app_icon() -> Option<iced::window::Icon> {
+    const ICON_BYTES: &[u8] = include_bytes!("../assets/icon.rgba");
+    iced::window::icon::from_rgba(ICON_BYTES.to_vec(), 128, 128).ok()
+}
+
 #[cfg(target_os = "linux")]
 pub fn settings() -> Settings {
     Settings {
+        icon: app_icon(),
         min_size: Some(Size::new(800.0, 600.0)),
         ..Default::default()
     }
@@ -105,6 +131,7 @@ pub fn settings() -> Settings {
     use iced::window;
 
     Settings {
+        icon: app_icon(),
         platform_specific: window::settings::PlatformSpecific {
             title_hidden: true,
             titlebar_transparent: true,
@@ -118,6 +145,7 @@ pub fn settings() -> Settings {
 #[cfg(target_os = "windows")]
 pub fn settings() -> Settings {
     Settings {
+        icon: app_icon(),
         min_size: Some(Size::new(800.0, 600.0)),
         ..Default::default()
     }

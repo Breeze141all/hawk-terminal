@@ -42,7 +42,7 @@ fn main() {
 
     std::thread::spawn(data::cleanup_old_market_data);
 
-    let _ = iced::daemon(Flowsurface::new, Flowsurface::update, Flowsurface::view)
+    let _ = iced::daemon(HawkTerminal::new, HawkTerminal::update, HawkTerminal::view)
         .settings(iced::Settings {
             antialiasing: true,
             fonts: vec![
@@ -52,14 +52,14 @@ fn main() {
             default_text_size: iced::Pixels(12.0),
             ..Default::default()
         })
-        .title(Flowsurface::title)
-        .theme(Flowsurface::theme)
-        .scale_factor(Flowsurface::scale_factor)
-        .subscription(Flowsurface::subscription)
+        .title(HawkTerminal::title)
+        .theme(HawkTerminal::theme)
+        .scale_factor(HawkTerminal::scale_factor)
+        .subscription(HawkTerminal::subscription)
         .run();
 }
 
-struct Flowsurface {
+struct HawkTerminal {
     screen: AppScreen,
     main_window: window::Window,
     sidebar: dashboard::Sidebar,
@@ -72,6 +72,8 @@ struct Flowsurface {
     timezone: data::UserTimezone,
     theme: data::Theme,
     notifications: Vec<Toast>,
+    journal_window: Option<window::Id>,
+    journal_mode: data::JournalMode,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +94,7 @@ enum Message {
     ThemeSelected(data::Theme),
     ScaleFactorChanged(data::ScaleFactor),
     SetTimezone(data::UserTimezone),
+    SetJournalMode(data::JournalMode),
     ToggleTradeFetch(bool),
     ApplyVolumeSizeUnit(exchange::SizeUnit),
     RemoveNotification(usize),
@@ -99,9 +102,10 @@ enum Message {
     ThemeEditor(modal::theme_editor::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
+    OfflineAlertsChecked(Vec<data::chart::alert::PriceAlert>),
 }
 
-impl Flowsurface {
+impl HawkTerminal {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
 
@@ -116,13 +120,23 @@ impl Flowsurface {
             window::open(config)
         };
 
-        let (sidebar, launch_sidebar) = dashboard::Sidebar::new(&saved_state);
+        let (mut sidebar, launch_sidebar) = dashboard::Sidebar::new(&saved_state);
+        let open_layouts = std::env::var("HAWK_OPEN_LAYOUTS")
+            .or_else(|_| std::env::var("FLOWSURFACE_OPEN_LAYOUTS"))
+            .is_ok();
+        if open_layouts {
+            sidebar.state.set_menu(sidebar::Menu::Layout);
+        }
 
         let (audio_stream, audio_init_err) = AudioStream::new(saved_state.audio_cfg);
 
         let mut state = Self {
-            screen: AppScreen::Splash {
-                start: std::time::Instant::now(),
+            screen: if open_layouts {
+                AppScreen::Running
+            } else {
+                AppScreen::Splash {
+                    start: std::time::Instant::now(),
+                }
             },
             main_window: window::Window::new(main_window_id),
             layout_manager: saved_state.layout_manager,
@@ -135,7 +149,16 @@ impl Flowsurface {
             volume_size_unit: saved_state.volume_size_unit,
             theme: saved_state.theme,
             notifications: vec![],
+            journal_window: None,
+            journal_mode: saved_state.journal_mode,
         };
+
+        let edit_layouts = std::env::var("HAWK_EDIT_LAYOUTS")
+            .or_else(|_| std::env::var("FLOWSURFACE_EDIT_LAYOUTS"))
+            .is_ok();
+        if edit_layouts {
+            state.layout_manager.edit_mode = modal::layout_manager::Editing::Preview;
+        }
 
         if let Some(err) = audio_init_err {
             state
@@ -158,7 +181,8 @@ impl Flowsurface {
             open_main_window
                 .discard()
                 .chain(load_layout)
-                .chain(launch_sidebar.map(Message::Sidebar)),
+                .chain(launch_sidebar.map(Message::Sidebar))
+                .chain(catch_up_offline_alerts_task()),
         )
     }
 
@@ -231,6 +255,12 @@ impl Flowsurface {
             }
             Message::WindowEvent(event) => match event {
                 window::Event::CloseRequested(window) => {
+                    if Some(window) == self.journal_window {
+                        self.journal_window = None;
+                        self.sidebar.set_journal_window_open(false);
+                        return window::close(window);
+                    }
+
                     let main_window = self.main_window.id;
                     let dashboard = self.active_dashboard_mut();
 
@@ -369,6 +399,22 @@ impl Flowsurface {
             Message::SetTimezone(tz) => {
                 self.timezone = tz;
             }
+            Message::SetJournalMode(mode) => {
+                self.journal_mode = mode;
+                self.sidebar.set_journal_mode(mode);
+                if mode == data::JournalMode::Disabled {
+                    self.sidebar.journal.is_shown = false;
+                    if let Some(id) = self.journal_window.take() {
+                        return window::close(id);
+                    }
+                } else if mode == data::JournalMode::Basic {
+                    if let Some(id) = self.journal_window.take() {
+                        return window::close(id);
+                    }
+                } else if mode == data::JournalMode::Extended {
+                    self.sidebar.journal.is_shown = false;
+                }
+            }
             Message::ScaleFactorChanged(value) => {
                 self.ui_scale_factor = value;
             }
@@ -457,6 +503,215 @@ impl Flowsurface {
                             manager.insert_layout(new_layout.clone(), dashboard);
                         }
                     }
+                    Some(modal::layout_manager::Action::ExportLayout(id)) => {
+                        if let Some(layout) = self.layout_manager.get(id) {
+                            let ser_dashboard = data::Dashboard::from(&layout.dashboard);
+                            let data_layout = data::Layout {
+                                name: layout.id.name.clone(),
+                                dashboard: ser_dashboard,
+                            };
+                            let bundle = data::ConfigBundle::new_layout(
+                                data_layout,
+                                Some(data::BundleMetadata {
+                                    name: layout.id.name.clone(),
+                                    description: None,
+                                    author: None,
+                                }),
+                            );
+                            match bundle.to_json_pretty() {
+                                Ok(json) => {
+                                    let sanitized_filename = layout
+                                        .id
+                                        .name
+                                        .chars()
+                                        .map(|c| {
+                                            if c.is_alphanumeric() || c == '-' || c == '_' {
+                                                c
+                                            } else {
+                                                '_'
+                                            }
+                                        })
+                                        .collect::<String>();
+                                    let filename = format!("layout_{sanitized_filename}.json");
+                                    let _ = data::save_export_file(&json, &filename);
+
+                                    match window::copy_text_to_clipboard(&json) {
+                                        Ok(()) => {
+                                            self.notifications.push(Toast::info(format!(
+                                                "Layout '{}' copied to clipboard & saved to exports",
+                                                layout.id.name
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            self.notifications.push(Toast::error(format!(
+                                                "Saved to exports, but clipboard failed: {e}"
+                                            )));
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    self.notifications.push(Toast::error(format!(
+                                        "Failed to serialize layout: {e}"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    Some(modal::layout_manager::Action::ExportWorkspace) => {
+                        let mut ser_layouts = vec![];
+                        for layout in &self.layout_manager.layouts {
+                            if let Some(l) = self.layout_manager.get(layout.id.unique) {
+                                ser_layouts.push(data::Layout {
+                                    name: l.id.name.clone(),
+                                    dashboard: data::Dashboard::from(&l.dashboard),
+                                });
+                            }
+                        }
+
+                        let ws_bundle = data::WorkspaceBundle {
+                            layouts: ser_layouts,
+                            active_layout: self
+                                .layout_manager
+                                .active_layout_id()
+                                .map(|l| l.name.clone()),
+                            custom_theme: self.theme_editor.custom_theme.clone().map(data::Theme),
+                            timezone: Some(self.timezone),
+                            tickers_table: self.sidebar.state.tickers_table.clone(),
+                            audio_cfg: Some(data::AudioStream::from(&self.audio_stream)),
+                            size_in_quote_ccy: Some(self.volume_size_unit),
+                            default_kline_config: data::chart::kline::user_default_kline_config(),
+                        };
+
+                        let bundle = data::ConfigBundle::new_workspace(
+                            ws_bundle,
+                            Some(data::BundleMetadata {
+                                name: "Hawk Workspace".to_string(),
+                                description: None,
+                                author: None,
+                            }),
+                        );
+
+                        match bundle.to_json_pretty() {
+                            Ok(json) => {
+                                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                                let filename = format!("workspace_{timestamp}.json");
+                                let _ = data::save_export_file(&json, &filename);
+
+                                match window::copy_text_to_clipboard(&json) {
+                                    Ok(()) => {
+                                        self.notifications.push(Toast::info(
+                                            "Workspace copied to clipboard & saved to exports",
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        self.notifications.push(Toast::error(format!(
+                                            "Saved to exports, but clipboard failed: {e}"
+                                        )));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.notifications.push(Toast::error(format!(
+                                    "Failed to serialize workspace: {e}"
+                                )));
+                            }
+                        }
+                    }
+                    Some(modal::layout_manager::Action::OpenExportsFolder) => {
+                        if let Err(err) = data::open_exports_folder() {
+                            self.notifications.push(Toast::error(format!(
+                                "Failed to open exports folder: {err}"
+                            )));
+                        }
+                    }
+                    Some(modal::layout_manager::Action::ImportFromClipboard) => {
+                        match window::read_text_from_clipboard() {
+                            Err(e) => {
+                                self.notifications.push(Toast::error(format!(
+                                    "Failed to read from clipboard: {e}"
+                                )));
+                            }
+                            Ok(text) => match data::ConfigBundle::from_json(&text) {
+                                Err(e) => {
+                                    self.notifications.push(Toast::error(format!(
+                                        "Invalid layout or workspace JSON: {e}"
+                                    )));
+                                }
+                                Ok(bundle) => match bundle.payload {
+                                    data::BundlePayload::Layout(data_layout) => {
+                                        let new_uid = uuid::Uuid::new_v4();
+                                        let unique_name = self
+                                            .layout_manager
+                                            .ensure_unique_name(&data_layout.name, new_uid);
+                                        let new_layout = LayoutId {
+                                            unique: new_uid,
+                                            name: unique_name.clone(),
+                                        };
+
+                                        let mut popout_windows = Vec::new();
+                                        for (pane, window_spec) in &data_layout.dashboard.popout {
+                                            let configuration = configuration(pane.clone());
+                                            popout_windows.push((configuration, *window_spec));
+                                        }
+
+                                        let dashboard = Dashboard::from_config(
+                                            configuration(data_layout.dashboard.pane.clone()),
+                                            popout_windows,
+                                            new_uid,
+                                        );
+
+                                        self.layout_manager.insert_layout(new_layout, dashboard);
+                                        self.notifications.push(Toast::info(format!(
+                                            "Imported layout '{unique_name}'"
+                                        )));
+                                    }
+                                    data::BundlePayload::Workspace(ws_bundle) => {
+                                        let count = ws_bundle.layouts.len();
+                                        for data_layout in ws_bundle.layouts {
+                                            let new_uid = uuid::Uuid::new_v4();
+                                            let unique_name = self
+                                                .layout_manager
+                                                .ensure_unique_name(&data_layout.name, new_uid);
+                                            let new_layout = LayoutId {
+                                                unique: new_uid,
+                                                name: unique_name,
+                                            };
+
+                                            let mut popout_windows = Vec::new();
+                                            for (pane, window_spec) in &data_layout.dashboard.popout
+                                            {
+                                                let configuration = configuration(pane.clone());
+                                                popout_windows.push((configuration, *window_spec));
+                                            }
+
+                                            let dashboard = Dashboard::from_config(
+                                                configuration(data_layout.dashboard.pane.clone()),
+                                                popout_windows,
+                                                new_uid,
+                                            );
+
+                                            self.layout_manager
+                                                .insert_layout(new_layout, dashboard);
+                                        }
+
+                                        if let Some(custom_theme) = ws_bundle.custom_theme {
+                                            self.theme_editor.custom_theme = Some(custom_theme.0);
+                                        }
+
+                                        if let Some(kline_cfg) = ws_bundle.default_kline_config {
+                                            data::chart::kline::set_user_default_kline_config(
+                                                kline_cfg,
+                                            );
+                                        }
+
+                                        self.notifications.push(Toast::info(format!(
+                                            "Imported {count} layout(s) from workspace"
+                                        )));
+                                    }
+                                },
+                            },
+                        }
+                    }
                     None => {}
                 }
             }
@@ -528,6 +783,23 @@ impl Flowsurface {
                     Some(dashboard::sidebar::Action::ErrorOccurred(err)) => {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
+                    Some(dashboard::sidebar::Action::ToggleJournalWindow) => {
+                        if let Some(id) = self.journal_window.take() {
+                            self.sidebar.set_journal_window_open(false);
+                            return window::close(id);
+                        } else {
+                            let (id, task) = window::open(window::Settings {
+                                position: window::Position::Centered,
+                                exit_on_close_request: false,
+                                min_size: Some(iced::Size::new(960.0, 600.0)),
+                                size: iced::Size::new(1440.0, 850.0),
+                                ..window::settings()
+                            });
+                            self.journal_window = Some(id);
+                            self.sidebar.set_journal_window_open(true);
+                            return task.discard();
+                        }
+                    }
                     None => {}
                 }
 
@@ -542,6 +814,22 @@ impl Flowsurface {
                 active_windows.push(self.main_window.id);
 
                 return window::collect_window_specs(active_windows, Message::RestartRequested);
+            }
+            Message::OfflineAlertsChecked(triggered) => {
+                for alert in triggered {
+                    let time_str = if let Some(t) = alert.triggered_at {
+                        chrono::DateTime::from_timestamp_millis(t as i64)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "--".to_string())
+                    } else {
+                        "--".to_string()
+                    };
+                    self.notifications.push(Toast::info(format!(
+                        "🔔 Offline Price Alert: {} reached {:.2} ({}) at {}",
+                        alert.ticker_symbol, alert.target_price, alert.condition, time_str
+                    )));
+                }
+                return Task::none();
             }
         }
         Task::none()
@@ -590,7 +878,7 @@ impl Flowsurface {
                 #[cfg(target_os = "macos")]
                 {
                     iced::widget::center(
-                        text("FLOWSURFACE")
+                        text("HAWK TERMINAL")
                             .font(iced::Font {
                                 weight: iced::font::Weight::Bold,
                                 ..Default::default()
@@ -623,6 +911,16 @@ impl Flowsurface {
             } else {
                 base.into()
             }
+        } else if Some(id) == self.journal_window {
+            container(
+                self.sidebar
+                    .journal
+                    .view_dashboard()
+                    .map(dashboard::sidebar::Message::Journal)
+                    .map(Message::Sidebar),
+            )
+            .padding(padding::top(style::TITLE_PADDING_TOP))
+            .into()
         } else {
             container(
                 dashboard
@@ -652,11 +950,13 @@ impl Flowsurface {
         self.theme.clone().into()
     }
 
-    fn title(&self, _window: window::Id) -> String {
-        if let Some(id) = self.layout_manager.active_layout_id() {
-            format!("Flowsurface [{}]", id.name)
+    fn title(&self, window: window::Id) -> String {
+        if Some(window) == self.journal_window {
+            "Hawk Terminal - Trade Journal Dashboard".to_string()
+        } else if let Some(id) = self.layout_manager.active_layout_id() {
+            format!("Hawk Terminal [{}]", id.name)
         } else {
-            "Flowsurface".to_string()
+            "Hawk Terminal".to_string()
         }
     }
 
@@ -673,7 +973,7 @@ impl Flowsurface {
             .market_subscriptions()
             .map(Message::MarketWsEvent);
 
-        let tick = iced::time::every(std::time::Duration::from_millis(100)).map(Message::Tick);
+        let tick = iced::time::every(std::time::Duration::from_millis(50)).map(Message::Tick);
 
         let hotkeys = keyboard::listen().filter_map(|event| {
             let keyboard::Event::KeyPressed { key, .. } = event else {
@@ -751,6 +1051,11 @@ impl Flowsurface {
                         let default_theme = iced_core::Theme::Custom(default_theme().into());
                         themes.push(default_theme);
 
+                        let deeptrades = iced_core::Theme::Custom(
+                            data::config::theme::deeptrades_theme().into(),
+                        );
+                        themes.push(deeptrades);
+
                         if let Some(custom_theme) = &self.theme_editor.custom_theme {
                             themes.push(custom_theme.clone());
                         }
@@ -770,6 +1075,12 @@ impl Flowsurface {
                         [data::UserTimezone::Utc, data::UserTimezone::Local],
                         Some(self.timezone),
                         Message::SetTimezone,
+                    );
+
+                    let journal_mode_picklist = pick_list(
+                        data::JournalMode::ALL,
+                        Some(self.journal_mode),
+                        Message::SetJournalMode,
                     );
 
                     let size_in_quote_currency_checkbox = {
@@ -848,11 +1159,11 @@ impl Flowsurface {
                         let is_active = exchange::fetcher::is_trade_fetch_enabled();
 
                         let checkbox = iced::widget::checkbox(is_active)
-                            .label("Fetch trades (Binance)")
+                            .label("Fetch trades")
                             .on_toggle(|checked| {
                                 if checked {
                                     let confirm_dialog = screen::ConfirmDialog::new(
-                                        "This might be unreliable and take some time to complete. Proceed?"
+                                        "Fetching historical trades may download large archives and take some time to complete. Proceed?"
                                             .to_string(),
                                         Box::new(Message::ToggleTradeFetch(true)),
                                     );
@@ -864,7 +1175,9 @@ impl Flowsurface {
 
                         tooltip(
                             checkbox,
-                            Some("Try to fetch trades for footprint charts"),
+                            Some(
+                                "Fetch historical and intraday trades for footprint charts (Binance, Bybit, OKX, Hyperliquid)",
+                            ),
                             TooltipPosition::Top,
                         )
                     };
@@ -884,6 +1197,7 @@ impl Flowsurface {
                         column![open_data_folder,].spacing(8),
                         column![text("Sidebar position").size(14), sidebar_pos,].spacing(12),
                         column![text("Time zone").size(14), timezone_picklist,].spacing(12),
+                        column![text("Trade journal").size(14), journal_mode_picklist,].spacing(12),
                         column![text("Market data").size(14), size_in_quote_currency_checkbox,].spacing(12),
                         column![text("Theme").size(14), theme_picklist,].spacing(12),
                         column![text("Interface scale").size(14), scale_factor,].spacing(12),
@@ -1028,7 +1342,7 @@ impl Flowsurface {
                     ];
 
                     container(col.align_x(Alignment::Center).spacing(20))
-                        .width(260)
+                        .width(280)
                         .padding(24)
                         .style(style::dashboard_modal)
                 };
@@ -1087,6 +1401,11 @@ impl Flowsurface {
     }
 
     fn save_state_to_disk(&mut self, windows: &HashMap<window::Id, WindowSpec>) {
+        let main_window_id = self.main_window.id;
+        for dashboard in self.layout_manager.iter_dashboards_mut() {
+            dashboard.flush_all_footprint_caches(main_window_id);
+        }
+
         self.active_dashboard_mut()
             .popout
             .iter_mut()
@@ -1135,7 +1454,12 @@ impl Flowsurface {
             self.ui_scale_factor,
             audio_cfg,
             self.volume_size_unit,
+            self.journal_mode,
+            data::chart::kline::user_default_kline_config(),
         );
+
+        // Persist alerts to alerts.json
+        data::AlertStore::save();
 
         match serde_json::to_string(&state) {
             Ok(layout_str) => {
@@ -1162,9 +1486,76 @@ impl Flowsurface {
                 .collect::<Vec<_>>(),
         );
 
-        let (new_state, init_task) = Flowsurface::new();
+        let (new_state, init_task) = HawkTerminal::new();
         *self = new_state;
 
         close_windows.chain(init_task)
     }
+}
+
+fn catch_up_offline_alerts_task() -> Task<Message> {
+    Task::perform(
+        async {
+            let active_alerts = data::AlertStore::all()
+                .into_iter()
+                .filter(|a| a.status == data::chart::alert::AlertStatus::Active)
+                .collect::<Vec<_>>();
+
+            if active_alerts.is_empty() {
+                return Vec::new();
+            }
+
+            let mut unique_tickers: HashMap<exchange::Ticker, (u64, String)> = HashMap::new();
+            let now = chrono::Utc::now().timestamp_millis() as u64;
+            let max_lookback_ms = 30 * 24 * 60 * 60 * 1000; // 30 days max lookback
+            let min_allowed_start = now.saturating_sub(max_lookback_ms);
+
+            for alert in &active_alerts {
+                if let Some(ticker) = alert.ticker {
+                    let alert_start = alert
+                        .last_checked_time
+                        .unwrap_or(alert.created_at)
+                        .max(min_allowed_start);
+                    unique_tickers
+                        .entry(ticker)
+                        .and_modify(|(earliest, _)| *earliest = (*earliest).min(alert_start))
+                        .or_insert((alert_start, alert.ticker_symbol.clone()));
+                }
+            }
+
+            let mut all_triggered = Vec::new();
+
+            for (ticker, (start_time, _)) in unique_tickers {
+                let duration_ms = now.saturating_sub(start_time);
+                let timeframe = if duration_ms > 24 * 60 * 60 * 1000 {
+                    exchange::Timeframe::H1
+                } else {
+                    exchange::Timeframe::M1
+                };
+
+                let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+                match exchange::adapter::fetch_klines(
+                    ticker_info,
+                    timeframe,
+                    Some((start_time, now)),
+                )
+                .await
+                {
+                    Ok(klines) => {
+                        let triggered = data::AlertStore::check_offline_klines(&ticker, &klines);
+                        all_triggered.extend(triggered);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to fetch offline klines for {}: {e:?}",
+                            ticker.display_symbol_and_type().0
+                        );
+                    }
+                }
+            }
+
+            all_triggered
+        },
+        Message::OfflineAlertsChecked,
+    )
 }

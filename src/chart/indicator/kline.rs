@@ -6,9 +6,14 @@ use data::chart::kline::KlineDataPoint;
 use exchange::fetcher::FetchRange;
 use exchange::{Kline, Timeframe, Trade};
 
+pub mod bid_ask_ratio;
+pub mod cvd;
+pub mod liquidation_heatmap;
 pub mod market_pulse;
 pub mod net_oi;
 pub mod open_interest;
+pub mod position_flow;
+pub mod rolling_vwap;
 pub mod tpo;
 pub mod volume;
 pub mod vpin;
@@ -58,6 +63,14 @@ pub trait KlineIndicatorImpl {
     fn on_spot_klines(&mut self, _klines: &[exchange::SpotKline]) {}
 
     fn on_net_oi_data(&mut self, _data: &[exchange::NetOiDataPoint]) {}
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 pub struct FetchCtx<'a> {
@@ -81,5 +94,18 @@ pub fn make_empty(which: KlineIndicator) -> Box<dyn KlineIndicatorImpl> {
         KlineIndicator::Vpin => Box::new(super::kline::vpin::VpinIndicator::new()),
         KlineIndicator::Vwap => Box::new(super::kline::vwap::VwapIndicator::new()),
         KlineIndicator::Tpo => Box::new(super::kline::tpo::TpoIndicator::new()),
+        KlineIndicator::RollingVwap => {
+            Box::new(super::kline::rolling_vwap::RollingVwapIndicator::new())
+        }
+        KlineIndicator::Cvd => Box::new(super::kline::cvd::CvdIndicator::new()),
+        KlineIndicator::BidAskRatio => {
+            Box::new(super::kline::bid_ask_ratio::BidAskRatioIndicator::new())
+        }
+        KlineIndicator::PositionFlow => {
+            Box::new(super::kline::position_flow::PositionFlowIndicator::new())
+        }
+        KlineIndicator::LiquidationHeatmap => {
+            Box::new(super::kline::liquidation_heatmap::LiquidationHeatmapIndicator::new())
+        }
     }
 }

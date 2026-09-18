@@ -1,8 +1,11 @@
+pub mod alert;
 pub mod comparison;
+pub mod drawing;
 pub mod heatmap;
 pub mod indicator;
 pub mod kline;
 pub mod liquidation_heatmap;
+pub mod replay;
 pub mod tpo;
 pub mod vwap;
 

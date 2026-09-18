@@ -34,7 +34,7 @@ impl Default for StreamCfg {
     }
 }
 
-#[derive(Default, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AudioStream {
     #[serde(deserialize_with = "ok_or_default")]

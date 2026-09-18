@@ -33,13 +33,13 @@ cargo fmt --all
 
 ## Architecture
 
-Flowsurface is a desktop crypto charting application built with Rust and the Iced GUI framework (Elm-inspired MVU architecture).
+Hawk Terminal is a desktop crypto charting application built with Rust and the Iced GUI framework (Elm-inspired MVU architecture).
 
 ### Workspace Structure
 
-- **flowsurface** (main): GUI application using Iced - handles windows, panes, user interaction
-- **data** (`flowsurface-data`): Data structures, state management, configuration, layout persistence
-- **exchange** (`flowsurface-exchange`): Exchange adapters for Binance, Bybit, Hyperliquid, OKX
+- **hawk-terminal** (main): GUI application using Iced - handles windows, panes, user interaction
+- **data** (`hawk-data`): Data structures, state management, configuration, layout persistence
+- **exchange** (`hawk-exchange`): Exchange adapters for Binance, Bybit, Hyperliquid, OKX
 
 ### Key Patterns
 

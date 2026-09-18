@@ -22,8 +22,18 @@ use reqwest::Method;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
-use std::{collections::HashMap, sync::LazyLock, time::Duration};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+    time::Duration,
+};
 use tokio::sync::Mutex;
+
+use crate::trades::cache::{
+    USE_BINARY_CACHE, find_gap_index, load_intraday_trades_from_cache, load_raw_trades_from_cache,
+    save_intraday_trades_to_cache, save_raw_trades_to_cache,
+};
 
 const API_DOMAIN: &str = "https://api.hyperliquid.xyz";
 const WS_DOMAIN: &str = "api.hyperliquid.xyz";
@@ -1209,6 +1219,248 @@ async fn fetch_orderbook(
         bids,
         asks,
     })
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
+struct HlRecentTradeItem {
+    pub coin: String,
+    pub side: String,
+    pub sz: String,
+    pub px: String,
+    pub time: u64,
+    pub tid: u64,
+}
+
+pub async fn fetch_intraday_trades(
+    ticker_info: TickerInfo,
+    from: u64,
+) -> Result<Vec<Trade>, AdapterError> {
+    let ticker = ticker_info.ticker;
+    let (symbol_str, _) = ticker.to_full_symbol_and_type();
+    let url = format!("{}/info", API_DOMAIN);
+
+    let body = json!({
+        "type": "recentTrades",
+        "coin": symbol_str
+    });
+
+    let raw_trades: Vec<HlRecentTradeItem> = limiter::http_parse_with_limiter(
+        &url,
+        &HYPERLIQUID_LIMITER,
+        1,
+        Some(Method::POST),
+        Some(&body),
+    )
+    .await?;
+
+    let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
+
+    let mut trades: Vec<Trade> = raw_trades
+        .into_iter()
+        .filter_map(|item| {
+            if item.time < from {
+                return None;
+            }
+            let price_f32 = item.px.parse::<f32>().ok()?;
+            let mut qty = item.sz.parse::<f32>().ok()?;
+            if size_in_quote_ccy {
+                qty = (qty * price_f32).round();
+            }
+            let is_sell = item.side == "A";
+            let price = Price::from_f32(price_f32).round_to_min_tick(ticker_info.min_ticksize);
+
+            Some(Trade {
+                time: item.time,
+                is_sell,
+                price,
+                qty,
+            })
+        })
+        .collect();
+
+    trades.sort_by_key(|t| t.time);
+    trades.dedup_by(|a, b| a.time == b.time && a.price == b.price && a.qty == b.qty);
+    Ok(trades)
+}
+
+pub async fn get_hist_trades(
+    ticker_info: TickerInfo,
+    date: chrono::NaiveDate,
+    base_path: PathBuf,
+) -> Result<Vec<Trade>, AdapterError> {
+    if USE_BINARY_CACHE
+        && let Some(trades) = load_raw_trades_from_cache(&base_path, &ticker_info, date)
+    {
+        log::info!(
+            "Using binary cached Hyperliquid trades for {date} ({} trades)",
+            trades.len()
+        );
+        return Ok(trades);
+    }
+
+    // Hyperliquid S3 bucket (s3://hl-mainnet-node-data) is requester-pays and stores per-block node fills.
+    // Return error to trigger fallback to intraday recentTrades if within 48h.
+    Err(AdapterError::InvalidRequest(format!(
+        "Hyperliquid historical archive for {date} is not available via public unauthenticated HTTP"
+    )))
+}
+
+async fn fetch_trades_from_intraday_cache_or_rest(
+    ticker_info: TickerInfo,
+    from_time: u64,
+    target_date: chrono::NaiveDate,
+    data_path: &Path,
+    day_end_fallback: u64,
+) -> Result<(Vec<Trade>, u64), AdapterError> {
+    let cached =
+        load_intraday_trades_from_cache(data_path, &ticker_info, target_date).unwrap_or_default();
+    if !cached.is_empty() {
+        let t_first = cached.first().unwrap().time;
+        let t_last = cached.last().unwrap().time;
+
+        if from_time < t_first {
+            let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+            if !new_trades.is_empty() {
+                let next_from = new_trades
+                    .last()
+                    .map(|t| t.time.saturating_add(1))
+                    .unwrap_or(t_first);
+                let _ = save_intraday_trades_to_cache(
+                    data_path,
+                    &ticker_info,
+                    target_date,
+                    &new_trades,
+                );
+                return Ok((new_trades, next_from));
+            } else {
+                let end_idx = find_gap_index(&cached, 0, 60_000).unwrap_or(cached.len() - 1);
+                let trades = cached[0..=end_idx].to_vec();
+                let next_from = cached[end_idx].time.saturating_add(1);
+                return Ok((trades, next_from));
+            }
+        }
+
+        if from_time <= t_last {
+            let start_idx = cached.partition_point(|t| t.time < from_time);
+            let in_gap = start_idx < cached.len()
+                && cached[start_idx].time.saturating_sub(from_time) > 60_000;
+
+            if in_gap {
+                let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+                if !new_trades.is_empty() {
+                    let next_from = new_trades
+                        .last()
+                        .map(|t| t.time.saturating_add(1))
+                        .unwrap_or_else(|| cached[start_idx].time);
+                    let _ = save_intraday_trades_to_cache(
+                        data_path,
+                        &ticker_info,
+                        target_date,
+                        &new_trades,
+                    );
+                    return Ok((new_trades, next_from));
+                } else {
+                    let end_idx =
+                        find_gap_index(&cached, start_idx, 60_000).unwrap_or(cached.len() - 1);
+                    let trades = cached[start_idx..=end_idx].to_vec();
+                    let next_from = cached[end_idx].time.saturating_add(1);
+                    return Ok((trades, next_from));
+                }
+            }
+
+            if let Some(end_idx) = find_gap_index(&cached, start_idx, 60_000) {
+                let trades = cached[start_idx..=end_idx].to_vec();
+                let next_from = cached[end_idx].time.saturating_add(1);
+                return Ok((trades, next_from));
+            }
+
+            let trades = cached[start_idx..].to_vec();
+            let next_from = t_last.saturating_add(1);
+            return Ok((trades, next_from));
+        }
+    }
+
+    let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
+    let next_from = new_trades
+        .last()
+        .map(|t| t.time.saturating_add(1))
+        .unwrap_or(day_end_fallback);
+
+    if !new_trades.is_empty() {
+        let _ = save_intraday_trades_to_cache(data_path, &ticker_info, target_date, &new_trades);
+    }
+    Ok((new_trades, next_from))
+}
+
+pub async fn fetch_trades(
+    ticker_info: TickerInfo,
+    from_time: u64,
+    data_path: PathBuf,
+) -> Result<(Vec<Trade>, u64), AdapterError> {
+    let today_date = chrono::Utc::now().date_naive();
+    let today_midnight = today_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+
+    if from_time as i64 >= today_midnight.timestamp_millis() {
+        return fetch_trades_from_intraday_cache_or_rest(
+            ticker_info,
+            from_time,
+            today_date,
+            &data_path,
+            from_time.saturating_add(60_000),
+        )
+        .await;
+    }
+
+    let from_date = chrono::DateTime::from_timestamp_millis(from_time as i64)
+        .ok_or_else(|| AdapterError::ParseError("Invalid timestamp".into()))?
+        .date_naive();
+
+    let next_day_start = from_date
+        .succ_opt()
+        .unwrap_or(from_date)
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+
+    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let is_recent = from_time >= now_ms.saturating_sub(48 * 3600 * 1000);
+
+    // Check if recent past day is already completely cached in intraday cache
+    if is_recent
+        && let Some(cached) = load_intraday_trades_from_cache(&data_path, &ticker_info, from_date)
+        && let Some(day_start_dt) = from_date.and_hms_opt(0, 0, 0)
+    {
+        let day_start = day_start_dt.and_utc().timestamp_millis() as u64;
+        let day_end = day_start + 86_400_000 - 1;
+        let is_full = !cached.is_empty()
+            && cached.first().map(|t| t.time).unwrap_or(0) <= day_start + 600_000
+            && cached.last().map(|t| t.time).unwrap_or(0) >= day_end - 600_000;
+        if is_full {
+            let _ = save_raw_trades_to_cache(&data_path, &ticker_info, from_date, &cached);
+            return Ok((cached, next_day_start));
+        }
+    }
+
+    // For Hyperliquid, try binary cache, fallback to recentTrades within 48h
+    match get_hist_trades(ticker_info, from_date, data_path.clone()).await {
+        Ok(trades) => Ok((trades, next_day_start)),
+        Err(e) => {
+            if is_recent {
+                fetch_trades_from_intraday_cache_or_rest(
+                    ticker_info,
+                    from_time,
+                    from_date,
+                    &data_path,
+                    next_day_start,
+                )
+                .await
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
