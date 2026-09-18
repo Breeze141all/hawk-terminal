@@ -1,37 +1,75 @@
-# Hawk Terminal (`hawk-client`) — Product Roadmap & Task Tracker
+# Hawk Terminal (`hawk-terminal`) — Product Roadmap & Task Board
 
-Система обліку задач синхронізована з GitHub Issues репозиторію:
-**[Breeze141all/ct-client Issues](https://github.com/Breeze141all/ct-client/issues)**
+Централізована система обліку завдань, критичних багів та запланованих модулів.
+Синхронізовано з GitHub Projects / Issues: **[Breeze141all/hawk-terminal](https://github.com/Breeze141all/hawk-terminal)**
 
 ---
 
 ## 1. Завершено (Done / Implemented & Verified)
-*Всі задачі повністю реалізовані в коді та проходять 116/116 модульних тестів.*
+*Повністю реалізовано в кодовій базі, проходить 126/126 модульних тестів та Clippy -D warnings.*
 
-- [x] **[#1] 2D Liquidation Heatmap** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/1)): 2D сітка Time × Price, квантування бінів ($100 для BTC), відсікання тінями свічок, палітри тем.
-- [x] **[#2] Multi-Period Rolling VWAP** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/2)): Ковзні вікна 7d, 30d, 90d, 365d та сесійні періоди з смугами 1, 2, 3 SD.
-- [x] **[#3] Drawing Suite** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/3)): Trendline, Ray, Horiz Line, Rectangle, Fibonacci Retracement, Text Note.
-- [x] **[#4] Market Replay Engine** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/4)): Покрокове відтворення, інтерактивний календар вибору дати/часу, Random Bar.
-- [x] **[#5] Price Alerts** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/5)): Рівні CrossAbove/Below, аудіо-сигнали, візуальні Toasts, бейджі на осі Y, менеджер алертів.
-- [x] **[#6] Trade Journal** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/6)): Облік торгів, PnL, 3 режими (Disabled, Basic Sidebar 330px, Extended Fullscreen Dashboard).
-- [x] **[#7] TPO Multi-Period & Session Merge** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/7)): Daily/Weekly/Monthly агрегація, ручне злиття/розділення сесій, літери понад 52.
-- [x] **[#8] Footprint Binary Cache & RAM Capping** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/8)): LZ4 сирі угоди, `.fp.bin` кеш кластерів, лімітування пам'яті, чесний backfill.
-- [x] **[#9] Order Flow Indicators** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/9)): CVD, Bid/Ask Ratio, Position Flow, Net OI.
-- [x] **[#10] Workspace Bundle** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/10)): Експорт/імпорт налаштувань та лейаутів з захистом від DoS.
-
----
-
-## 2. У процесі (In Progress)
-
-- [ ] **[#11] Розбивка 43 незбережених файлів на атомарні коміти в Git** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/11)):
-  - Стан: Робоче дерево містить 43 модифікованих і 17 нових файлів.
-  - Ціль: Очистити робоче дерево шляхом створення 6 логічних комітів і пушу в `origin/main`.
+- [x] **[#1] 2D Liquidation Heatmap**: Сітка Time × Price, квантування бінів ($100 для BTC), динамічні рівні плечей 10x–100x.
+- [x] **[#2] Multi-Period Rolling VWAP**: Ковзні вікна 7d, 30d, 90d, 365d та сесійні періоди зі стандартними відхиленнями 1, 2, 3 SD.
+- [x] **[#3] Базова система малювання**: Trendline, Ray, Horizontal Line, Rectangle, Fibonacci Retracement, Text Note.
+- [x] **[#4] Market Replay Engine**: Покрокове тікове відтворення, інтерактивний календар вибору дати/часу, Random Bar.
+- [x] **[#5] Price Alerts**: Рівні CrossAbove/CrossBelow, аудіо-сигнали, спливаючі Toasts, бейджі на осі Y, менеджер алертів.
+- [x] **[#6] Trade Journal (v1 Core)**: Облік торгів, PnL, 3 режими відображення (Disabled, Sidebar 330px, Fullscreen Dashboard).
+- [x] **[#7] TPO Multi-Period & Session Merge**: Daily/Weekly/Monthly агрегація, ручне злиття/розділення сесій, літери понад 52.
+- [x] **[#8] Footprint Binary Cache & RAM Capping**: LZ4 сирі угоди, `.fp.bin` бінарний кеш кластерів, захист пам'яті.
+- [x] **[#9] Order Flow Indicators**: CVD (Cumulative Volume Delta), Bid/Ask Ratio, Position Flow, Net Open Interest.
+- [x] **[#10] Workspace Bundle**: Експорт/імпорт налаштувань, лейаутів із захистом від DoS та санітизацією чисел.
+- [x] **[#11] Очищення та стабілізація Git**: Єдиний чистий Initial Commit, повна відповідність Rust 1.98+ Clippy, відокремлення від upstream.
+- [x] **[#12] Веб-сайт Hawk Terminal**: Лендинг на GitHub Pages у стилі Boon Global (монохром, анімація входу, WebGL-сузір'я).
 
 ---
 
-## 3. Заплановано (Backlog / Future Milestones)
+## 2. Критичні дефекти рантайму (P0: Runtime Panics / `todo!` & `unimplemented!`)
+*Виклик цих гілок під час роботи терміналу спричиняє негайний аварійний краш (panic!):*
 
-- [ ] **[#12] Автоматичний імпорт угод з API бірж у Trade Journal** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/12)).
-- [ ] **[#13] Гарячі клавіші для інструментів малювання (T, H, F, B, Esc)** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/13)).
-- [ ] **[#14] Симуляція Footprint Delta та кластерів у режимі Market Replay** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/14)).
-- [ ] **[#15] Збереження пресетів та стилів малювання (Templates)** ([Деталі на GitHub](https://github.com/Breeze141all/ct-client/issues/15)).
+- [ ] **[#13] Обробка аудіо-порогу за обсягом у штуках (Qty Threshold)**
+  - **Файл**: `src/modal/audio.rs:407`
+  - **Код**: `data::audio::Threshold::Qty(_) => todo!()`
+  - **Задача**: Реалізувати обробку кількості монет у конкретній угоді/позиції без крашу процесу.
+- [ ] **[#14] Безпечна обробка Tick Basis у Comparison Chart**
+  - **Файл**: `src/chart/comparison.rs:48, 382`
+  - **Код**: `Basis::Tick(_) => todo!("WIP: ComparisonChart does not support tick basis")` та `unimplemented!()`
+  - **Задача**: Замість паніки повертати валідний fallback або блокувати вибір тікового базису з дружнім повідомленням у UI.
+- [ ] **[#15] Безпечна обробка Tick Basis у Orderbook Heatmap**
+  - **Файл**: `src/chart/heatmap.rs:309`
+  - **Код**: `Basis::Tick(_) => todo!()`
+  - **Задача**: Реалізувати розрахунок глибини або обмежити теплову карту базисом Time без виклику `todo!()`.
+- [ ] **[#16] Обробка Tick Basis в операціях діапазону KlineChart**
+  - **Файл**: `src/chart/kline.rs:118`
+  - **Код**: `Basis::Tick(_) => unimplemented!()`
+  - **Задача**: Реалізувати обчислення часових меж свічок на тіковому базисі для коректного вирівнювання осей.
+
+---
+
+## 3. Інструменти малювання (P1: Drawing Suite Pro Experience)**
+*Професійний UX малювання на рівні TradingView:*
+
+- [ ] **[#17] Фіксація кута 45° при затиснутому Shift (45° Angle Snap)**
+  - При малюванні ліній (Trendline, Ray, Info Line) із затиснутою клавішею `Shift` нахил автоматично прив'язується до кратних кутів: 0°, 45°, 90°, 135°, 180° тощо.
+- [ ] **[#18] Відображення цінового бейджа на шкалі Y (Price Scale Tag)**
+  - При створенні та перетягуванні ліній, прямокутників чи рівнів фіксувати поточну ціну вузла у вигляді контрастного бейджа на вертикальній осі цін.
+- [ ] **[#19] Інтелектуальний магніт (Smart Magnet Mode)**
+  - **Прив'язка**: Точки малювання автоматично притягуються до фітіля (High/Low) або тіла (Open/Close) найближчої свічки залежно від відстані курсора.
+  - **Гаряча клавіша**: Затискання `Ctrl` тимчасово інвертує/вимикає магніт доки клавішу не відпустять.
+
+---
+
+## 4. Журнал торгівлі (P1: Trade Journal Media & Evidence)**
+
+- [ ] **[#20] Додавання зображень та скріншотів до записів журналу**
+  - Підтримка прикріплення скріншотів з буфера обміну (`Ctrl+V`) або через вибір локального файлу.
+  - Збереження прев'ю та модальний перегляд повнорозмірного графіка всередині журналу.
+- [ ] **[#21] Автоматичний імпорт угод з бірж за API**
+  - Завантаження історії закритих ордерів і розрахунок чистого PnL без ручного введення.
+
+---
+
+## 5. Розширений функціонал (P2: Advanced Milestones)**
+
+- [ ] **[#22] Гарячі клавіші для інструментів (T, H, F, B, Esc, Delete)**
+- [ ] **[#23] Симуляція кластерів Footprint у режимі Market Replay**
+- [ ] **[#24] Шаблони та пресети налаштувань малювання (Drawing Templates)**
