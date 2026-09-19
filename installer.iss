@@ -3,7 +3,7 @@
 ; Output: Single executable setup file
 
 #define MyAppName "Hawk Terminal"
-#define MyAppVersion "0.9.2"
+#define MyAppVersion "0.9.3"
 #define MyAppPublisher "Breeze"
 #define MyAppURL "https://breeze141all.github.io/hawk-site/"
 #define MyAppExeName "hawk-terminal.exe"
@@ -37,6 +37,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "data\src\default_state.json"; DestDir: "{userappdata}\hawk-terminal"; DestName: "saved-state.json"; Flags: onlyifdoesntexist
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"

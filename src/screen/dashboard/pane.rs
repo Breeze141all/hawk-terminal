@@ -510,6 +510,8 @@ impl State {
                     let (raw_trades, tick_size) = (chart.raw_trades(), chart.tick_size());
                     let layout = chart.chart_layout();
                     let current_config = chart.config();
+                    let existing_drawings = chart.drawings.clone();
+                    let symbol = chart.ticker_info.ticker.display_symbol_and_type().0;
 
                     *chart = KlineChart::new(
                         layout,
@@ -522,6 +524,12 @@ impl State {
                         chart.kind(),
                         Some(current_config),
                     );
+                    chart.alerts = data::AlertStore::for_symbol(&symbol);
+                    chart.drawings = if !existing_drawings.is_empty() {
+                        existing_drawings
+                    } else {
+                        data::DrawingStore::for_symbol(&symbol)
+                    };
                 }
             }
             Content::Comparison(chart) => {
@@ -1250,17 +1258,24 @@ impl State {
                         *kind = c.kind.clone();
                     }
                     chart::Message::AddDrawing(drawing) => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                         c.add_drawing(drawing.clone());
+                        data::DrawingStore::add(&symbol, drawing.clone());
                     }
                     chart::Message::UpdateDrawing(drawing) => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                         c.update_drawing(drawing.clone());
+                        data::DrawingStore::update(&symbol, drawing.clone());
                     }
                     chart::Message::DeleteDrawing(id) => {
                         c.delete_drawing(*id);
+                        data::DrawingStore::remove(*id);
                         self.selected_drawing_show_settings = false;
                     }
                     chart::Message::ClearDrawings => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                         c.clear_drawings();
+                        data::DrawingStore::clear_for_symbol(&symbol);
                         self.selected_drawing_show_settings = false;
                     }
                     chart::Message::SelectDrawing(id) => {
@@ -1628,7 +1643,9 @@ impl State {
             }
             Event::ClearDrawings => {
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                     c.clear_drawings();
+                    data::DrawingStore::clear_for_symbol(&symbol);
                     self.selected_drawing_show_settings = false;
                 }
             }
@@ -1640,34 +1657,54 @@ impl State {
             }
             Event::SelectedDrawingAction(action) => {
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                     match action {
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleSettings => {
                             self.selected_drawing_show_settings = !self.selected_drawing_show_settings;
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleLock => {
                             c.toggle_selected_drawing_lock();
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::Delete => {
                             if let Some(d) = c.selected_drawing() {
                                 let id = d.id;
                                 c.delete_drawing(id);
+                                data::DrawingStore::remove(id);
                                 self.selected_drawing_show_settings = false;
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetColor(color) => {
                             c.update_selected_drawing_color(color);
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetWidth(w) => {
                             c.update_selected_drawing_width(w);
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionProfitColor(color) => {
                             c.update_selected_position_profit_color(color);
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionStopColor(color) => {
                             c.update_selected_position_stop_color(color);
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionEntryColor(color) => {
                             c.update_selected_position_entry_color(color);
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::AutofillJournal => {
                             if let Some(autofill) = c.find_target_position() {
@@ -2712,8 +2749,9 @@ impl Content {
             &determined_chart_kind,
             kline_config,
         );
-        chart.alerts =
-            data::AlertStore::for_symbol(&ticker_info.ticker.display_symbol_and_type().0);
+        let symbol = ticker_info.ticker.display_symbol_and_type().0;
+        chart.alerts = data::AlertStore::for_symbol(&symbol);
+        chart.drawings = data::DrawingStore::for_symbol(&symbol);
 
         Content::Kline {
             chart: Some(chart),

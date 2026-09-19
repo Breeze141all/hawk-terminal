@@ -266,6 +266,86 @@ impl Drawing {
     }
 }
 
+use std::sync::{LazyLock, RwLock};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawingRecord {
+    pub ticker_symbol: String,
+    pub drawing: Drawing,
+}
+
+static GLOBAL_DRAWINGS: LazyLock<RwLock<Vec<DrawingRecord>>> =
+    LazyLock::new(|| RwLock::new(crate::load_drawings()));
+
+pub struct DrawingStore;
+
+impl DrawingStore {
+    /// Retrieve a clone of all drawing records
+    pub fn all() -> Vec<DrawingRecord> {
+        GLOBAL_DRAWINGS.read().unwrap().clone()
+    }
+
+    /// Retrieve all drawings for a specific ticker symbol
+    pub fn for_symbol(symbol: &str) -> Vec<Drawing> {
+        GLOBAL_DRAWINGS
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|r| r.ticker_symbol == symbol)
+            .map(|r| r.drawing.clone())
+            .collect()
+    }
+
+    /// Add or update a drawing for a symbol and persist to disk
+    pub fn add(symbol: impl Into<String>, drawing: Drawing) {
+        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
+        if let Some(existing) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
+            existing.drawing = drawing;
+        } else {
+            drawings.push(DrawingRecord {
+                ticker_symbol: symbol.into(),
+                drawing,
+            });
+        }
+        let _ = crate::save_drawings(&drawings);
+    }
+
+    /// Update an existing drawing for a symbol and persist to disk
+    pub fn update(symbol: &str, drawing: Drawing) {
+        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
+        if let Some(record) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
+            record.drawing = drawing;
+            record.ticker_symbol = symbol.to_string();
+        } else {
+            drawings.push(DrawingRecord {
+                ticker_symbol: symbol.to_string(),
+                drawing,
+            });
+        }
+        let _ = crate::save_drawings(&drawings);
+    }
+
+    /// Remove a drawing by ID and persist to disk
+    pub fn remove(id: uuid::Uuid) {
+        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
+        drawings.retain(|r| r.drawing.id != id);
+        let _ = crate::save_drawings(&drawings);
+    }
+
+    /// Clear unlocked drawings for a specific symbol and persist to disk
+    pub fn clear_for_symbol(symbol: &str) {
+        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
+        drawings.retain(|r| r.ticker_symbol != symbol || r.drawing.is_locked);
+        let _ = crate::save_drawings(&drawings);
+    }
+
+    /// Force save all drawings to disk
+    pub fn save() {
+        let drawings = GLOBAL_DRAWINGS.read().unwrap();
+        let _ = crate::save_drawings(&drawings);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +438,45 @@ mod tests {
         let leg_pos: Drawing = serde_json::from_str(legacy_json).unwrap();
         let style = leg_pos.position_style();
         assert_eq!(style, PositionStyle::default());
+    }
+
+    #[test]
+    fn test_drawing_store_operations() {
+        let sym = "TEST_DRAWING_SYM";
+        let d1 = Drawing::horizontal(65000.0, [1.0, 0.5, 0.0, 1.0], 2.0);
+        let id1 = d1.id;
+        let mut d2 = Drawing::trendline((100, 10.0), (200, 20.0), [0.0, 1.0, 0.0, 1.0], 1.5);
+        d2.is_locked = true;
+        let id2 = d2.id;
+
+        DrawingStore::add(sym, d1);
+        DrawingStore::add(sym, d2);
+
+        let drawings = DrawingStore::for_symbol(sym);
+        assert_eq!(drawings.len(), 2);
+        assert!(drawings.iter().any(|d| d.id == id1));
+        assert!(drawings.iter().any(|d| d.id == id2 && d.is_locked));
+
+        // Update d1 price
+        let mut updated_d1 = Drawing::horizontal(66000.0, [1.0, 0.5, 0.0, 1.0], 2.0);
+        updated_d1.id = id1;
+        DrawingStore::update(sym, updated_d1);
+        let drawings_after_update = DrawingStore::for_symbol(sym);
+        let found = drawings_after_update.iter().find(|d| d.id == id1).unwrap();
+        if let DrawingKind::HorizontalLine { price } = found.kind {
+            assert_eq!(price, 66000.0);
+        } else {
+            panic!("Expected horizontal line");
+        }
+
+        // Clear unlocked drawings
+        DrawingStore::clear_for_symbol(sym);
+        let drawings_after_clear = DrawingStore::for_symbol(sym);
+        assert_eq!(drawings_after_clear.len(), 1);
+        assert_eq!(drawings_after_clear[0].id, id2);
+
+        // Remove locked drawing directly
+        DrawingStore::remove(id2);
+        assert!(DrawingStore::for_symbol(sym).is_empty());
     }
 }

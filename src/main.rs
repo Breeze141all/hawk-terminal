@@ -572,6 +572,7 @@ impl HawkTerminal {
                             audio_cfg: Some(data::AudioStream::from(&self.audio_stream)),
                             size_in_quote_ccy: Some(self.volume_size_unit),
                             default_kline_config: data::chart::kline::user_default_kline_config(),
+                            drawings: Some(data::DrawingStore::all()),
                         };
 
                         let bundle = data::ConfigBundle::new_workspace(
@@ -1217,6 +1218,12 @@ impl HawkTerminal {
                     data::chart::kline::set_user_default_kline_config(kline_cfg);
                 }
 
+                if let Some(drawings) = ws_bundle.drawings {
+                    for rec in drawings {
+                        data::DrawingStore::add(rec.ticker_symbol, rec.drawing);
+                    }
+                }
+
                 self.notifications.push(Toast::info(format!(
                     "Imported {count} layout(s) from workspace"
                 )));
@@ -1659,6 +1666,9 @@ impl HawkTerminal {
 
         // Persist alerts to alerts.json
         data::AlertStore::save();
+
+        // Persist drawings to drawings.json
+        data::DrawingStore::save();
 
         match serde_json::to_string(&state) {
             Ok(layout_str) => {

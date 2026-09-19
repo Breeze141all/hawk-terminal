@@ -59,6 +59,27 @@ pub fn save_export_file(json: &str, file_name: &str) -> std::io::Result<PathBuf>
 }
 
 pub use chart::alert::AlertStore;
+pub use chart::drawing::{DrawingRecord, DrawingStore};
+
+pub const DRAWINGS_PATH: &str = "drawings.json";
+
+pub fn save_drawings(drawings: &[chart::drawing::DrawingRecord]) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(drawings)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_json_to_file(&json, DRAWINGS_PATH)
+}
+
+pub fn load_drawings() -> Vec<chart::drawing::DrawingRecord> {
+    let path = data_path(Some(DRAWINGS_PATH));
+    let Ok(mut file) = File::open(&path) else {
+        return Vec::new();
+    };
+    let mut contents = String::new();
+    if file.read_to_string(&mut contents).is_err() {
+        return Vec::new();
+    }
+    serde_json::from_str(&contents).unwrap_or_default()
+}
 
 pub fn save_alerts(alerts: &[chart::alert::PriceAlert]) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(alerts)

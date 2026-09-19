@@ -1430,6 +1430,7 @@ impl KlineChart {
             };
             self.replay = Some(ReplayState::new(cutoff));
         }
+        self.tpo_cache.borrow_mut().sessions.clear();
         self.invalidate_all();
     }
 
@@ -1482,6 +1483,7 @@ impl KlineChart {
         } else {
             self.replay = Some(ReplayState::new(cutoff));
         }
+        self.tpo_cache.borrow_mut().sessions.clear();
         self.invalidate_all();
     }
 
@@ -1511,6 +1513,7 @@ impl KlineChart {
         } else {
             self.replay = Some(ReplayState::new(cutoff));
         }
+        self.tpo_cache.borrow_mut().sessions.clear();
         self.scroll_to_timestamp(cutoff);
     }
 
@@ -3906,6 +3909,7 @@ impl canvas::Program<Message> for KlineChart {
                         *poc_color,
                         *single_prints_color,
                         palette,
+                        self.is_replay_active(),
                     );
 
                     if *show_candles {
@@ -4001,6 +4005,7 @@ impl canvas::Program<Message> for KlineChart {
                     data::chart::kline::TpoElementColor::default(),
                     data::chart::kline::TpoElementColor::default(),
                     palette,
+                    self.is_replay_active(),
                 );
             }
 
@@ -5618,77 +5623,40 @@ fn resolve_tpo_element_color(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_tpo_profiles(
+fn prepare_tpo_profiles(
     data_source: &PlotData<KlineDataPoint>,
     tpo_cache: &RefCell<TpoCache>,
-    frame: &mut canvas::Frame,
-    price_to_y: impl Fn(Price) -> f32,
-    interval_to_x: impl Fn(u64) -> f32,
-    region: &Rectangle,
-    cell_width: f32,
-    cell_height: f32,
-    scaling: f32,
-    exchange_tick_size: f32,
-    tpo_tick_size: f64,
     earliest: u64,
     latest: u64,
-    visible_min_price: f64,
-    visible_max_price: f64,
-    show_letters: bool,
-    show_ib: bool,
-    show_va: bool,
-    show_poc: bool,
-    show_single_prints: bool,
     effective_period: data::chart::tpo::SessionPeriod,
     clusters: &[data::chart::tpo::SessionCluster],
-    split_sessions: &[i64],
-    color_scheme: data::chart::kline::TpoColorScheme,
-    ib_color: data::chart::kline::TpoElementColor,
-    poc_color: data::chart::kline::TpoElementColor,
-    single_prints_color: data::chart::kline::TpoElementColor,
-    palette: &Extended,
-) {
-    let ex_tick = if exchange_tick_size <= 0.0 {
-        1.0
-    } else {
-        exchange_tick_size
-    };
-    let tpo_tick = if tpo_tick_size <= 0.0 || !tpo_tick_size.is_finite() {
-        ex_tick as f64
-    } else {
-        tpo_tick_size
-    };
-
-    // Exact height of one TPO price bin in chart canvas coordinate units
-    let tpo_row_height = (tpo_tick as f32 / ex_tick) * cell_height;
-    let scaled_row_height = tpo_row_height * scaling;
-
+    tpo_tick: f64,
+    is_replay: bool,
+) -> Vec<data::chart::tpo::TpoProfile> {
     let mut all_klines: Vec<&Kline> = Vec::new();
     match data_source {
         PlotData::TimeBased(ts) => {
-            for dp in ts.datapoints.values() {
-                all_klines.push(&dp.kline);
+            for dp in ts.datapoints.range(..=latest) {
+                all_klines.push(&dp.1.kline);
             }
         }
         PlotData::TickBased(ta) => {
             for dp in &ta.datapoints {
-                all_klines.push(&dp.kline);
+                if dp.kline.time <= latest {
+                    all_klines.push(&dp.kline);
+                }
             }
         }
     }
 
     if all_klines.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let sessions = data::chart::tpo::group_candles_by_period(&all_klines, effective_period);
     if sessions.is_empty() {
-        return;
+        return Vec::new();
     }
-
-    let letter_col_width = (cell_width * 0.75).clamp(1.0, 16.0);
-    let min_tick = ((visible_min_price / tpo_tick).floor() as i64).saturating_sub(2);
-    let max_tick = ((visible_max_price / tpo_tick).ceil() as i64).saturating_add(2);
 
     let mut cache = tpo_cache.borrow_mut();
     if (cache.tick_size - tpo_tick).abs() > 1e-9 || cache.period != Some(effective_period) {
@@ -5724,9 +5692,12 @@ fn draw_tpo_profiles(
             .unwrap_or_else(|| start.to_string())
     };
 
-    // 2. Build or fetch raw profiles from cache
+    // Build or fetch raw profiles from cache
     let mut raw_profiles = Vec::with_capacity(sessions.len());
     for (session_start, session_end, session_candles) in sessions {
+        if is_replay && (session_end as u64) > latest {
+            continue;
+        }
         if session_candles.is_empty() {
             continue;
         }
@@ -5791,21 +5762,98 @@ fn draw_tpo_profiles(
         raw_profiles.push((*profile).clone());
     }
 
-    // 3. Resolve clusters
+    // Resolve clusters
     let effective_profiles = if clusters.is_empty() {
         raw_profiles
     } else {
         data::chart::tpo::apply_session_clusters(&raw_profiles, clusters)
     };
 
+    effective_profiles
+        .into_iter()
+        .filter(|p| {
+            let session_start = p.session_start as u64;
+            let session_end = p.session_end as u64;
+            session_end >= earliest
+                && session_start <= latest
+                && (!is_replay || session_end <= latest)
+                && !p.matrix.is_empty()
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_tpo_profiles(
+    data_source: &PlotData<KlineDataPoint>,
+    tpo_cache: &RefCell<TpoCache>,
+    frame: &mut canvas::Frame,
+    price_to_y: impl Fn(Price) -> f32,
+    interval_to_x: impl Fn(u64) -> f32,
+    region: &Rectangle,
+    cell_width: f32,
+    cell_height: f32,
+    scaling: f32,
+    exchange_tick_size: f32,
+    tpo_tick_size: f64,
+    earliest: u64,
+    latest: u64,
+    visible_min_price: f64,
+    visible_max_price: f64,
+    show_letters: bool,
+    show_ib: bool,
+    show_va: bool,
+    show_poc: bool,
+    show_single_prints: bool,
+    effective_period: data::chart::tpo::SessionPeriod,
+    clusters: &[data::chart::tpo::SessionCluster],
+    split_sessions: &[i64],
+    color_scheme: data::chart::kline::TpoColorScheme,
+    ib_color: data::chart::kline::TpoElementColor,
+    poc_color: data::chart::kline::TpoElementColor,
+    single_prints_color: data::chart::kline::TpoElementColor,
+    palette: &Extended,
+    is_replay: bool,
+) {
+    let ex_tick = if exchange_tick_size <= 0.0 {
+        1.0
+    } else {
+        exchange_tick_size
+    };
+    let tpo_tick = if tpo_tick_size <= 0.0 || !tpo_tick_size.is_finite() {
+        ex_tick as f64
+    } else {
+        tpo_tick_size
+    };
+
+    // Exact height of one TPO price bin in chart canvas coordinate units
+    let tpo_row_height = (tpo_tick as f32 / ex_tick) * cell_height;
+    let scaled_row_height = tpo_row_height * scaling;
+
+    let effective_profiles = prepare_tpo_profiles(
+        data_source,
+        tpo_cache,
+        earliest,
+        latest,
+        effective_period,
+        clusters,
+        tpo_tick,
+        is_replay,
+    );
+
+    if effective_profiles.is_empty() {
+        return;
+    }
+
+    let letter_col_width = (cell_width * 0.75).clamp(1.0, 16.0);
+    let min_tick = ((visible_min_price / tpo_tick).floor() as i64).saturating_sub(2);
+    let max_tick = ((visible_max_price / tpo_tick).ceil() as i64).saturating_add(2);
+
+    let mut cache = tpo_cache.borrow_mut();
+    cache.session_ranges.clear();
     let total_effective = effective_profiles.len();
     for (idx, profile) in effective_profiles.iter().enumerate() {
         let session_start = profile.session_start;
         let session_end = profile.session_end;
-
-        if (session_end as u64) < earliest || (session_start as u64) > latest {
-            continue;
-        }
 
         if profile.matrix.is_empty() {
             continue;
@@ -9549,5 +9597,141 @@ mod tests {
         });
         let action2 = chart.update(&mut interaction, &cyrillic_shift_g, bounds, cursor);
         assert!(action2.is_some());
+    }
+
+    #[test]
+    fn test_kline_chart_drawings_preservation_and_store() {
+        let mut chart = make_test_chart();
+        let sym = "BTCUSDT_TEST_PRESERVE";
+        let d = Drawing::horizontal(65000.0, [1.0, 0.5, 0.0, 1.0], 2.0);
+        chart.add_drawing(d.clone());
+        data::DrawingStore::add(sym, d.clone());
+
+        // Verify drawings exist in chart and DrawingStore
+        assert_eq!(chart.drawings.len(), 1);
+        let stored = data::DrawingStore::for_symbol(sym);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, d.id);
+
+        // Simulate timeframe change recreation (matching pane.rs line 514 logic)
+        let existing_drawings = chart.drawings.clone();
+        let ticker = exchange::Ticker::new(sym, exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let mut reloaded_chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::H1),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+        reloaded_chart.drawings = if !existing_drawings.is_empty() {
+            existing_drawings
+        } else {
+            data::DrawingStore::for_symbol(sym)
+        };
+
+        assert_eq!(reloaded_chart.drawings.len(), 1);
+        assert_eq!(reloaded_chart.drawings[0].id, d.id);
+
+        // Clean up
+        data::DrawingStore::remove(d.id);
+        assert!(data::DrawingStore::for_symbol(sym).is_empty());
+    }
+
+    #[test]
+    fn test_tpo_profile_replay_session_cutoff() {
+        // Create 2 days of 1-hour candles:
+        // Day 1: 0 .. 24h (0 .. 86_400_000 ms)
+        // Day 2: 24h .. 48h (86_400_000 .. 172_800_000 ms)
+        let hour_ms = 3_600_000u64;
+        let mut klines = Vec::new();
+        for i in 0..48 {
+            klines.push(Kline {
+                time: i * hour_ms,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(90.0),
+                close: Price::from_f32(105.0),
+                volume: (10.0, 10.0),
+            });
+        }
+
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::H1),
+            1.0,
+            &klines,
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        let tpo_cache = RefCell::new(TpoCache::default());
+
+        // Case 1: In replay, cutoff is at 30 hours (middle of Day 2)
+        // Day 1 is closed (session_end = 86_400_000 <= 30h)
+        // Day 2 is unclosed (session_end = 172_800_000 > 30h) -> MUST NOT be in profiles!
+        let cutoff_day2_mid = 30 * hour_ms;
+        let profiles_replay_mid = prepare_tpo_profiles(
+            &chart.data_source,
+            &tpo_cache,
+            0,
+            cutoff_day2_mid,
+            data::chart::tpo::SessionPeriod::Daily,
+            &[],
+            1.0,
+            true, // is_replay = true
+        );
+
+        // In replay at Day 2 midday, only Day 1 profile is returned
+        assert_eq!(profiles_replay_mid.len(), 1);
+        assert_eq!(profiles_replay_mid[0].session_start, 0);
+        assert_eq!(profiles_replay_mid[0].session_end, 86_400_000);
+        assert!(tpo_cache.borrow().sessions.contains_key(&0));
+        assert!(!tpo_cache.borrow().sessions.contains_key(&(86_400_000i64)));
+
+        // Case 2: In replay, cutoff advances to 48 hours (Day 2 closes)
+        let cutoff_day2_end = 48 * hour_ms;
+        let profiles_replay_end = prepare_tpo_profiles(
+            &chart.data_source,
+            &tpo_cache,
+            0,
+            cutoff_day2_end,
+            data::chart::tpo::SessionPeriod::Daily,
+            &[],
+            1.0,
+            true, // is_replay = true
+        );
+
+        // Now Day 2 is closed, so both Day 1 and Day 2 profiles are returned
+        assert_eq!(profiles_replay_end.len(), 2);
+        assert_eq!(profiles_replay_end[0].session_start, 0);
+        assert_eq!(profiles_replay_end[1].session_start, 86_400_000);
+        assert!(tpo_cache.borrow().sessions.contains_key(&(86_400_000i64)));
+
+        // Case 3: In live mode (is_replay = false), unclosed Day 2 IS built/returned progressively
+        tpo_cache.borrow_mut().sessions.clear();
+        let profiles_live_mid = prepare_tpo_profiles(
+            &chart.data_source,
+            &tpo_cache,
+            0,
+            cutoff_day2_mid,
+            data::chart::tpo::SessionPeriod::Daily,
+            &[],
+            1.0,
+            false, // is_replay = false (live mode)
+        );
+        // Both Day 1 and ongoing Day 2 are built and returned in live mode
+        assert_eq!(profiles_live_mid.len(), 2);
+        assert_eq!(profiles_live_mid[0].session_start, 0);
+        assert_eq!(profiles_live_mid[1].session_start, 86_400_000);
     }
 }

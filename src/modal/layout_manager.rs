@@ -97,9 +97,12 @@ impl LayoutManager {
     }
 
     pub fn from_config(layouts: Vec<Layout>, active_layout: Option<LayoutId>) -> Self {
+        let active_layout_id = active_layout
+            .map(|l| l.unique)
+            .or_else(|| layouts.first().map(|l| l.id.unique));
         Self {
             layouts,
-            active_layout_id: active_layout.map(|l| l.unique),
+            active_layout_id,
             edit_mode: Editing::None,
             tab: LayoutTab::default(),
         }

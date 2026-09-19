@@ -356,19 +356,81 @@ pub fn state_to_saved_state(state: data::State) -> SavedState {
 
 pub fn load_saved_state() -> SavedState {
     match data::read_from_file(data::SAVED_STATE_PATH) {
-        Ok(state) => state_to_saved_state(state),
+        Ok(mut state) => {
+            let mut modified = false;
+            if !state.layout_manager.layouts.iter().any(|l| l.name == "Hawk") {
+                log::info!(
+                    "Hawk template not found in existing state ({} layout(s)). Injecting default Hawk template...",
+                    state.layout_manager.layouts.len()
+                );
+                let hawk_layout = data::default_hawk_layout();
+                state.layout_manager.layouts.insert(0, hawk_layout);
+                modified = true;
+            }
+
+            if state.layout_manager.active_layout.is_none() {
+                state.layout_manager.active_layout = Some("Hawk".to_string());
+                modified = true;
+            }
+
+            if modified {
+                if let Ok(json) = serde_json::to_string_pretty(&state) {
+                    let _ = data::write_json_to_file(&json, data::SAVED_STATE_PATH);
+                }
+            }
+
+            state_to_saved_state(state)
+        }
         Err(e) => {
             log::info!(
                 "No existing state found ({}). Initializing default Hawk template...",
                 e
             );
 
-            let state = data::default_state();
+            let mut state = data::default_state();
+            if state.layout_manager.active_layout.is_none() {
+                state.layout_manager.active_layout = Some("Hawk".to_string());
+            }
+
             if let Ok(json) = serde_json::to_string_pretty(&state) {
                 let _ = data::write_json_to_file(&json, data::SAVED_STATE_PATH);
             }
 
             state_to_saved_state(state)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hawk_template_injection_when_missing() {
+        let mut state = data::State::default();
+        state.layout_manager.layouts = vec![data::Layout {
+            name: "CustomLayout".to_string(),
+            dashboard: data::Dashboard::default(),
+        }];
+        assert!(!state.layout_manager.layouts.iter().any(|l| l.name == "Hawk"));
+
+        // Simulate logic in load_saved_state:
+        if !state.layout_manager.layouts.iter().any(|l| l.name == "Hawk") {
+            let hawk_layout = data::default_hawk_layout();
+            state.layout_manager.layouts.insert(0, hawk_layout);
+        }
+        if state.layout_manager.active_layout.is_none() {
+            state.layout_manager.active_layout = Some("Hawk".to_string());
+        }
+
+        assert_eq!(state.layout_manager.layouts.len(), 2);
+        assert_eq!(state.layout_manager.layouts[0].name, "Hawk");
+        assert_eq!(state.layout_manager.layouts[1].name, "CustomLayout");
+        assert_eq!(state.layout_manager.active_layout.as_deref(), Some("Hawk"));
+
+        let saved = state_to_saved_state(state);
+        assert_eq!(saved.layout_manager.layouts.len(), 2);
+        let active = saved.layout_manager.active_layout_id().unwrap();
+        assert_eq!(active.name, "Hawk");
     }
 }

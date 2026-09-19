@@ -78,6 +78,7 @@ fn test_full_workspace_bundle_export_import() {
         audio_cfg: None,
         size_in_quote_ccy: Some(exchange::SizeUnit::Base),
         default_kline_config: None,
+        drawings: None,
     };
 
     let bundle = ConfigBundle::new_workspace(
@@ -252,6 +253,7 @@ fn test_workspace_bundle_kline_config_persistence() {
         audio_cfg: None,
         size_in_quote_ccy: None,
         default_kline_config: Some(custom_cfg),
+        drawings: None,
     };
 
     let bundle = ConfigBundle::new_workspace(ws, None);

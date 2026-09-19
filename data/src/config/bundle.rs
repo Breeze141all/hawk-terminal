@@ -48,6 +48,8 @@ pub struct WorkspaceBundle {
     pub size_in_quote_ccy: Option<exchange::SizeUnit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_kline_config: Option<crate::chart::kline::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drawings: Option<Vec<crate::chart::drawing::DrawingRecord>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,7 @@ impl ConfigBundle {
                 audio_cfg: Some(state.audio_cfg),
                 size_in_quote_ccy: Some(state.size_in_quote_ccy),
                 default_kline_config: state.default_kline_config,
+                drawings: None,
             };
             return Ok(Self::new_workspace(workspace, None));
         }
@@ -263,6 +266,7 @@ impl ConfigBundle {
                 audio_cfg: None,
                 size_in_quote_ccy: None,
                 default_kline_config: None,
+                drawings: None,
             };
             return Ok(Self::new_workspace(workspace, None));
         }
