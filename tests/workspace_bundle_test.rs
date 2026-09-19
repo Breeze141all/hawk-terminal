@@ -291,3 +291,66 @@ fn test_workspace_bundle_kline_config_persistence() {
         panic!("Expected Workspace payload");
     }
 }
+
+#[test]
+fn test_rolling_vwap_config_serde_backward_compat() {
+    use data::chart::kline::{Config, RollingVwapColors, TpoElementColor};
+
+    // 1. Deserializing legacy JSON without rolling_vwap_colors and rolling_vwap_show_panel
+    let legacy_json = r#"{
+        "position_flow_colors": {
+            "new_longs": "Auto",
+            "new_shorts": "Auto",
+            "long_forced_close": "Auto",
+            "short_forced_close": "Auto"
+        },
+        "rolling_vwap_window_hours": 24,
+        "rolling_vwap_show_7d": true,
+        "rolling_vwap_show_30d": true,
+        "rolling_vwap_show_90d": true,
+        "rolling_vwap_show_365d": true,
+        "liq_show_bands": true,
+        "liq_show_histogram": true,
+        "magnet_mode": true
+    }"#;
+
+    let cfg: Config = serde_json::from_str(legacy_json).expect("Must deserialize legacy Config");
+    assert_eq!(cfg.rolling_vwap_colors, RollingVwapColors::default());
+    assert!(!cfg.rolling_vwap_show_panel);
+
+    // 2. Custom rolling VWAP colors and panel serialization roundtrip
+    let mut custom = Config::factory_default();
+    custom.rolling_vwap_show_panel = true;
+    custom.rolling_vwap_colors = RollingVwapColors {
+        d7: TpoElementColor::Custom([10, 20, 30]),
+        d30: TpoElementColor::Purple,
+        d90: TpoElementColor::White,
+        d365: TpoElementColor::Green,
+    };
+
+    let serialized = serde_json::to_string(&custom).expect("Must serialize");
+    let deserialized: Config = serde_json::from_str(&serialized).expect("Must deserialize");
+    assert_eq!(custom, deserialized);
+    assert!(deserialized.rolling_vwap_show_panel);
+    assert_eq!(deserialized.rolling_vwap_colors.d7_rgb(), [10, 20, 30]);
+}
+
+#[test]
+fn test_from_json_markdown_code_block_stripping() {
+    let layout = Layout {
+        name: "Markdown Test".to_string(),
+        dashboard: Dashboard::default(),
+    };
+    let bundle = ConfigBundle::new_layout(layout, None);
+    let json = bundle.to_json_pretty().unwrap();
+
+    // 1. Enclosed in ```json ... ```
+    let wrapped_json = format!("```json\n{json}\n```");
+    let parsed1 = ConfigBundle::from_json(&wrapped_json).expect("Must parse ```json fence");
+    assert_eq!(parsed1.export_type, ExportType::Layout);
+
+    // 2. Enclosed in ``` ... ```
+    let wrapped_plain = format!("```\n{json}\n```");
+    let parsed2 = ConfigBundle::from_json(&wrapped_plain).expect("Must parse ``` fence");
+    assert_eq!(parsed2.export_type, ExportType::Layout);
+}

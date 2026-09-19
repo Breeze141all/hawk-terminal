@@ -11,6 +11,7 @@ use data::chart::{Autoscale, Basis, PlotData, ViewConfig, indicator::Indicator};
 use exchange::TickerInfo;
 use exchange::fetcher::{FetchRange, FetchRequests, FetchSpec, ReqError, RequestHandler};
 use exchange::util::{Price, PriceStep};
+pub use scale::PriceAxisBadge;
 use scale::linear::PriceInfoLabel;
 use scale::{AxisLabelsX, AxisLabelsY};
 
@@ -68,6 +69,7 @@ pub enum Message {
     AddPriceAlert(f32),
     UpdateAlertPrice(uuid::Uuid, f32),
     ReplayCutoff(u64),
+    AutofillPosition(data::journal::PositionAutofill),
 }
 
 pub trait Chart: PlotConstants + canvas::Program<Message> {
@@ -92,6 +94,10 @@ pub trait Chart: PlotConstants + canvas::Program<Message> {
     fn supports_fit_autoscaling(&self) -> bool;
 
     fn is_empty(&self) -> bool;
+
+    fn y_axis_badges(&self) -> Vec<PriceAxisBadge> {
+        Vec::new()
+    }
 }
 
 fn canvas_interaction<T: Chart>(
@@ -505,7 +511,8 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
         | Message::SelectDrawing(_)
         | Message::AddPriceAlert(_)
         | Message::UpdateAlertPrice(_, _)
-        | Message::ReplayCutoff(_) => return,
+        | Message::ReplayCutoff(_)
+        | Message::AutofillPosition(_) => return,
     }
     chart.invalidate_all();
 }
@@ -579,6 +586,7 @@ pub fn view<'a, T: Chart>(
             cell_height: state.cell_height,
             basis: state.basis,
             chart_bounds: state.bounds,
+            drag_badges: chart.y_axis_badges(),
         })
         .width(Length::Fill)
         .height(Length::Fill);

@@ -650,7 +650,12 @@ impl TimeSeries<HeatmapDataPoint> {
     pub fn new(basis: Basis, tick_size: PriceStep) -> Self {
         let timeframe = match basis {
             Basis::Time(interval) => interval,
-            Basis::Tick(_) => unimplemented!(),
+            Basis::Tick(_) => {
+                log::warn!(
+                    "TimeSeries<HeatmapDataPoint> does not support tick basis; falling back to 1m"
+                );
+                exchange::Timeframe::M1
+            }
         };
 
         Self {
@@ -1030,5 +1035,13 @@ mod tests {
         assert!(ts.datapoints.values().next().unwrap().trades_fetched);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_heatmap_timeseries_tick_basis_fallback() {
+        let step = PriceStep { units: 100 };
+        let basis = Basis::Tick(crate::aggr::TickCount(50));
+        let ts = TimeSeries::<HeatmapDataPoint>::new(basis, step);
+        assert_eq!(ts.interval, Timeframe::M1);
     }
 }

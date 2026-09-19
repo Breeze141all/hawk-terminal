@@ -619,9 +619,6 @@ struct DeOpenInterest {
     pub timestamp: u64,
 }
 
-/// # Panics
-///
-/// Will panic if the `period` is not one of the supported timeframes for open interest
 pub async fn fetch_historical_oi(
     ticker: Ticker,
     range: Option<(u64, u64)>,
@@ -635,7 +632,11 @@ pub async fn fetch_historical_oi(
         Timeframe::H1 => "1h",
         Timeframe::H4 => "4h",
         Timeframe::D1 => "1d",
-        _ => panic!("Unsupported timeframe for open interest: {period}"),
+        _ => {
+            return Err(AdapterError::InvalidRequest(format!(
+                "Unsupported timeframe for open interest: {period}"
+            )));
+        }
     };
 
     let mut url = format!(
@@ -1356,6 +1357,23 @@ pub async fn fetch_trades(
             } else {
                 Err(e)
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_bybit_invalid_open_interest_timeframe() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BybitLinear);
+        let res = fetch_historical_oi(ticker, None, Timeframe::M1).await;
+        match res {
+            Err(crate::adapter::AdapterError::InvalidRequest(msg)) => {
+                assert!(msg.contains("Unsupported timeframe for open interest"));
+            }
+            _other => panic!("Expected InvalidRequest, got other result"),
         }
     }
 }

@@ -30,7 +30,7 @@ A sovereign, native desktop charting and order flow intelligence platform for cr
 | :--- | :--- | :--- |
 | **Windows** | x86_64 | MSVC (`stable-x86_64-pc-windows-msvc`) |
 | **macOS** | Apple Silicon & Intel | Xcode Command Line Tools |
-| **Linux** | x86_64 | `build-essential pkg-config libasound2-dev` |
+| **Linux** | x86_64 | `build-essential pkg-config libasound2-dev libfontconfig1-dev libxcb-render0-dev` |
 
 ---
 

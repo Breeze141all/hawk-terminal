@@ -7,6 +7,15 @@ use iced::{
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
+pub struct ActiveImageViewer {
+    pub entry_id: Option<Uuid>,
+    pub image_name: String,
+    pub ticker: String,
+    pub title: String,
+    pub details: String,
+}
+
+#[derive(Debug, Clone)]
 pub enum Message {
     ToggleJournal,
     SetStatusFilter(Option<TradeStatus>),
@@ -29,6 +38,15 @@ pub enum Message {
     ConfirmCloseTrade,
     CancelClosePrompt,
     SelectTicker(String),
+    PasteScreenshot,
+    PasteScreenshotFromHotkey,
+    PickImageFile,
+    RemoveFormImage(usize),
+    ViewImage(ActiveImageViewer),
+    CloseImageViewer,
+    AttachImageToTrade(Uuid),
+    PasteScreenshotToTrade(Uuid),
+    DeleteTradeImage { entry_id: Uuid, image_name: String },
 }
 
 pub enum Action {
@@ -52,12 +70,14 @@ pub struct Journal {
     pub input_fee: String,
     pub input_tag: String,
     pub input_notes: String,
+    pub input_images: Vec<String>,
 
     // Quick close modal/prompt
     pub closing_id: Option<Uuid>,
     pub closing_exit_price: String,
     pub closing_fee: String,
 
+    pub viewing_image: Option<ActiveImageViewer>,
     pub error_message: Option<String>,
 }
 
@@ -82,12 +102,33 @@ impl Journal {
             input_fee: "0".to_string(),
             input_tag: String::new(),
             input_notes: String::new(),
+            input_images: Vec::new(),
 
             closing_id: None,
             closing_exit_price: String::new(),
             closing_fee: "0".to_string(),
 
+            viewing_image: None,
             error_message: None,
+        }
+    }
+
+    pub fn is_image_modal_open(&self) -> bool {
+        self.viewing_image.is_some()
+    }
+
+    pub fn autofill_trade(&mut self, autofill: data::journal::PositionAutofill) {
+        self.is_shown = true;
+        self.show_add_form = true;
+        self.input_ticker = autofill.ticker;
+        self.input_exchange = autofill.exchange;
+        self.input_side = autofill.side;
+        self.input_entry_price = format_trade_price(autofill.entry_price);
+        self.input_exit_price = format_trade_price(autofill.target_price);
+        self.input_notes = autofill.notes;
+        self.input_size.clear();
+        if self.input_fee.is_empty() {
+            self.input_fee = "0".to_string();
         }
     }
 
@@ -172,6 +213,8 @@ impl Journal {
                     self.input_notes.trim().to_string(),
                 );
 
+                entry.images = std::mem::take(&mut self.input_images);
+
                 if !self.input_exit_price.trim().is_empty()
                     && let Ok(exit_price) = self.input_exit_price.trim().parse::<f64>()
                     && exit_price > 0.0
@@ -193,13 +236,22 @@ impl Journal {
                 self.input_fee = "0".to_string();
                 self.input_tag.clear();
                 self.input_notes.clear();
+                self.input_images.clear();
                 self.error_message = None;
             }
             Message::CancelForm => {
                 self.show_add_form = false;
+                for img in self.input_images.drain(..) {
+                    data::delete_journal_image_files(&img);
+                }
                 self.error_message = None;
             }
             Message::DeleteTrade(id) => {
+                if let Some(entry) = self.entries.iter().find(|e| e.id == id) {
+                    for img in &entry.images {
+                        data::delete_journal_image_files(img);
+                    }
+                }
                 self.entries.retain(|e| e.id != id);
                 self.stats = JournalStats::compute(&self.entries);
                 let _ = data::save_journal(&self.entries);
@@ -244,8 +296,241 @@ impl Journal {
             Message::SelectTicker(ticker) => {
                 return Some(Action::TickerSelected(ticker));
             }
+            Message::PasteScreenshot => match crate::journal_media::save_clipboard_image() {
+                Ok(file_name) => {
+                    if self.show_add_form {
+                        self.input_images.push(file_name);
+                    } else if let Some(first) = self.entries.first_mut() {
+                        first.images.push(file_name);
+                        let _ = data::save_journal(&self.entries);
+                    } else {
+                        self.show_add_form = true;
+                        self.input_images.push(file_name);
+                    }
+                    self.error_message = None;
+                }
+                Err(err) => {
+                    self.error_message = Some(err);
+                }
+            },
+            Message::PasteScreenshotFromHotkey => {
+                if let Ok(file_name) = crate::journal_media::save_clipboard_image() {
+                    if self.show_add_form {
+                        self.input_images.push(file_name);
+                    } else if let Some(first) = self.entries.first_mut() {
+                        first.images.push(file_name);
+                        let _ = data::save_journal(&self.entries);
+                    } else {
+                        self.show_add_form = true;
+                        self.input_images.push(file_name);
+                    }
+                    self.error_message = None;
+                }
+            }
+            Message::PickImageFile => {
+                if let Some(path) = crate::journal_media::pick_image_file() {
+                    match crate::journal_media::import_local_image_file(&path) {
+                        Ok(file_name) => {
+                            self.input_images.push(file_name);
+                            self.error_message = None;
+                        }
+                        Err(err) => {
+                            self.error_message = Some(err);
+                        }
+                    }
+                }
+            }
+            Message::RemoveFormImage(idx) => {
+                if idx < self.input_images.len() {
+                    let file_name = self.input_images.remove(idx);
+                    data::delete_journal_image_files(&file_name);
+                }
+            }
+            Message::ViewImage(viewer) => {
+                self.viewing_image = Some(viewer);
+            }
+            Message::CloseImageViewer => {
+                self.viewing_image = None;
+            }
+            Message::AttachImageToTrade(id) => {
+                if let Some(path) = crate::journal_media::pick_image_file() {
+                    match crate::journal_media::import_local_image_file(&path) {
+                        Ok(file_name) => {
+                            if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+                                entry.images.push(file_name);
+                                let _ = data::save_journal(&self.entries);
+                            }
+                            self.error_message = None;
+                        }
+                        Err(err) => {
+                            self.error_message = Some(err);
+                        }
+                    }
+                }
+            }
+            Message::PasteScreenshotToTrade(id) => {
+                match crate::journal_media::save_clipboard_image() {
+                    Ok(file_name) => {
+                        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+                            entry.images.push(file_name);
+                            let _ = data::save_journal(&self.entries);
+                        }
+                        self.error_message = None;
+                    }
+                    Err(err) => {
+                        self.error_message = Some(err);
+                    }
+                }
+            }
+            Message::DeleteTradeImage {
+                entry_id,
+                image_name,
+            } => {
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.id == entry_id) {
+                    entry.images.retain(|name| name != &image_name);
+                    data::delete_journal_image_files(&image_name);
+                    let _ = data::save_journal(&self.entries);
+                }
+                if let Some(viewer) = &self.viewing_image
+                    && viewer.image_name == image_name
+                {
+                    self.viewing_image = None;
+                }
+            }
         }
         None
+    }
+
+    pub fn view_image_modal(&self) -> Element<'_, Message> {
+        let Some(viewer) = &self.viewing_image else {
+            return column![].into();
+        };
+
+        let full_path = data::journal_image_path(&viewer.image_name);
+
+        let image_element: Element<'_, Message> = if full_path.exists() {
+            iced::widget::image(iced::widget::image::Handle::from_path(&full_path))
+                .content_fit(iced::ContentFit::Contain)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            container(
+                column![
+                    text("Image file not found on disk")
+                        .size(14)
+                        .color(iced::Color::from_rgb8(239, 68, 68)),
+                    text(full_path.display().to_string())
+                        .size(11)
+                        .color(iced::Color::from_rgb8(150, 150, 150)),
+                ]
+                .spacing(8)
+                .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center)
+            .into()
+        };
+
+        let close_btn = button(icon_text(Icon::Close, 14).align_x(Alignment::Center))
+            .padding([4.0, 8.0])
+            .on_press(Message::CloseImageViewer)
+            .style(|theme, status| style::button::transparent(theme, status, false));
+
+        let delete_btn = if let Some(entry_id) = viewer.entry_id {
+            let img_name = viewer.image_name.clone();
+            button(
+                row![icon_text(Icon::TrashBin, 11), text("Delete Image").size(11)]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+            )
+            .padding([4.0, 8.0])
+            .on_press(Message::DeleteTradeImage {
+                entry_id,
+                image_name: img_name,
+            })
+            .style(|theme, status| style::button::cancel(theme, status, false))
+        } else {
+            button(
+                row![icon_text(Icon::TrashBin, 11), text("Remove").size(11)]
+                    .spacing(4)
+                    .align_y(Alignment::Center),
+            )
+            .padding([4.0, 8.0])
+            .on_press(Message::CloseImageViewer)
+            .style(|theme, status| style::button::cancel(theme, status, false))
+        };
+
+        let ticker_badge: Element<'_, Message> = if !viewer.ticker.is_empty() {
+            container(text(&viewer.ticker).size(12).font(iced::Font {
+                weight: iced::font::Weight::Bold,
+                ..Default::default()
+            }))
+            .padding([3.0, 8.0])
+            .style(style::journal_stat_box)
+            .into()
+        } else {
+            column![].into()
+        };
+
+        let modal_header = row![
+            ticker_badge,
+            column![
+                text(&viewer.title).size(14).font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Default::default()
+                }),
+                text(&viewer.details)
+                    .size(11)
+                    .color(iced::Color::from_rgb8(180, 180, 180)),
+            ]
+            .spacing(2),
+            space::horizontal(),
+            delete_btn,
+            close_btn,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+
+        let inner_card = container(
+            column![
+                modal_header,
+                container(image_element)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(4),
+            ]
+            .spacing(8),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(12)
+        .style(|_theme: &Theme| container::Style {
+            background: Some(iced::Color::from_rgba(0.08, 0.09, 0.11, 0.98).into()),
+            border: iced::border::Border {
+                color: iced::Color::from_rgba(0.3, 0.35, 0.4, 0.6),
+                width: 1.0,
+                radius: 6.0.into(),
+            },
+            ..Default::default()
+        });
+
+        iced::widget::mouse_area(
+            container(
+                iced::widget::mouse_area(inner_card).on_press(Message::ViewImage(viewer.clone())),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(16)
+            .style(|_theme: &Theme| container::Style {
+                background: Some(iced::Color::from_rgba(0.0, 0.0, 0.0, 0.85).into()),
+                ..Default::default()
+            }),
+        )
+        .on_press(Message::CloseImageViewer)
+        .into()
     }
 
     pub fn view(&self, _size: Size) -> Element<'_, Message> {
@@ -306,11 +591,16 @@ impl Journal {
         let trade_cards = self.view_trade_list();
         content = content.push(trade_cards);
 
-        container(content)
+        let panel = container(content)
             .width(330)
             .padding(8)
-            .style(style::journal_panel)
-            .into()
+            .style(style::journal_panel);
+
+        if self.viewing_image.is_some() {
+            iced::widget::stack![panel, self.view_image_modal()].into()
+        } else {
+            panel.into()
+        }
     }
 
     fn view_stats_bar(&self) -> Element<'_, Message> {
@@ -434,43 +724,132 @@ impl Journal {
 
         let ticker_input = text_input("Ticker (e.g. BTCUSDT)", &self.input_ticker)
             .on_input(Message::InputTicker)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let exchange_input = text_input("Exchange (e.g. Binance)", &self.input_exchange)
             .on_input(Message::InputExchange)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let entry_input = text_input("Entry Price", &self.input_entry_price)
             .on_input(Message::InputEntryPrice)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let exit_input = text_input("Exit Price (optional)", &self.input_exit_price)
             .on_input(Message::InputExitPrice)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let size_input = text_input("Size / Qty", &self.input_size)
+            .id("journal_size_input")
             .on_input(Message::InputSize)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let fee_input = text_input("Fee ($)", &self.input_fee)
             .on_input(Message::InputFee)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let tag_input = text_input("Strategy Tag (e.g. Breakout)", &self.input_tag)
             .on_input(Message::InputTag)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
 
         let notes_input = text_input("Notes...", &self.input_notes)
             .on_input(Message::InputNotes)
+            .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
+
+        let mut image_section = column![].spacing(4);
+        let paste_btn = button(
+            row![
+                icon_text(Icon::Journal, 10),
+                text("Paste (Ctrl+V)").size(10),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
+        )
+        .padding([3.0, 6.0])
+        .on_press(Message::PasteScreenshot)
+        .style(|theme, status| style::button::bordered_toggle(theme, status, false));
+
+        let file_btn = button(
+            row![icon_text(Icon::Folder, 10), text("Choose File").size(10),]
+                .spacing(4)
+                .align_y(Alignment::Center),
+        )
+        .padding([3.0, 6.0])
+        .on_press(Message::PickImageFile)
+        .style(|theme, status| style::button::bordered_toggle(theme, status, false));
+
+        let media_buttons = row![paste_btn, file_btn]
+            .spacing(4)
+            .align_y(Alignment::Center);
+        image_section = image_section.push(media_buttons);
+
+        if !self.input_images.is_empty() {
+            let mut thumbs_row = row![].spacing(4);
+            for (idx, img_name) in self.input_images.iter().enumerate() {
+                let thumb_path = data::journal_thumb_path(img_name);
+                let full_path = data::journal_image_path(img_name);
+                let display_path = if thumb_path.exists() {
+                    thumb_path
+                } else {
+                    full_path
+                };
+
+                let thumb_img =
+                    iced::widget::image(iced::widget::image::Handle::from_path(display_path))
+                        .content_fit(iced::ContentFit::Cover)
+                        .width(60)
+                        .height(38);
+
+                let view_btn = button(thumb_img)
+                    .padding(0)
+                    .on_press(Message::ViewImage(ActiveImageViewer {
+                        entry_id: None,
+                        image_name: img_name.clone(),
+                        ticker: self.input_ticker.clone(),
+                        title: format!(
+                            "Preview: {}",
+                            if self.input_ticker.is_empty() {
+                                "New Trade"
+                            } else {
+                                &self.input_ticker
+                            }
+                        ),
+                        details: "Draft Screenshot".to_string(),
+                    }))
+                    .style(|theme, status| style::button::transparent(theme, status, false));
+
+                let remove_btn = button(icon_text(Icon::Close, 9).align_x(Alignment::Center))
+                    .padding([2.0, 4.0])
+                    .on_press(Message::RemoveFormImage(idx))
+                    .style(|theme, status| style::button::cancel(theme, status, false));
+
+                let thumb_card = container(
+                    row![view_btn, remove_btn]
+                        .spacing(2)
+                        .align_y(Alignment::Start),
+                )
+                .padding(2)
+                .style(style::journal_stat_box);
+
+                thumbs_row = thumbs_row.push(thumb_card);
+            }
+            image_section = image_section.push(thumbs_row);
+        }
 
         let action_row = row![
             button(text("Save Trade").size(12).align_x(Alignment::Center))
@@ -498,6 +877,7 @@ impl Journal {
                 row![exit_input, fee_input].spacing(4),
                 tag_input,
                 notes_input,
+                image_section,
                 action_row,
             ]
             .spacing(6),
@@ -620,6 +1000,11 @@ impl Journal {
                 .color(iced::Color::from_rgb8(156, 163, 175)),
         };
 
+        let attach_btn = button(icon_text(Icon::Journal, 10).align_x(Alignment::Center))
+            .padding([2.0, 4.0])
+            .on_press(Message::AttachImageToTrade(entry.id))
+            .style(|theme, status| style::button::transparent(theme, status, false));
+
         let delete_btn = button(icon_text(Icon::TrashBin, 10).align_x(Alignment::Center))
             .padding([2.0, 4.0])
             .on_press(Message::DeleteTrade(entry.id))
@@ -630,6 +1015,7 @@ impl Journal {
             ticker_btn,
             space::horizontal(),
             status_text,
+            attach_btn,
             delete_btn,
         ]
         .spacing(6)
@@ -696,6 +1082,47 @@ impl Journal {
                     .size(10)
                     .color(iced::Color::from_rgb8(160, 160, 160)),
             );
+        }
+
+        if !entry.images.is_empty() {
+            let mut img_row = row![].spacing(4);
+            for img_name in &entry.images {
+                let thumb_path = data::journal_thumb_path(img_name);
+                let full_path = data::journal_image_path(img_name);
+                let display_path = if thumb_path.exists() {
+                    thumb_path
+                } else {
+                    full_path
+                };
+
+                let thumb_widget =
+                    iced::widget::image(iced::widget::image::Handle::from_path(display_path))
+                        .content_fit(iced::ContentFit::Cover)
+                        .width(75)
+                        .height(45);
+
+                let pnl_desc = match entry.pnl {
+                    Some(p) => format!("PnL: ${:.2}", p),
+                    None => "Active position".to_string(),
+                };
+
+                let view_btn = button(thumb_widget)
+                    .padding(1)
+                    .on_press(Message::ViewImage(ActiveImageViewer {
+                        entry_id: Some(entry.id),
+                        image_name: img_name.clone(),
+                        ticker: entry.ticker.clone(),
+                        title: format!("{} ({})", entry.ticker, entry.side),
+                        details: format!(
+                            "{} | Entry: {:.2} | {}",
+                            entry.exchange, entry.entry_price, pnl_desc
+                        ),
+                    }))
+                    .style(|theme, status| style::button::bordered_toggle(theme, status, false));
+
+                img_row = img_row.push(view_btn);
+            }
+            card_col = card_col.push(img_row);
         }
 
         // Timestamp
@@ -787,7 +1214,7 @@ impl Journal {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        container(content)
+        let base = container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(20)
@@ -797,8 +1224,13 @@ impl Journal {
                     background: Some(palette.background.base.color.into()),
                     ..Default::default()
                 }
-            })
-            .into()
+            });
+
+        if self.viewing_image.is_some() {
+            iced::widget::stack![base, self.view_image_modal()].into()
+        } else {
+            base.into()
+        }
     }
 
     fn view_dashboard_kpis(&self) -> Element<'_, Message> {
@@ -1185,43 +1617,133 @@ impl Journal {
 
         let ticker_input = text_input("Ticker (e.g. BTCUSDT)", &self.input_ticker)
             .on_input(Message::InputTicker)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let exchange_input = text_input("Exchange (e.g. Binance)", &self.input_exchange)
             .on_input(Message::InputExchange)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let entry_input = text_input("Entry Price", &self.input_entry_price)
             .on_input(Message::InputEntryPrice)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let exit_input = text_input("Exit Price (optional)", &self.input_exit_price)
             .on_input(Message::InputExitPrice)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let size_input = text_input("Size / Qty", &self.input_size)
+            .id("journal_size_input")
             .on_input(Message::InputSize)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let fee_input = text_input("Fee ($)", &self.input_fee)
             .on_input(Message::InputFee)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let tag_input = text_input("Strategy Tag (e.g. Breakout, Footprint)", &self.input_tag)
             .on_input(Message::InputTag)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
 
         let notes_input = text_input("Trade Notes & Observations...", &self.input_notes)
             .on_input(Message::InputNotes)
+            .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
+
+        let mut image_section = column![].spacing(6);
+        let paste_btn = button(
+            row![
+                icon_text(Icon::Journal, 12),
+                text("Paste Screenshot (Ctrl+V)").size(11),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([5.0, 12.0])
+        .on_press(Message::PasteScreenshot)
+        .style(|theme, status| style::button::bordered_toggle(theme, status, false));
+
+        let file_btn = button(
+            row![
+                icon_text(Icon::Folder, 12),
+                text("Choose Local File...").size(11),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([5.0, 12.0])
+        .on_press(Message::PickImageFile)
+        .style(|theme, status| style::button::bordered_toggle(theme, status, false));
+
+        let mut media_row = row![paste_btn, file_btn]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+        if !self.input_images.is_empty() {
+            for (idx, img_name) in self.input_images.iter().enumerate() {
+                let thumb_path = data::journal_thumb_path(img_name);
+                let full_path = data::journal_image_path(img_name);
+                let display_path = if thumb_path.exists() {
+                    thumb_path
+                } else {
+                    full_path
+                };
+
+                let thumb_img =
+                    iced::widget::image(iced::widget::image::Handle::from_path(display_path))
+                        .content_fit(iced::ContentFit::Cover)
+                        .width(70)
+                        .height(44);
+
+                let view_btn = button(thumb_img)
+                    .padding(0)
+                    .on_press(Message::ViewImage(ActiveImageViewer {
+                        entry_id: None,
+                        image_name: img_name.clone(),
+                        ticker: self.input_ticker.clone(),
+                        title: format!(
+                            "Preview: {}",
+                            if self.input_ticker.is_empty() {
+                                "New Trade"
+                            } else {
+                                &self.input_ticker
+                            }
+                        ),
+                        details: "Draft Screenshot".to_string(),
+                    }))
+                    .style(|theme, status| style::button::transparent(theme, status, false));
+
+                let remove_btn = button(icon_text(Icon::Close, 10).align_x(Alignment::Center))
+                    .padding([2.0, 5.0])
+                    .on_press(Message::RemoveFormImage(idx))
+                    .style(|theme, status| style::button::cancel(theme, status, false));
+
+                let thumb_card = container(
+                    row![view_btn, remove_btn]
+                        .spacing(3)
+                        .align_y(Alignment::Start),
+                )
+                .padding(2)
+                .style(style::journal_stat_box);
+
+                media_row = media_row.push(thumb_card);
+            }
+        }
+        image_section = image_section.push(media_row);
 
         let buttons = row![
             button(text("Save Trade").size(12).align_x(Alignment::Center))
@@ -1275,6 +1797,7 @@ impl Journal {
                     .width(Length::FillPortion(2)),
             ]
             .spacing(10),
+            image_section,
             buttons,
         ]
         .spacing(10);
@@ -1336,13 +1859,17 @@ impl Journal {
                 .size(10)
                 .width(130)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
+            text("CHART")
+                .size(10)
+                .width(75)
+                .color(iced::Color::from_rgb8(150, 150, 150)),
             text("NOTES")
                 .size(10)
                 .width(Length::Fill)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("ACTIONS")
                 .size(10)
-                .width(110)
+                .width(130)
                 .align_x(Alignment::End)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
         ]
@@ -1476,9 +2003,60 @@ impl Journal {
             "-".to_string()
         };
 
+        let chart_elem: Element<'_, Message> = if let Some(first_img) = entry.images.first() {
+            let thumb_path = data::journal_thumb_path(first_img);
+            let full_path = data::journal_image_path(first_img);
+            let display_path = if thumb_path.exists() {
+                thumb_path
+            } else {
+                full_path
+            };
+
+            let thumb_img =
+                iced::widget::image(iced::widget::image::Handle::from_path(display_path))
+                    .content_fit(iced::ContentFit::Cover)
+                    .width(60)
+                    .height(34);
+
+            let pnl_desc = match entry.pnl {
+                Some(p) => format!("PnL: ${:.2}", p),
+                None => "Active position".to_string(),
+            };
+
+            button(thumb_img)
+                .padding(0)
+                .on_press(Message::ViewImage(ActiveImageViewer {
+                    entry_id: Some(entry.id),
+                    image_name: first_img.clone(),
+                    ticker: entry.ticker.clone(),
+                    title: format!("{} ({})", entry.ticker, entry.side),
+                    details: format!(
+                        "{} | Entry: {:.2} | {}",
+                        entry.exchange, entry.entry_price, pnl_desc
+                    ),
+                }))
+                .style(|theme, status| style::button::bordered_toggle(theme, status, false))
+                .into()
+        } else {
+            button(
+                row![icon_text(Icon::Journal, 10), text("+").size(10)]
+                    .spacing(2)
+                    .align_y(Alignment::Center),
+            )
+            .padding([2.0, 6.0])
+            .on_press(Message::AttachImageToTrade(entry.id))
+            .style(|theme, status| style::button::transparent(theme, status, false))
+            .into()
+        };
+
         let delete_btn = button(icon_text(Icon::TrashBin, 11).align_x(Alignment::Center))
             .padding([2.0, 6.0])
             .on_press(Message::DeleteTrade(entry.id))
+            .style(|theme, status| style::button::transparent(theme, status, false));
+
+        let paste_btn = button(icon_text(Icon::Journal, 11).align_x(Alignment::Center))
+            .padding([2.0, 6.0])
+            .on_press(Message::PasteScreenshotToTrade(entry.id))
             .style(|theme, status| style::button::transparent(theme, status, false));
 
         let actions_elem = if entry.status == TradeStatus::Open {
@@ -1487,12 +2065,15 @@ impl Journal {
                     .padding([2.0, 6.0])
                     .on_press(Message::OpenClosePrompt(entry.id))
                     .style(|theme, status| style::button::modifier(theme, status, false)),
+                paste_btn,
                 delete_btn,
             ]
             .spacing(4)
             .align_y(Alignment::Center)
         } else {
-            row![delete_btn].align_y(Alignment::Center)
+            row![paste_btn, delete_btn]
+                .spacing(4)
+                .align_y(Alignment::Center)
         };
 
         let row_content = row![
@@ -1513,13 +2094,14 @@ impl Journal {
                     .color(iced::Color::from_rgb8(130, 130, 130))
             )
             .width(130),
+            container(chart_elem).width(75),
             container(
                 text(&entry.notes)
                     .size(11)
                     .color(iced::Color::from_rgb8(160, 160, 160))
             )
             .width(Length::Fill),
-            container(actions_elem).width(110).align_x(Alignment::End),
+            container(actions_elem).width(130).align_x(Alignment::End),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -1529,5 +2111,60 @@ impl Journal {
             .width(Length::Fill)
             .style(move |theme: &Theme| style::journal_card(theme, is_profit))
             .into()
+    }
+}
+
+fn format_trade_price(p: f64) -> String {
+    if p == 0.0 {
+        return String::new();
+    }
+    let rounded = (p * 100_000_000.0).round() / 100_000_000.0;
+    let s = format!("{:.8}", rounded);
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data::journal::{PositionAutofill, TradeSide};
+
+    #[test]
+    fn test_format_trade_price() {
+        assert_eq!(format_trade_price(0.0), "");
+        assert_eq!(format_trade_price(50000.0), "50000");
+        assert_eq!(format_trade_price(50000.5), "50000.5");
+        assert_eq!(format_trade_price(0.001234), "0.001234");
+    }
+
+    #[test]
+    fn test_journal_autofill_trade() {
+        let mut journal = Journal::new();
+        assert!(!journal.is_shown);
+        assert!(!journal.show_add_form);
+
+        let autofill = PositionAutofill::new(
+            "BTCUSDT".to_string(),
+            "Binance".to_string(),
+            TradeSide::Long,
+            65000.0,
+            64000.0,
+            68000.0,
+            1700000000000,
+        );
+
+        journal.autofill_trade(autofill);
+
+        assert!(journal.is_shown);
+        assert!(journal.show_add_form);
+        assert_eq!(journal.input_ticker, "BTCUSDT");
+        assert_eq!(journal.input_exchange, "Binance");
+        assert_eq!(journal.input_side, TradeSide::Long);
+        assert_eq!(journal.input_entry_price, "65000");
+        assert_eq!(journal.input_exit_price, "68000");
+        assert!(journal.input_notes.contains("SL: 64000.00"));
+        assert!(journal.input_notes.contains("TP: 68000.00"));
+        assert!(journal.input_notes.contains("R:R: 1:3.00"));
+        assert_eq!(journal.input_fee, "0");
+        assert!(journal.input_size.is_empty());
     }
 }

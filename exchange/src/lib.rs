@@ -133,9 +133,7 @@ impl Timeframe {
         Timeframe::MS1000,
     ];
 
-    /// # Panics
-    ///
-    /// Will panic if the `Timeframe` is not one of the defined variants
+    /// Returns duration in minutes. For subminute timeframes (`MS100`..`MS1000`), returns 0.
     pub fn to_minutes(self) -> u16 {
         match self {
             Timeframe::M1 => 1,
@@ -148,7 +146,23 @@ impl Timeframe {
             Timeframe::H4 => 240,
             Timeframe::H12 => 720,
             Timeframe::D1 => 1440,
-            _ => panic!("Invalid timeframe: {:?}", self),
+            Timeframe::MS100
+            | Timeframe::MS200
+            | Timeframe::MS300
+            | Timeframe::MS500
+            | Timeframe::MS1000 => 0,
+        }
+    }
+
+    /// Returns duration in minutes if the timeframe is at least 1 minute, or `None` for subminute timeframes.
+    pub fn try_to_minutes(self) -> Option<u16> {
+        match self {
+            Timeframe::MS100
+            | Timeframe::MS200
+            | Timeframe::MS300
+            | Timeframe::MS500
+            | Timeframe::MS1000 => None,
+            _ => Some(self.to_minutes()),
         }
     }
 
@@ -1219,5 +1233,27 @@ mod tests {
                 .unwrap()
                 .contains("trades-2026-09-18.bin")
         );
+    }
+
+    #[test]
+    fn test_timeframe_subminute_and_minutes() {
+        let subminute = [
+            Timeframe::MS100,
+            Timeframe::MS200,
+            Timeframe::MS300,
+            Timeframe::MS500,
+            Timeframe::MS1000,
+        ];
+        for tf in subminute {
+            assert_eq!(tf.to_minutes(), 0);
+            assert_eq!(tf.try_to_minutes(), None);
+        }
+
+        assert_eq!(Timeframe::M1.to_minutes(), 1);
+        assert_eq!(Timeframe::M1.try_to_minutes(), Some(1));
+        assert_eq!(Timeframe::H1.to_minutes(), 60);
+        assert_eq!(Timeframe::H1.try_to_minutes(), Some(60));
+        assert_eq!(Timeframe::D1.to_minutes(), 1440);
+        assert_eq!(Timeframe::D1.try_to_minutes(), Some(1440));
     }
 }

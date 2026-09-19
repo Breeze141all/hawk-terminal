@@ -352,6 +352,22 @@ impl AudioStream {
     ) -> Option<String> {
         let cfg = self.should_play_sound(stream)?;
 
+        let play_one = |this: &mut Self, s: SoundType| -> Option<String> {
+            match this.play(s) {
+                Ok(()) => None,
+                Err(err) => {
+                    let msg = err.to_string();
+                    log::error!("Audio play error: {msg}");
+
+                    if this.disable_audio(err) {
+                        Some(format!("Audio disabled: {msg}"))
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
         match cfg.threshold {
             data::audio::Threshold::Count(v) => {
                 let (buy_count, sell_count) =
@@ -381,22 +397,6 @@ impl AudioStream {
                     }
                 };
 
-                let play_one = |this: &mut Self, s: SoundType| -> Option<String> {
-                    match this.play(s) {
-                        Ok(()) => None,
-                        Err(err) => {
-                            let msg = err.to_string();
-                            log::error!("Audio play error: {msg}");
-
-                            if this.disable_audio(err) {
-                                Some(format!("Audio disabled: {msg}"))
-                            } else {
-                                None
-                            }
-                        }
-                    }
-                };
-
                 match buy_count.cmp(&sell_count) {
                     std::cmp::Ordering::Greater => play_one(self, sound(buy_count, false)),
                     std::cmp::Ordering::Less => play_one(self, sound(sell_count, true)),
@@ -404,7 +404,43 @@ impl AudioStream {
                         .or_else(|| play_one(self, sound(sell_count, true))),
                 }
             }
-            data::audio::Threshold::Qty(_) => todo!(),
+            data::audio::Threshold::Qty(v) => {
+                let (buy_qty, sell_qty) =
+                    trades_buffer
+                        .iter()
+                        .fold((0.0f32, 0.0f32), |(buy_q, sell_q), trade| {
+                            if trade.is_sell {
+                                (buy_q, sell_q + trade.qty)
+                            } else {
+                                (buy_q + trade.qty, sell_q)
+                            }
+                        });
+
+                if buy_qty < v && sell_qty < v {
+                    return None;
+                }
+
+                let sound = |qty: f32, is_sell: bool| {
+                    if qty > (v * HARD_THRESHOLD as f32) {
+                        if is_sell {
+                            SoundType::HardSell
+                        } else {
+                            SoundType::HardBuy
+                        }
+                    } else if is_sell {
+                        SoundType::Sell
+                    } else {
+                        SoundType::Buy
+                    }
+                };
+
+                match buy_qty.total_cmp(&sell_qty) {
+                    std::cmp::Ordering::Greater => play_one(self, sound(buy_qty, false)),
+                    std::cmp::Ordering::Less => play_one(self, sound(sell_qty, true)),
+                    std::cmp::Ordering::Equal => play_one(self, sound(buy_qty, false))
+                        .or_else(|| play_one(self, sound(sell_qty, true))),
+                }
+            }
         }
     }
 
@@ -432,5 +468,59 @@ impl From<&AudioStream> for data::AudioStream {
             volume: audio_stream.volume,
             streams,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::Ticker;
+    use exchange::util::Price;
+
+    #[test]
+    fn test_audio_threshold_qty() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ser_ticker = exchange::SerTicker::from_parts(ticker);
+        let mut streams = FxHashMap::default();
+        streams.insert(
+            ser_ticker,
+            StreamCfg {
+                enabled: true,
+                threshold: data::audio::Threshold::Qty(10.0),
+            },
+        );
+
+        let data_stream = data::AudioStream {
+            streams,
+            volume: Some(1.0),
+        };
+
+        let (mut audio_stream, _) = AudioStream::new(data_stream);
+        let stream_kind = StreamKind::DepthAndTrades {
+            ticker_info: exchange::TickerInfo::new(ticker, 0.1, 0.001, None),
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        // Sub-threshold trades (total qty 5.0 < 10.0) -> None
+        let small_trades = vec![Trade {
+            time: 1000,
+            is_sell: false,
+            price: Price::from_f32(100.0),
+            qty: 5.0,
+        }];
+        assert_eq!(
+            audio_stream.try_play_sound(&stream_kind, &small_trades),
+            None
+        );
+
+        // Above-threshold trades (total qty 15.0 >= 10.0) -> executes without panic
+        let big_trades = vec![Trade {
+            time: 1000,
+            is_sell: false,
+            price: Price::from_f32(100.0),
+            qty: 15.0,
+        }];
+        let _ = audio_stream.try_play_sound(&stream_kind, &big_trades);
     }
 }

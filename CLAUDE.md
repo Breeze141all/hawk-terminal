@@ -27,7 +27,7 @@ cargo fmt --all
 
 ## System Dependencies
 
-- **Linux**: `sudo apt install build-essential pkg-config libasound2-dev`
+- **Linux**: `sudo apt install build-essential pkg-config libasound2-dev libfontconfig1-dev libxcb-render0-dev`
 - **macOS**: `xcode-select --install`
 - **Windows**: None required
 

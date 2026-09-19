@@ -724,3 +724,6 @@ pub async fn fetch_open_interest(
         _ => Err(AdapterError::InvalidRequest("Invalid exchange".to_string())),
     }
 }
+
+/// Historical Open Interest retention window supported by exchange APIs (30 days in milliseconds)
+pub const OI_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;

@@ -306,7 +306,10 @@ impl HeatmapChart {
 
         let aggregate_time: u64 = match chart.basis {
             Basis::Time(interval) => interval.into(),
-            Basis::Tick(_) => todo!(),
+            Basis::Tick(_) => {
+                log::warn!("Orderbook heatmap does not support tick basis; falling back to 1m");
+                exchange::Timeframe::M1.into()
+            }
         };
 
         let rounded_depth_update = (depth_update / aggregate_time) * aggregate_time;

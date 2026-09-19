@@ -98,12 +98,17 @@ impl Sidebar {
                 if let super::journal::Message::ToggleJournal = &msg
                     && self.journal_mode == data::JournalMode::Extended
                 {
+                    self.journal.is_shown = false;
                     return (Task::none(), Some(Action::ToggleJournalWindow));
                 }
 
                 let action = self.journal.update(msg);
                 if self.journal.is_shown {
-                    self.tickers_table.is_shown = false;
+                    if self.journal_mode == data::JournalMode::Basic {
+                        self.tickers_table.is_shown = false;
+                    } else {
+                        self.journal.is_shown = false;
+                    }
                 }
 
                 match action {
@@ -144,7 +149,8 @@ impl Sidebar {
         };
 
         let is_table_open = self.tickers_table.is_shown;
-        let is_journal_open = self.journal.is_shown;
+        let is_journal_open =
+            self.journal_mode == data::JournalMode::Basic && self.journal.is_shown;
 
         let nav_buttons = self.nav_buttons(
             is_table_open,
@@ -340,5 +346,58 @@ impl Sidebar {
 
     pub fn tickers_info(&self) -> &FxHashMap<exchange::Ticker, Option<exchange::TickerInfo>> {
         &self.tickers_table.tickers_info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_sidebar(mode: data::JournalMode) -> Sidebar {
+        let (tickers_table, _) = TickersTable::new();
+        Sidebar {
+            state: data::Sidebar::default(),
+            tickers_table,
+            journal: Journal::new(),
+            journal_mode: mode,
+            is_journal_window_open: false,
+        }
+    }
+
+    #[test]
+    fn test_extended_journal_mode_prevents_sidebar_basic_journal() {
+        let mut sidebar = make_test_sidebar(data::JournalMode::Extended);
+
+        // 1. Toggling journal in extended mode emits ToggleJournalWindow and keeps sidebar journal closed
+        let (_, action) = sidebar.update(Message::Journal(super::journal::Message::ToggleJournal));
+        assert!(matches!(action, Some(Action::ToggleJournalWindow)));
+        assert!(!sidebar.journal.is_shown);
+
+        // 2. Even if autofill or another operation set is_shown = true, update cleans it up
+        sidebar.journal.is_shown = true;
+        let (_, action) = sidebar.update(Message::Journal(super::journal::Message::ToggleJournal));
+        assert!(matches!(action, Some(Action::ToggleJournalWindow)));
+        assert!(!sidebar.journal.is_shown);
+
+        // 3. In Extended mode, setting journal mode ensures is_shown is false
+        sidebar.set_journal_mode(data::JournalMode::Extended);
+        assert!(!sidebar.journal.is_shown);
+    }
+
+    #[test]
+    fn test_basic_journal_mode_opens_sidebar_journal() {
+        let mut sidebar = make_test_sidebar(data::JournalMode::Basic);
+
+        // 1. Toggling journal in basic mode toggles journal.is_shown directly
+        let (_, action) = sidebar.update(Message::Journal(super::journal::Message::ToggleJournal));
+        assert!(action.is_none());
+        assert!(sidebar.journal.is_shown);
+
+        // 2. When basic journal is shown, tickers table is hidden
+        assert!(!sidebar.tickers_table.is_shown);
+
+        // 3. Toggling again closes it
+        let (_, _) = sidebar.update(Message::Journal(super::journal::Message::ToggleJournal));
+        assert!(!sidebar.journal.is_shown);
     }
 }

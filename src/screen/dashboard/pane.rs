@@ -45,6 +45,7 @@ pub enum Effect {
     SwitchTickersInGroup(TickerInfo),
     FocusWidget(iced::widget::Id),
     TakeScreenshot(window::Id),
+    AutofillJournal(data::journal::PositionAutofill),
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -87,6 +88,7 @@ pub enum Event {
     ChartInteraction(super::chart::Message),
     PanelInteraction(super::panel::Message),
     ToggleIndicator(UiIndicator),
+    ToggleIndicatorSettings(KlineIndicator),
     DeleteNotification(usize),
     ReorderIndicator(column_drag::DragEvent),
     ClusterKindSelected(data::chart::kline::ClusterKind),
@@ -382,7 +384,16 @@ impl State {
                                 .map(|ti| kline_stream(ti, tf))
                                 .collect()
                         },
-                        || todo!("WIP: ComparisonChart does not support tick basis"),
+                        || {
+                            log::warn!(
+                                "ComparisonChart does not support tick basis; falling back to 1m"
+                            );
+                            tickers
+                                .iter()
+                                .copied()
+                                .map(|ti| kline_stream(ti, Timeframe::M1))
+                                .collect()
+                        },
                     );
 
                     (content, streams)
@@ -401,7 +412,8 @@ impl State {
         match &mut self.content {
             Content::Kline { chart, .. } => {
                 let Some(chart) = chart else {
-                    panic!("Kline chart wasn't initialized when inserting open interest");
+                    log::warn!("Kline chart was uninitialized when inserting open interest");
+                    return;
                 };
                 chart.insert_open_interest(req_id, oi);
             }
@@ -480,7 +492,8 @@ impl State {
                 chart, indicators, ..
             } => {
                 let Some(chart) = chart else {
-                    panic!("chart wasn't initialized when inserting klines");
+                    log::warn!("Kline chart was uninitialized when inserting klines");
+                    return;
                 };
 
                 if let Some(id) = req_id {
@@ -513,7 +526,8 @@ impl State {
             }
             Content::Comparison(chart) => {
                 let Some(chart) = chart else {
-                    panic!("Comparison chart wasn't initialized when inserting klines");
+                    log::warn!("Comparison chart was uninitialized when inserting klines");
+                    return;
                 };
 
                 if let Some(id) = req_id {
@@ -1076,6 +1090,7 @@ impl State {
                             id,
                             chart.basis(),
                             indicators,
+                            chart.expanded_indicator,
                         )
                     };
 
@@ -1258,6 +1273,9 @@ impl State {
                         c.update_alert_price(*id, *price);
                         data::AlertStore::update_price(*id, *price);
                     }
+                    chart::Message::AutofillPosition(autofill) => {
+                        return Some(Effect::AutofillJournal(autofill.clone()));
+                    }
                     _ => {
                         super::chart::update(c, &msg);
                     }
@@ -1271,6 +1289,11 @@ impl State {
             },
             Event::ToggleIndicator(ind) => {
                 self.content.toggle_indicator(ind);
+            }
+            Event::ToggleIndicatorSettings(ind) => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.toggle_indicator_settings(ind);
+                }
             }
             Event::DeleteNotification(idx) => {
                 if idx < self.notifications.len() {
@@ -1636,6 +1659,20 @@ impl State {
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetWidth(w) => {
                             c.update_selected_drawing_width(w);
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionProfitColor(color) => {
+                            c.update_selected_position_profit_color(color);
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionStopColor(color) => {
+                            c.update_selected_position_stop_color(color);
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionEntryColor(color) => {
+                            c.update_selected_position_entry_color(color);
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::AutofillJournal => {
+                            if let Some(autofill) = c.find_target_position() {
+                                return Some(Effect::AutofillJournal(autofill));
+                            }
                         }
                     }
                 }
@@ -2126,18 +2163,31 @@ impl State {
         if show_toolbar && let Content::Kline { chart: Some(c), .. } = &self.content {
             let active_tool = c.active_drawing_tool();
             let has_drawings = !c.drawings.is_empty();
+            let magnet_mode = c.config().magnet_mode;
+            let current_cfg = c.config();
 
-            let toolbar =
-                widget::chart::drawing_toolbar::view(active_tool, has_drawings, move |action| {
-                    match action {
-                        widget::chart::drawing_toolbar::ToolbarAction::SelectTool(tool) => {
-                            Message::PaneEvent(pane, Event::SelectDrawingTool(tool))
-                        }
-                        widget::chart::drawing_toolbar::ToolbarAction::ClearDrawings => {
-                            Message::PaneEvent(pane, Event::ClearDrawings)
-                        }
+            let toolbar = widget::chart::drawing_toolbar::view(
+                active_tool,
+                has_drawings,
+                magnet_mode,
+                move |action| match action {
+                    widget::chart::drawing_toolbar::ToolbarAction::SelectTool(tool) => {
+                        Message::PaneEvent(pane, Event::SelectDrawingTool(tool))
                     }
-                });
+                    widget::chart::drawing_toolbar::ToolbarAction::ClearDrawings => {
+                        Message::PaneEvent(pane, Event::ClearDrawings)
+                    }
+                    widget::chart::drawing_toolbar::ToolbarAction::ToggleMagnet => {
+                        let mut new_cfg = current_cfg;
+                        new_cfg.magnet_mode = !new_cfg.magnet_mode;
+                        Message::VisualConfigChanged(
+                            pane,
+                            data::layout::pane::VisualConfig::Kline(new_cfg),
+                            false,
+                        )
+                    }
+                },
+            );
 
             let toolbar_pos = self
                 .drawing_toolbar_pos
@@ -2792,7 +2842,11 @@ impl Content {
                 }
                 chart.toggle_indicator(ind);
             }
-            _ => panic!("indicator toggle on {indicator:?} pane",),
+            _ => {
+                log::error!(
+                    "Cannot toggle indicator {indicator:?} on non-indicator pane (ignored)"
+                );
+            }
         }
     }
 
@@ -2804,7 +2858,7 @@ impl Content {
             | Content::Ladder(_)
             | Content::Starter
             | Content::Comparison(_) => {
-                panic!("indicator reorder on {} pane", self)
+                log::error!("Cannot reorder indicators on {self} pane (ignored)");
             }
         }
     }

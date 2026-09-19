@@ -38,12 +38,12 @@ pub fn default_theme() -> Custom {
     Custom::new(
         "Hawk".to_string(),
         Palette {
-            background: Color::from_rgb8(24, 22, 22),
-            text: Color::from_rgb8(197, 201, 197),
-            primary: Color::from_rgb8(200, 200, 200),
-            success: Color::from_rgb8(45, 212, 191),
-            danger: Color::from_rgb8(251, 113, 133),
-            warning: Color::from_rgb8(238, 216, 139),
+            background: Color::from_rgb8(18, 14, 13),
+            text: Color::from_rgb8(235, 225, 215),
+            primary: Color::from_rgb8(235, 84, 42),
+            success: Color::from_rgb8(235, 225, 215),
+            danger: Color::from_rgb8(235, 84, 42),
+            warning: Color::from_rgb8(234, 179, 74),
         },
     )
 }
@@ -57,6 +57,20 @@ pub fn deeptrades_theme() -> Custom {
             primary: Color::from_rgb8(190, 190, 190),
             success: Color::from_rgb8(34, 197, 94),
             danger: Color::from_rgb8(168, 85, 247),
+            warning: Color::from_rgb8(238, 216, 139),
+        },
+    )
+}
+
+pub fn flowsurface_legacy_theme() -> Custom {
+    Custom::new(
+        "Flowsurface Classic".to_string(),
+        Palette {
+            background: Color::from_rgb8(24, 22, 22),
+            text: Color::from_rgb8(197, 201, 197),
+            primary: Color::from_rgb8(200, 200, 200),
+            success: Color::from_rgb8(45, 212, 191),
+            danger: Color::from_rgb8(251, 113, 133),
             warning: Color::from_rgb8(238, 216, 139),
         },
     )
@@ -76,6 +90,10 @@ impl Serialize for Theme {
                 },
                 "DeepTrades" => SerTheme {
                     name: "deeptrades".to_string(),
+                    palette: None,
+                },
+                "Flowsurface Classic" => SerTheme {
+                    name: "flowsurface_classic".to_string(),
                     palette: None,
                 },
                 _ => SerTheme {
@@ -141,6 +159,7 @@ fn parse_builtin_theme_name(s: &str) -> Option<iced_core::Theme> {
         "oxocarbon" => Some(iced_core::Theme::Oxocarbon),
         "hawk" | "flowsurface" => Some(Theme::default().0),
         "deeptrades" => Some(iced_core::Theme::Custom(deeptrades_theme().into())),
+        "flowsurface_classic" => Some(iced_core::Theme::Custom(flowsurface_legacy_theme().into())),
         _ => None,
     }
 }
@@ -383,5 +402,27 @@ mod tests {
             _ => String::new(),
         };
         assert_eq!(name, "DeepTrades");
+
+        let t_hawk: Theme = serde_json::from_str(r#"{"name": "hawk"}"#).unwrap();
+        let name_hawk = match t_hawk.0 {
+            iced_core::Theme::Custom(ref c) => c.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(name_hawk, "Hawk");
+        let pal_hawk = t_hawk.0.palette();
+        assert_eq!(pal_hawk.background, Color::from_rgb8(18, 14, 13));
+        assert_eq!(pal_hawk.primary, Color::from_rgb8(235, 84, 42));
+        assert_eq!(pal_hawk.success, Color::from_rgb8(235, 225, 215));
+        assert_eq!(pal_hawk.danger, Color::from_rgb8(235, 84, 42));
+
+        let t_legacy: Theme = serde_json::from_str(r#"{"name": "flowsurface_classic"}"#).unwrap();
+        let name_legacy = match t_legacy.0 {
+            iced_core::Theme::Custom(c) => c.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(name_legacy, "Flowsurface Classic");
+
+        let ser = serde_json::to_string(&t_hawk).unwrap();
+        assert_eq!(ser, r#"{"name":"hawk"}"#);
     }
 }

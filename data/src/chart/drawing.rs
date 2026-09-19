@@ -30,7 +30,39 @@ pub enum DrawingKind {
         stop_price: f32,
         target_price: f32,
         is_long: bool,
+        #[serde(default)]
+        style: Option<PositionStyle>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PositionStyle {
+    pub profit_color: [f32; 4],
+    pub stop_color: [f32; 4],
+    #[serde(default = "default_entry_color")]
+    pub entry_color: [f32; 4],
+}
+
+pub fn default_profit_color() -> [f32; 4] {
+    [0.12, 0.78, 0.42, 0.2]
+}
+
+pub fn default_stop_color() -> [f32; 4] {
+    [0.88, 0.24, 0.24, 0.2]
+}
+
+pub fn default_entry_color() -> [f32; 4] {
+    [0.85, 0.9, 0.95, 0.9]
+}
+
+impl Default for PositionStyle {
+    fn default() -> Self {
+        Self {
+            profit_color: default_profit_color(),
+            stop_color: default_stop_color(),
+            entry_color: default_entry_color(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -132,6 +164,7 @@ impl Drawing {
                 stop_price,
                 target_price,
                 is_long,
+                style: Some(PositionStyle::default()),
             },
             color,
             width,
@@ -200,6 +233,37 @@ impl Drawing {
             } => vec![*entry, (entry.0, *target_price), (entry.0, *stop_price)],
         }
     }
+
+    pub fn position_style(&self) -> PositionStyle {
+        match &self.kind {
+            DrawingKind::Position { style: Some(s), .. } => *s,
+            _ => PositionStyle::default(),
+        }
+    }
+
+    pub fn set_position_profit_color(&mut self, color: [f32; 4]) {
+        if let DrawingKind::Position { ref mut style, .. } = self.kind {
+            let mut s = style.unwrap_or_default();
+            s.profit_color = color;
+            *style = Some(s);
+        }
+    }
+
+    pub fn set_position_stop_color(&mut self, color: [f32; 4]) {
+        if let DrawingKind::Position { ref mut style, .. } = self.kind {
+            let mut s = style.unwrap_or_default();
+            s.stop_color = color;
+            *style = Some(s);
+        }
+    }
+
+    pub fn set_position_entry_color(&mut self, color: [f32; 4]) {
+        if let DrawingKind::Position { ref mut style, .. } = self.kind {
+            let mut s = style.unwrap_or_default();
+            s.entry_color = color;
+            *style = Some(s);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +326,37 @@ mod tests {
         let json_without_lock = r#"{"id":"00000000-0000-0000-0000-000000000000","kind":{"HorizontalLine":{"price":65000.0}},"color":[1.0,0.5,0.0,1.0],"width":2.0,"is_selected":false}"#;
         let d_old: Drawing = serde_json::from_str(json_without_lock).unwrap();
         assert!(!d_old.is_locked);
+    }
+
+    #[test]
+    fn test_position_style_serialization_and_backward_compatibility() {
+        // 1. New style serialized and deserialized
+        let mut pos = Drawing::position(
+            (1000, 50000.0),
+            49000.0,
+            53000.0,
+            true,
+            [0.2, 0.8, 0.4, 1.0],
+            1.5,
+        );
+        pos.set_position_profit_color([0.1, 0.9, 0.5, 0.4]);
+        pos.set_position_stop_color([0.9, 0.2, 0.1, 0.5]);
+        let serialized = serde_json::to_string(&pos).unwrap();
+        let deserialized: Drawing = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(pos, deserialized);
+        assert_eq!(
+            deserialized.position_style().profit_color,
+            [0.1, 0.9, 0.5, 0.4]
+        );
+        assert_eq!(
+            deserialized.position_style().stop_color,
+            [0.9, 0.2, 0.1, 0.5]
+        );
+
+        // 2. Backward compatibility: legacy Position JSON without style
+        let legacy_json = r#"{"id":"11111111-1111-1111-1111-111111111111","kind":{"Position":{"entry":[1000,50000.0],"stop_price":49000.0,"target_price":53000.0,"is_long":true}},"color":[0.2,0.8,0.4,1.0],"width":1.0,"is_selected":false,"is_locked":false}"#;
+        let leg_pos: Drawing = serde_json::from_str(legacy_json).unwrap();
+        let style = leg_pos.position_style();
+        assert_eq!(style, PositionStyle::default());
     }
 }

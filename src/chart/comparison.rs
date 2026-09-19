@@ -45,7 +45,10 @@ impl ComparisonChart {
     pub fn new(basis: Basis, tickers: &[TickerInfo], config: Option<Config>) -> Self {
         let timeframe = match basis {
             Basis::Time(tf) => tf,
-            Basis::Tick(_) => todo!("WIP: ComparisonChart does not support tick basis"),
+            Basis::Tick(_) => {
+                log::warn!("ComparisonChart does not support tick basis; falling back to 1m");
+                exchange::Timeframe::M1
+            }
         };
 
         let cfg = config.unwrap_or_default();
@@ -379,7 +382,10 @@ impl ComparisonChart {
                 let reqs = self.collect_fetch_reqs(self.desired_fetch_batches(self.pan));
                 self.fetch_action(reqs)
             }
-            Basis::Tick(_) => unimplemented!(),
+            Basis::Tick(_) => {
+                log::warn!("ComparisonChart does not support tick basis; ignoring change");
+                None
+            }
         }
     }
 
@@ -703,5 +709,30 @@ pub mod series_editor {
         fn clamp(s: &str) -> String {
             s.chars().take(MAX_LABEL_CHARS).collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::adapter::Exchange;
+
+    #[test]
+    fn test_comparison_chart_tick_basis_fallback() {
+        let ticker = exchange::TickerInfo::new(
+            exchange::Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        );
+        let tick_basis = Basis::Tick(data::aggr::TickCount(100));
+
+        // Must not panic on new with tick basis
+        let mut chart = ComparisonChart::new(tick_basis, &[ticker], None);
+        assert_eq!(chart.timeframe, exchange::Timeframe::M1);
+
+        // Must not panic on set_basis with tick basis
+        let action = chart.set_basis(tick_basis);
+        assert!(action.is_none());
     }
 }

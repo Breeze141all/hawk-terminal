@@ -639,7 +639,11 @@ pub fn connect_kline_stream(
                         .join("/");
 
                     let domain = ws_domain_from_market_type(market);
-                    let url = format!("wss://{domain}/stream?streams={stream_str}");
+                    let path = match market {
+                        MarketKind::LinearPerps => "market/stream",
+                        _ => "stream",
+                    };
+                    let url = format!("wss://{domain}/{path}?streams={stream_str}");
 
                     if let Ok(websocket) = connect_ws(domain, &url).await {
                         state = State::Connected(websocket);
@@ -717,6 +721,11 @@ pub fn connect_kline_stream(
                                     exchange,
                                     "Connection closed".to_string(),
                                 ))
+                                .await;
+                        }
+                        OpCode::Ping => {
+                            let _ = ws
+                                .write_frame(fastwebsockets::Frame::pong(msg.payload))
                                 .await;
                         }
                         _ => {}
@@ -807,14 +816,22 @@ async fn fetch_depth(
             101_i32..=500_i32 => 25,
             501_i32..=1000_i32 => 50,
             1001_i32..=5000_i32 => 250,
-            _ => panic!("Invalid depth limit for Spot market"),
+            _ => {
+                return Err(AdapterError::InvalidRequest(format!(
+                    "Invalid depth limit for Spot market: {depth_limit}"
+                )));
+            }
         },
         MarketKind::LinearPerps | MarketKind::InversePerps => match depth_limit {
             ..100 => 2,
             100 => 5,
             500 => 10,
             1000 => 20,
-            _ => panic!("Invalid depth limit for Perp market"),
+            _ => {
+                return Err(AdapterError::InvalidRequest(format!(
+                    "Invalid depth limit for Perp market: {depth_limit}"
+                )));
+            }
         },
     };
 
@@ -976,7 +993,11 @@ pub async fn fetch_klines(
             101..=500 => 2,
             501..=1000 => 5,
             1001..=1500 => 10,
-            _ => panic!("Invalid limit for Inverse Perps market"),
+            _ => {
+                return Err(AdapterError::InvalidRequest(format!(
+                    "Invalid limit for Perp market: {limit_param}"
+                )));
+            }
         },
     };
 
@@ -1207,7 +1228,7 @@ struct DeOpenInterest {
     pub sum: f32,
 }
 
-const THIRTY_DAYS_MS: u64 = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
+const THIRTY_DAYS_MS: u64 = crate::adapter::OI_RETENTION_MS; // 30 days in milliseconds
 
 /// # Panics
 ///
@@ -1255,18 +1276,14 @@ pub async fn fetch_historical_oi(
         // API is limited to 30 days of historical data
         let thirty_days_ago = now_ms.saturating_sub(THIRTY_DAYS_MS);
 
-        if end < thirty_days_ago {
-            let err_msg = format!(
-                "Requested end time {end} is before available data (30 days is the API limit)"
-            );
-            log::error!("{}", err_msg);
-            return Err(AdapterError::InvalidRequest(err_msg));
+        if end <= thirty_days_ago {
+            return Ok(Vec::new());
         }
 
         let end = end.min(now_ms);
 
         let adjusted_start = if start < thirty_days_ago {
-            log::warn!(
+            log::debug!(
                 "Adjusting start time from {} to {} (30 days limit)",
                 start,
                 thirty_days_ago
@@ -2077,5 +2094,50 @@ mod tests {
         assert_eq!(next1, base_t + 10_001);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_historical_oi_beyond_retention_returns_empty() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let old_time = now_ms.saturating_sub(40 * 24 * 60 * 60 * 1000); // 40 days ago
+        let old_end = now_ms.saturating_sub(35 * 24 * 60 * 60 * 1000); // 35 days ago
+
+        let result = fetch_historical_oi(ticker, Some((old_time, old_end)), Timeframe::H1).await;
+        assert!(result.is_ok(), "Expected Ok result, got {:?}", result);
+        assert_eq!(result.unwrap(), Vec::new());
+    }
+
+    #[tokio::test]
+    async fn test_connect_kline_stream_receives_kline() {
+        use iced_futures::futures::StreamExt;
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        let stream =
+            connect_kline_stream(vec![(ticker_info, Timeframe::M3)], MarketKind::LinearPerps);
+        let mut pinned = Box::pin(stream);
+        let mut got_kline = false;
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_secs(6) {
+            if let Some(Event::KlineReceived(_stream_kind, kline)) =
+                tokio::time::timeout(std::time::Duration::from_secs(4), pinned.next())
+                    .await
+                    .ok()
+                    .flatten()
+            {
+                assert_eq!(kline.time % 180_000, 0);
+                assert!(kline.close.to_f32() > 0.0);
+                got_kline = true;
+                break;
+            }
+        }
+        assert!(
+            got_kline,
+            "Did not receive KlineReceived from connect_kline_stream"
+        );
     }
 }

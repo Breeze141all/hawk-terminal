@@ -2,6 +2,7 @@
 
 mod audio;
 mod chart;
+pub mod journal_media;
 mod layout;
 mod logger;
 mod modal;
@@ -103,6 +104,7 @@ enum Message {
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
     OfflineAlertsChecked(Vec<data::chart::alert::PriceAlert>),
+    AutofillJournalFromActiveChart,
 }
 
 impl HawkTerminal {
@@ -258,6 +260,7 @@ impl HawkTerminal {
                     if Some(window) == self.journal_window {
                         self.journal_window = None;
                         self.sidebar.set_journal_window_open(false);
+                        self.sidebar.journal.is_shown = false;
                         return window::close(window);
                     }
 
@@ -292,6 +295,10 @@ impl HawkTerminal {
 
                 if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
+                } else if self.sidebar.journal.is_image_modal_open() {
+                    self.sidebar
+                        .journal
+                        .update(screen::dashboard::journal::Message::CloseImageViewer);
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
                 } else {
@@ -380,6 +387,9 @@ impl HawkTerminal {
                                 }
                             }
                         }
+                        Some(dashboard::Event::AutofillJournal(autofill)) => {
+                            self.apply_journal_autofill(autofill)
+                        }
                         None => Task::none(),
                     };
 
@@ -437,37 +447,7 @@ impl HawkTerminal {
 
                 match action {
                     Some(modal::layout_manager::Action::Select(layout)) => {
-                        let active_popout_keys = self
-                            .active_dashboard()
-                            .popout
-                            .keys()
-                            .copied()
-                            .collect::<Vec<_>>();
-
-                        let window_tasks = Task::batch(
-                            active_popout_keys
-                                .iter()
-                                .map(|&popout_id| window::close::<window::Id>(popout_id))
-                                .collect::<Vec<_>>(),
-                        )
-                        .discard();
-
-                        let old_layout_id = self
-                            .layout_manager
-                            .active_layout_id()
-                            .as_ref()
-                            .map(|layout| layout.unique);
-
-                        return window::collect_window_specs(
-                            active_popout_keys,
-                            dashboard::Message::SavePopoutSpecs,
-                        )
-                        .map(move |msg| Message::Dashboard {
-                            layout_id: old_layout_id,
-                            event: msg,
-                        })
-                        .chain(window_tasks)
-                        .chain(self.load_layout(layout, self.main_window.id));
+                        return self.switch_layout(layout);
                     }
                     Some(modal::layout_manager::Action::Clone(id)) => {
                         let manager = &mut self.layout_manager;
@@ -533,19 +513,31 @@ impl HawkTerminal {
                                         })
                                         .collect::<String>();
                                     let filename = format!("layout_{sanitized_filename}.json");
-                                    let _ = data::save_export_file(&json, &filename);
 
-                                    match window::copy_text_to_clipboard(&json) {
-                                        Ok(()) => {
-                                            self.notifications.push(Toast::info(format!(
-                                                "Layout '{}' copied to clipboard & saved to exports",
-                                                layout.id.name
-                                            )));
-                                        }
-                                        Err(e) => {
-                                            self.notifications.push(Toast::error(format!(
-                                                "Saved to exports, but clipboard failed: {e}"
-                                            )));
+                                    let picked_path = rfd::FileDialog::new()
+                                        .set_title("Export Layout")
+                                        .set_file_name(&filename)
+                                        .add_filter("Hawk Layout (*.json)", &["json"])
+                                        .save_file();
+
+                                    if let Some(path) = picked_path {
+                                        match std::fs::write(&path, &json) {
+                                            Ok(()) => {
+                                                let display_name = path
+                                                    .file_name()
+                                                    .and_then(|n| n.to_str())
+                                                    .unwrap_or(&filename);
+                                                self.notifications.push(Toast::info(format!(
+                                                    "Layout '{}' exported to {display_name}",
+                                                    layout.id.name
+                                                )));
+                                            }
+                                            Err(e) => {
+                                                self.notifications.push(Toast::error(format!(
+                                                    "Failed to save to {}: {e}",
+                                                    path.display()
+                                                )));
+                                            }
                                         }
                                     }
                                 }
@@ -595,18 +587,30 @@ impl HawkTerminal {
                             Ok(json) => {
                                 let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
                                 let filename = format!("workspace_{timestamp}.json");
-                                let _ = data::save_export_file(&json, &filename);
 
-                                match window::copy_text_to_clipboard(&json) {
-                                    Ok(()) => {
-                                        self.notifications.push(Toast::info(
-                                            "Workspace copied to clipboard & saved to exports",
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        self.notifications.push(Toast::error(format!(
-                                            "Saved to exports, but clipboard failed: {e}"
-                                        )));
+                                let picked_path = rfd::FileDialog::new()
+                                    .set_title("Export Workspace")
+                                    .set_file_name(&filename)
+                                    .add_filter("Hawk Workspace (*.json)", &["json"])
+                                    .save_file();
+
+                                if let Some(path) = picked_path {
+                                    match std::fs::write(&path, &json) {
+                                        Ok(()) => {
+                                            let display_name = path
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or(&filename);
+                                            self.notifications.push(Toast::info(format!(
+                                                "Workspace exported to {display_name}",
+                                            )));
+                                        }
+                                        Err(e) => {
+                                            self.notifications.push(Toast::error(format!(
+                                                "Failed to save to {}: {e}",
+                                                path.display()
+                                            )));
+                                        }
                                     }
                                 }
                             }
@@ -624,6 +628,33 @@ impl HawkTerminal {
                             )));
                         }
                     }
+                    Some(modal::layout_manager::Action::ImportFromFile) => {
+                        let picked_path = rfd::FileDialog::new()
+                            .set_title("Import Hawk Layout or Workspace")
+                            .add_filter("Hawk Config (*.json)", &["json"])
+                            .pick_file();
+
+                        if let Some(path) = picked_path {
+                            match std::fs::read_to_string(&path) {
+                                Err(e) => {
+                                    self.notifications.push(Toast::error(format!(
+                                        "Failed to read {}: {e}",
+                                        path.display()
+                                    )));
+                                }
+                                Ok(text) => match data::ConfigBundle::from_json(&text) {
+                                    Err(e) => {
+                                        self.notifications.push(Toast::error(format!(
+                                            "Invalid layout or workspace JSON: {e}"
+                                        )));
+                                    }
+                                    Ok(bundle) => {
+                                        return self.apply_imported_bundle(bundle);
+                                    }
+                                },
+                            }
+                        }
+                    }
                     Some(modal::layout_manager::Action::ImportFromClipboard) => {
                         match window::read_text_from_clipboard() {
                             Err(e) => {
@@ -637,78 +668,9 @@ impl HawkTerminal {
                                         "Invalid layout or workspace JSON: {e}"
                                     )));
                                 }
-                                Ok(bundle) => match bundle.payload {
-                                    data::BundlePayload::Layout(data_layout) => {
-                                        let new_uid = uuid::Uuid::new_v4();
-                                        let unique_name = self
-                                            .layout_manager
-                                            .ensure_unique_name(&data_layout.name, new_uid);
-                                        let new_layout = LayoutId {
-                                            unique: new_uid,
-                                            name: unique_name.clone(),
-                                        };
-
-                                        let mut popout_windows = Vec::new();
-                                        for (pane, window_spec) in &data_layout.dashboard.popout {
-                                            let configuration = configuration(pane.clone());
-                                            popout_windows.push((configuration, *window_spec));
-                                        }
-
-                                        let dashboard = Dashboard::from_config(
-                                            configuration(data_layout.dashboard.pane.clone()),
-                                            popout_windows,
-                                            new_uid,
-                                        );
-
-                                        self.layout_manager.insert_layout(new_layout, dashboard);
-                                        self.notifications.push(Toast::info(format!(
-                                            "Imported layout '{unique_name}'"
-                                        )));
-                                    }
-                                    data::BundlePayload::Workspace(ws_bundle) => {
-                                        let count = ws_bundle.layouts.len();
-                                        for data_layout in ws_bundle.layouts {
-                                            let new_uid = uuid::Uuid::new_v4();
-                                            let unique_name = self
-                                                .layout_manager
-                                                .ensure_unique_name(&data_layout.name, new_uid);
-                                            let new_layout = LayoutId {
-                                                unique: new_uid,
-                                                name: unique_name,
-                                            };
-
-                                            let mut popout_windows = Vec::new();
-                                            for (pane, window_spec) in &data_layout.dashboard.popout
-                                            {
-                                                let configuration = configuration(pane.clone());
-                                                popout_windows.push((configuration, *window_spec));
-                                            }
-
-                                            let dashboard = Dashboard::from_config(
-                                                configuration(data_layout.dashboard.pane.clone()),
-                                                popout_windows,
-                                                new_uid,
-                                            );
-
-                                            self.layout_manager
-                                                .insert_layout(new_layout, dashboard);
-                                        }
-
-                                        if let Some(custom_theme) = ws_bundle.custom_theme {
-                                            self.theme_editor.custom_theme = Some(custom_theme.0);
-                                        }
-
-                                        if let Some(kline_cfg) = ws_bundle.default_kline_config {
-                                            data::chart::kline::set_user_default_kline_config(
-                                                kline_cfg,
-                                            );
-                                        }
-
-                                        self.notifications.push(Toast::info(format!(
-                                            "Imported {count} layout(s) from workspace"
-                                        )));
-                                    }
-                                },
+                                Ok(bundle) => {
+                                    return self.apply_imported_bundle(bundle);
+                                }
                             },
                         }
                     }
@@ -784,6 +746,7 @@ impl HawkTerminal {
                         self.notifications.push(Toast::error(err.to_string()));
                     }
                     Some(dashboard::sidebar::Action::ToggleJournalWindow) => {
+                        self.sidebar.journal.is_shown = false;
                         if let Some(id) = self.journal_window.take() {
                             self.sidebar.set_journal_window_open(false);
                             return window::close(id);
@@ -831,8 +794,62 @@ impl HawkTerminal {
                 }
                 return Task::none();
             }
+            Message::AutofillJournalFromActiveChart => {
+                let autofill = self.active_dashboard().find_active_position();
+                if let Some(autofill) = autofill {
+                    return self.apply_journal_autofill(autofill);
+                } else {
+                    self.notifications.push(Toast::info(
+                        "No position drawing found on active chart (draw Long/Short first)",
+                    ));
+                    return Task::none();
+                }
+            }
         }
         Task::none()
+    }
+
+    fn apply_journal_autofill(
+        &mut self,
+        autofill: data::journal::PositionAutofill,
+    ) -> Task<Message> {
+        if self.journal_mode == data::JournalMode::Disabled {
+            self.journal_mode = data::JournalMode::Basic;
+            self.sidebar.set_journal_mode(data::JournalMode::Basic);
+        }
+        let ticker = autofill.ticker.clone();
+        self.sidebar.journal.autofill_trade(autofill);
+
+        if self.journal_mode == data::JournalMode::Extended {
+            self.sidebar.journal.is_shown = false;
+        } else {
+            self.sidebar.tickers_table.is_shown = false;
+            self.sidebar.journal.is_shown = true;
+        }
+
+        self.notifications.push(Toast::info(format!(
+            "Loaded {} position into journal",
+            ticker
+        )));
+
+        let window_task =
+            if self.journal_mode == data::JournalMode::Extended && self.journal_window.is_none() {
+                let (id, task) = window::open(window::Settings {
+                    position: window::Position::Centered,
+                    exit_on_close_request: false,
+                    min_size: Some(iced::Size::new(960.0, 600.0)),
+                    size: iced::Size::new(1440.0, 850.0),
+                    ..window::settings()
+                });
+                self.journal_window = Some(id);
+                self.sidebar.set_journal_window_open(true);
+                task.discard()
+            } else {
+                Task::none()
+            };
+
+        iced::widget::operation::focus(iced::widget::Id::new("journal_size_input"))
+            .chain(window_task)
     }
 
     fn view(&self, id: window::Id) -> Element<'_, Message> {
@@ -906,10 +923,25 @@ impl HawkTerminal {
                 .padding(8),
             ];
 
-            if let Some(menu) = self.sidebar.active_menu() {
+            let content_with_menu = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
             } else {
                 base.into()
+            };
+
+            if self.journal_mode == data::JournalMode::Basic
+                && self.sidebar.journal.is_shown
+                && self.sidebar.journal.is_image_modal_open()
+            {
+                let modal = self
+                    .sidebar
+                    .journal
+                    .view_image_modal()
+                    .map(dashboard::sidebar::Message::Journal)
+                    .map(Message::Sidebar);
+                iced::widget::stack![content_with_menu, modal].into()
+            } else {
+                content_with_menu
             }
         } else if Some(id) == self.journal_window {
             container(
@@ -976,9 +1008,35 @@ impl HawkTerminal {
         let tick = iced::time::every(std::time::Duration::from_millis(50)).map(Message::Tick);
 
         let hotkeys = keyboard::listen().filter_map(|event| {
-            let keyboard::Event::KeyPressed { key, .. } = event else {
+            let keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                physical_key,
+                ..
+            } = event
+            else {
                 return None;
             };
+            let is_shift_g = modifiers.shift()
+                && (matches!(&key, keyboard::Key::Character(c) if c.eq_ignore_ascii_case("g"))
+                    || matches!(
+                        physical_key,
+                        keyboard::key::Physical::Code(keyboard::key::Code::KeyG)
+                    ));
+            if is_shift_g {
+                return Some(Message::AutofillJournalFromActiveChart);
+            }
+            let is_ctrl_v = (modifiers.control() || modifiers.command())
+                && (matches!(&key, keyboard::Key::Character(c) if c.eq_ignore_ascii_case("v"))
+                    || matches!(
+                        physical_key,
+                        keyboard::key::Physical::Code(keyboard::key::Code::KeyV)
+                    ));
+            if is_ctrl_v {
+                return Some(Message::Sidebar(dashboard::sidebar::Message::Journal(
+                    screen::dashboard::journal::Message::PasteScreenshotFromHotkey,
+                )));
+            }
             match key {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
                 _ => None,
@@ -1034,6 +1092,144 @@ impl HawkTerminal {
         }
     }
 
+    fn switch_layout(&mut self, layout_uid: uuid::Uuid) -> Task<Message> {
+        let active_popout_keys = self
+            .active_dashboard()
+            .popout
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+
+        let window_tasks = Task::batch(
+            active_popout_keys
+                .iter()
+                .map(|&popout_id| window::close::<window::Id>(popout_id))
+                .collect::<Vec<_>>(),
+        )
+        .discard();
+
+        let old_layout_id = self
+            .layout_manager
+            .active_layout_id()
+            .as_ref()
+            .map(|layout| layout.unique);
+
+        window::collect_window_specs(active_popout_keys, dashboard::Message::SavePopoutSpecs)
+            .map(move |msg| Message::Dashboard {
+                layout_id: old_layout_id,
+                event: msg,
+            })
+            .chain(window_tasks)
+            .chain(self.load_layout(layout_uid, self.main_window.id))
+    }
+
+    fn apply_imported_bundle(&mut self, bundle: data::ConfigBundle) -> Task<Message> {
+        match bundle.payload {
+            data::BundlePayload::Layout(data_layout) => {
+                let new_uid = uuid::Uuid::new_v4();
+                let unique_name = self
+                    .layout_manager
+                    .ensure_unique_name(&data_layout.name, new_uid);
+                let new_layout = LayoutId {
+                    unique: new_uid,
+                    name: unique_name.clone(),
+                };
+
+                let mut popout_windows = Vec::new();
+                for (pane, window_spec) in &data_layout.dashboard.popout {
+                    let configuration = configuration(pane.clone());
+                    popout_windows.push((configuration, *window_spec));
+                }
+
+                fn extract_kline_config(pane: &data::Pane) -> Option<data::chart::kline::Config> {
+                    match pane {
+                        data::Pane::KlineChart { settings, .. } => {
+                            settings.visual_config.as_ref().and_then(|vc| vc.kline())
+                        }
+                        data::Pane::Split { a, b, .. } => {
+                            extract_kline_config(a).or_else(|| extract_kline_config(b))
+                        }
+                        _ => None,
+                    }
+                }
+
+                if let Some(cfg) = extract_kline_config(&data_layout.dashboard.pane) {
+                    data::chart::kline::set_user_default_kline_config(cfg);
+                }
+
+                let dashboard = Dashboard::from_config(
+                    configuration(data_layout.dashboard.pane.clone()),
+                    popout_windows,
+                    new_uid,
+                );
+
+                self.layout_manager.insert_layout(new_layout, dashboard);
+                self.notifications
+                    .push(Toast::info(format!("Imported layout '{unique_name}'")));
+
+                self.switch_layout(new_uid)
+            }
+            data::BundlePayload::Workspace(ws_bundle) => {
+                let count = ws_bundle.layouts.len();
+                let mut first_uid = None;
+                let mut active_target_uid = None;
+
+                for data_layout in ws_bundle.layouts {
+                    let new_uid = uuid::Uuid::new_v4();
+                    if first_uid.is_none() {
+                        first_uid = Some(new_uid);
+                    }
+                    let unique_name = self
+                        .layout_manager
+                        .ensure_unique_name(&data_layout.name, new_uid);
+
+                    if let Some(ref target_name) = ws_bundle.active_layout
+                        && target_name == &data_layout.name
+                    {
+                        active_target_uid = Some(new_uid);
+                    }
+
+                    let new_layout = LayoutId {
+                        unique: new_uid,
+                        name: unique_name,
+                    };
+
+                    let mut popout_windows = Vec::new();
+                    for (pane, window_spec) in &data_layout.dashboard.popout {
+                        let configuration = configuration(pane.clone());
+                        popout_windows.push((configuration, *window_spec));
+                    }
+
+                    let dashboard = Dashboard::from_config(
+                        configuration(data_layout.dashboard.pane.clone()),
+                        popout_windows,
+                        new_uid,
+                    );
+
+                    self.layout_manager.insert_layout(new_layout, dashboard);
+                }
+
+                if let Some(custom_theme) = ws_bundle.custom_theme {
+                    self.theme_editor.custom_theme = Some(custom_theme.0);
+                }
+
+                if let Some(kline_cfg) = ws_bundle.default_kline_config {
+                    data::chart::kline::set_user_default_kline_config(kline_cfg);
+                }
+
+                self.notifications.push(Toast::info(format!(
+                    "Imported {count} layout(s) from workspace"
+                )));
+
+                if let Some(uid) = active_target_uid.or(first_uid) {
+                    self.switch_layout(uid)
+                } else {
+                    Task::none()
+                }
+            }
+        }
+    }
+
     fn view_with_modal<'a>(
         &'a self,
         base: Element<'a, Message>,
@@ -1046,19 +1242,22 @@ impl HawkTerminal {
             sidebar::Menu::Settings => {
                 let settings_modal = {
                     let theme_picklist = {
-                        let mut themes: Vec<iced::Theme> = iced_core::Theme::ALL.to_vec();
-
                         let default_theme = iced_core::Theme::Custom(default_theme().into());
-                        themes.push(default_theme);
-
                         let deeptrades = iced_core::Theme::Custom(
                             data::config::theme::deeptrades_theme().into(),
                         );
-                        themes.push(deeptrades);
+                        let flowsurface_classic = iced_core::Theme::Custom(
+                            data::config::theme::flowsurface_legacy_theme().into(),
+                        );
+
+                        let mut themes: Vec<iced::Theme> =
+                            vec![default_theme, deeptrades, flowsurface_classic];
 
                         if let Some(custom_theme) = &self.theme_editor.custom_theme {
                             themes.push(custom_theme.clone());
                         }
+
+                        themes.extend(iced_core::Theme::ALL.iter().cloned());
 
                         pick_list(themes, Some(self.theme.0.clone()), |theme| {
                             Message::ThemeSelected(data::Theme(theme))

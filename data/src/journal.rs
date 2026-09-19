@@ -76,6 +76,8 @@ pub struct JournalEntry {
     pub status: TradeStatus,
     pub setup_tag: Option<String>,
     pub notes: String,
+    #[serde(default)]
+    pub images: Vec<String>,
 }
 
 impl JournalEntry {
@@ -106,7 +108,13 @@ impl JournalEntry {
             status: TradeStatus::Open,
             setup_tag,
             notes,
+            images: Vec::new(),
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<String>) -> Self {
+        self.images = images;
+        self
     }
 
     pub fn close(&mut self, exit_price: f64, close_fee: f64) {
@@ -131,6 +139,66 @@ impl JournalEntry {
         } else {
             self.pnl = None;
             self.pnl_percent = None;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PositionAutofill {
+    pub ticker: String,
+    pub exchange: String,
+    pub side: TradeSide,
+    pub entry_price: f64,
+    pub stop_price: f64,
+    pub target_price: f64,
+    pub timestamp_open: u64,
+    pub notes: String,
+}
+
+impl PositionAutofill {
+    pub fn new(
+        ticker: String,
+        exchange: String,
+        side: TradeSide,
+        entry_price: f64,
+        stop_price: f64,
+        target_price: f64,
+        timestamp_open: u64,
+    ) -> Self {
+        let risk = (entry_price - stop_price).abs();
+        let reward = (target_price - entry_price).abs();
+        let risk_pct = if entry_price > 0.0 {
+            (risk / entry_price) * 100.0
+        } else {
+            0.0
+        };
+        let reward_pct = if entry_price > 0.0 {
+            (reward / entry_price) * 100.0
+        } else {
+            0.0
+        };
+        let rr = if risk > 1e-6 { reward / risk } else { 0.0 };
+
+        let notes = match side {
+            TradeSide::Long => format!(
+                "SL: {:.2} (-{:.2}%) | TP: {:.2} (+{:.2}%) | R:R: 1:{:.2}",
+                stop_price, risk_pct, target_price, reward_pct, rr
+            ),
+            TradeSide::Short => format!(
+                "SL: {:.2} (+{:.2}%) | TP: {:.2} (-{:.2}%) | R:R: 1:{:.2}",
+                stop_price, risk_pct, target_price, reward_pct, rr
+            ),
+        };
+
+        Self {
+            ticker,
+            exchange,
+            side,
+            entry_price,
+            stop_price,
+            target_price,
+            timestamp_open,
+            notes,
         }
     }
 }
@@ -246,6 +314,32 @@ pub fn load_journal() -> Vec<JournalEntry> {
     serde_json::from_str(&contents).unwrap_or_default()
 }
 
+pub const JOURNAL_IMAGES_DIR: &str = "journal_images";
+
+pub fn journal_images_dir() -> std::path::PathBuf {
+    crate::data_path(Some(JOURNAL_IMAGES_DIR))
+}
+
+pub fn journal_image_path(file_name: &str) -> std::path::PathBuf {
+    journal_images_dir().join(file_name)
+}
+
+pub fn journal_thumb_path(file_name: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name);
+    journal_images_dir().join(format!("{}_thumb.png", stem))
+}
+
+pub fn delete_journal_image_files(file_name: &str) {
+    let full = journal_image_path(file_name);
+    let thumb = journal_thumb_path(file_name);
+    let _ = std::fs::remove_file(full);
+    let _ = std::fs::remove_file(thumb);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +438,88 @@ mod tests {
         let json_without_journal_mode = "{}";
         let state: crate::State = serde_json::from_str(json_without_journal_mode).unwrap();
         assert_eq!(state.journal_mode, JournalMode::Basic);
+    }
+
+    #[test]
+    fn test_journal_entry_image_backward_compatibility() {
+        let json_without_images = r#"{
+            "id": "a1a2a3a4-b1b2-c1c2-d1d2-d3d4d5d6d7d8",
+            "timestamp_open": 1600000000000,
+            "timestamp_close": null,
+            "exchange": "Binance",
+            "ticker": "BTCUSDT",
+            "side": "Long",
+            "entry_price": 50000.0,
+            "exit_price": null,
+            "size": 1.0,
+            "fee": 0.0,
+            "pnl": null,
+            "pnl_percent": null,
+            "status": "Open",
+            "setup_tag": "Breakout",
+            "notes": "Test notes"
+        }"#;
+        let entry: JournalEntry = serde_json::from_str(json_without_images).unwrap();
+        assert!(entry.images.is_empty());
+        assert_eq!(entry.ticker, "BTCUSDT");
+
+        let entry_with_images = entry
+            .clone()
+            .with_images(vec!["img1.png".into(), "img2.png".into()]);
+        let serialized = serde_json::to_string(&entry_with_images).unwrap();
+        let deserialized: JournalEntry = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.images, vec!["img1.png", "img2.png"]);
+    }
+
+    #[test]
+    fn test_journal_image_paths() {
+        let img = "test_chart.png";
+        let full = journal_image_path(img);
+        let thumb = journal_thumb_path(img);
+
+        assert!(
+            full.ends_with(format!("{}\\{}", JOURNAL_IMAGES_DIR, img))
+                || full.ends_with(format!("{}/{}", JOURNAL_IMAGES_DIR, img))
+        );
+        assert!(
+            thumb.ends_with(format!("{}\\test_chart_thumb.png", JOURNAL_IMAGES_DIR))
+                || thumb.ends_with(format!("{}/test_chart_thumb.png", JOURNAL_IMAGES_DIR))
+        );
+    }
+
+    #[test]
+    fn test_position_autofill_calculation() {
+        let long_pos = PositionAutofill::new(
+            "BTCUSDT".to_string(),
+            "Binance".to_string(),
+            TradeSide::Long,
+            50000.0,
+            49000.0,
+            53000.0,
+            1600000000000,
+        );
+        assert_eq!(long_pos.side, TradeSide::Long);
+        assert_eq!(long_pos.entry_price, 50000.0);
+        assert_eq!(long_pos.stop_price, 49000.0);
+        assert_eq!(long_pos.target_price, 53000.0);
+        assert_eq!(
+            long_pos.notes,
+            "SL: 49000.00 (-2.00%) | TP: 53000.00 (+6.00%) | R:R: 1:3.00"
+        );
+
+        let short_pos = PositionAutofill::new(
+            "ETHUSDT".to_string(),
+            "Bybit".to_string(),
+            TradeSide::Short,
+            3000.0,
+            3060.0,
+            2850.0,
+            1600000000000,
+        );
+        assert_eq!(short_pos.side, TradeSide::Short);
+        assert_eq!(
+            short_pos.notes,
+            "SL: 3060.00 (+2.00%) | TP: 2850.00 (-5.00%) | R:R: 1:2.50"
+        );
     }
 }

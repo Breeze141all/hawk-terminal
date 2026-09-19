@@ -320,6 +320,27 @@ impl RollingVwapTracker {
             return self.current_point();
         }
 
+        if let Some(&(last_t, last_p, last_v)) = self.history.back() {
+            if time_ms == last_t {
+                // In-place update of current forming candle: replace previous values in accumulators
+                self.cum_vol = (self.cum_vol - last_v).max(0.0);
+                self.cum_pv -= last_p * last_v;
+                self.cum_pv2 -= last_p * last_p * last_v;
+
+                self.history.pop_back();
+                self.history.push_back((time_ms, price, v));
+                self.cum_vol += v;
+                self.cum_pv += price * v;
+                self.cum_pv2 += price * price * v;
+
+                self.evict_expired(time_ms);
+                return self.current_point();
+            } else if time_ms < last_t {
+                // Reject out-of-order timestamp to preserve sliding window deque monotonic order
+                return self.current_point();
+            }
+        }
+
         self.history.push_back((time_ms, price, v));
         self.cum_vol += v;
         self.cum_pv += price * v;
@@ -668,5 +689,46 @@ mod tests {
         let series = calculate_multi_rolling_vwap_series(&candles);
         assert_eq!(series.len(), 4);
         assert_eq!(series[3].d365.unwrap().vwap, 250.0);
+    }
+
+    #[test]
+    fn test_rolling_vwap_in_place_candle_update() {
+        let mut tracker = RollingVwapTracker::new(60_000);
+
+        // First bar at t=1000: price 100, volume 10
+        tracker.on_data_point(1000, 100.0, 10.0);
+        assert_eq!(tracker.current_point().unwrap().vwap, 100.0);
+
+        // In-place update to the same forming bar: price changes to 110, volume increases to 20
+        let updated = tracker.on_data_point(1000, 110.0, 20.0).unwrap();
+        assert_eq!(updated.vwap, 110.0);
+        assert_eq!(tracker.cum_vol, 20.0);
+        assert_eq!(tracker.history.len(), 1);
+
+        // Another in-place update: price 105, volume 30
+        let updated2 = tracker.on_data_point(1000, 105.0, 30.0).unwrap();
+        assert_eq!(updated2.vwap, 105.0);
+        assert_eq!(tracker.cum_vol, 30.0);
+        assert_eq!(tracker.history.len(), 1);
+
+        // Next bar at t=2000: price 200, volume 10 -> (105*30 + 200*10) / 40 = 5150 / 40 = 128.75
+        let bar2 = tracker.on_data_point(2000, 200.0, 10.0).unwrap();
+        assert_eq!(bar2.vwap, 128.75);
+        assert_eq!(tracker.history.len(), 2);
+    }
+
+    #[test]
+    fn test_rolling_vwap_rejects_out_of_order() {
+        let mut tracker = RollingVwapTracker::new(60_000);
+
+        // Bar at t=5000: price 100, volume 10
+        tracker.on_data_point(5000, 100.0, 10.0);
+
+        // Out-of-order bar at t=1000: should be rejected without corrupting history
+        let pt = tracker.on_data_point(1000, 50.0, 100.0).unwrap();
+        assert_eq!(pt.vwap, 100.0);
+        assert_eq!(tracker.cum_vol, 10.0);
+        assert_eq!(tracker.history.len(), 1);
+        assert_eq!(tracker.history.front().unwrap().0, 5000);
     }
 }

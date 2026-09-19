@@ -1,6 +1,6 @@
 [package]
 name = "hawk-terminal"
-version = "0.8.6"
+version = "0.9.1"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 description = "A native desktop charting platform for crypto markets"
@@ -53,6 +53,7 @@ iced = { version = "0.14.0", default-features = false, features = [
     "crisp",
     "x11",
     "wayland",
+    "image",
 ] }
 iced_core.workspace = true
 iced_futures.workspace = true
@@ -73,9 +74,11 @@ tokio = { version = "1.43", default-features = false, features = ["time"] }
 exchange = { version = "0.1.0", path = "exchange", package = "hawk-exchange" }
 data = { version = "0.1.0", path = "data", package = "hawk-data" }
 arboard = "3.6.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rfd = "0.15"
 
 [features]
 debug = ["iced/hot"]
 
-[build-dependencies]
+[target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"

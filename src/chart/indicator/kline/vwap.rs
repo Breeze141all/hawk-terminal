@@ -146,18 +146,14 @@ impl KlineIndicatorImpl for VwapIndicator {
 
     fn on_insert_trades(
         &mut self,
-        trades: &[Trade],
+        _trades: &[Trade],
         _old_dp_len: usize,
-        _source: &PlotData<KlineDataPoint>,
+        source: &PlotData<KlineDataPoint>,
     ) {
-        for trade in trades {
-            let price = trade.price.to_f32() as f64;
-            let qty = trade.qty as f64;
-            if let Some(pt) = self.tracker.on_data_point(trade.time as i64, price, qty) {
-                self.data.insert(trade.time, pt);
-            }
+        match source {
+            PlotData::TimeBased(_) => (),
+            PlotData::TickBased(_) => self.rebuild_from_source(source),
         }
-        self.clear_all_caches();
     }
 
     fn on_ticksize_change(&mut self, source: &PlotData<KlineDataPoint>) {

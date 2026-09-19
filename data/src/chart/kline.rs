@@ -290,6 +290,10 @@ const fn default_true() -> bool {
     true
 }
 
+const fn default_false() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub enum TpoTickStep {
     #[default]
@@ -594,10 +598,69 @@ impl PositionFlowColors {
     }
 }
 
+fn default_rolling_vwap_7d_color() -> TpoElementColor {
+    TpoElementColor::Cyan
+}
+
+fn default_rolling_vwap_30d_color() -> TpoElementColor {
+    TpoElementColor::Yellow
+}
+
+fn default_rolling_vwap_90d_color() -> TpoElementColor {
+    TpoElementColor::Orange
+}
+
+fn default_rolling_vwap_365d_color() -> TpoElementColor {
+    TpoElementColor::Magenta
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub struct RollingVwapColors {
+    #[serde(default = "default_rolling_vwap_7d_color")]
+    pub d7: TpoElementColor,
+    #[serde(default = "default_rolling_vwap_30d_color")]
+    pub d30: TpoElementColor,
+    #[serde(default = "default_rolling_vwap_90d_color")]
+    pub d90: TpoElementColor,
+    #[serde(default = "default_rolling_vwap_365d_color")]
+    pub d365: TpoElementColor,
+}
+
+impl Default for RollingVwapColors {
+    fn default() -> Self {
+        Self {
+            d7: default_rolling_vwap_7d_color(),
+            d30: default_rolling_vwap_30d_color(),
+            d90: default_rolling_vwap_90d_color(),
+            d365: default_rolling_vwap_365d_color(),
+        }
+    }
+}
+
+impl RollingVwapColors {
+    pub fn d7_rgb(&self) -> [u8; 3] {
+        self.d7.to_rgb().unwrap_or([0, 230, 255])
+    }
+
+    pub fn d30_rgb(&self) -> [u8; 3] {
+        self.d30.to_rgb().unwrap_or([255, 214, 0])
+    }
+
+    pub fn d90_rgb(&self) -> [u8; 3] {
+        self.d90.to_rgb().unwrap_or([255, 115, 26])
+    }
+
+    pub fn d365_rgb(&self) -> [u8; 3] {
+        self.d365.to_rgb().unwrap_or([217, 38, 242])
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub position_flow_colors: PositionFlowColors,
+    #[serde(default)]
+    pub rolling_vwap_colors: RollingVwapColors,
     #[serde(default = "default_rolling_vwap_hours")]
     pub rolling_vwap_window_hours: u32,
     #[serde(default = "default_true")]
@@ -608,10 +671,14 @@ pub struct Config {
     pub rolling_vwap_show_90d: bool,
     #[serde(default = "default_true")]
     pub rolling_vwap_show_365d: bool,
+    #[serde(default = "default_false")]
+    pub rolling_vwap_show_panel: bool,
     #[serde(default = "default_true")]
     pub liq_show_bands: bool,
     #[serde(default = "default_true")]
     pub liq_show_histogram: bool,
+    #[serde(default = "default_true")]
+    pub magnet_mode: bool,
 }
 
 static USER_DEFAULT_CONFIG: std::sync::LazyLock<std::sync::RwLock<Option<Config>>> =
@@ -631,13 +698,16 @@ impl Config {
     pub fn factory_default() -> Self {
         Self {
             position_flow_colors: PositionFlowColors::default(),
+            rolling_vwap_colors: RollingVwapColors::default(),
             rolling_vwap_window_hours: default_rolling_vwap_hours(),
             rolling_vwap_show_7d: true,
             rolling_vwap_show_30d: true,
             rolling_vwap_show_90d: true,
             rolling_vwap_show_365d: true,
+            rolling_vwap_show_panel: false,
             liq_show_bands: true,
             liq_show_histogram: true,
+            magnet_mode: true,
         }
     }
 }
@@ -716,10 +786,13 @@ pub enum HighlightStyle {
     Concentric,
     Triangle,
     Square,
+    ClassicCircle,
+    ClassicTriangle,
+    ClassicSquare,
 }
 
 impl HighlightStyle {
-    pub const ALL: [HighlightStyle; 7] = [
+    pub const ALL: [HighlightStyle; 10] = [
         HighlightStyle::Border,
         HighlightStyle::Fill,
         HighlightStyle::Circle,
@@ -727,6 +800,9 @@ impl HighlightStyle {
         HighlightStyle::Concentric,
         HighlightStyle::Triangle,
         HighlightStyle::Square,
+        HighlightStyle::ClassicCircle,
+        HighlightStyle::ClassicTriangle,
+        HighlightStyle::ClassicSquare,
     ];
 }
 
@@ -735,11 +811,14 @@ impl std::fmt::Display for HighlightStyle {
         match self {
             HighlightStyle::Border => write!(f, "Border"),
             HighlightStyle::Fill => write!(f, "Fill"),
-            HighlightStyle::Circle => write!(f, "Circle"),
+            HighlightStyle::Circle => write!(f, "Circle (Bubble)"),
             HighlightStyle::Ring => write!(f, "Ring"),
             HighlightStyle::Concentric => write!(f, "Concentric"),
-            HighlightStyle::Triangle => write!(f, "Triangle"),
-            HighlightStyle::Square => write!(f, "Square"),
+            HighlightStyle::Triangle => write!(f, "Triangle (Styled)"),
+            HighlightStyle::Square => write!(f, "Square (Styled)"),
+            HighlightStyle::ClassicCircle => write!(f, "Dot (Classic)"),
+            HighlightStyle::ClassicTriangle => write!(f, "Triangle (Classic)"),
+            HighlightStyle::ClassicSquare => write!(f, "Square (Classic)"),
         }
     }
 }
@@ -755,10 +834,11 @@ pub enum HighlightColor {
     White,
     Purple,
     Orange,
+    Custom([u8; 3]),
 }
 
 impl HighlightColor {
-    pub const ALL: [HighlightColor; 8] = [
+    pub const ALL: [HighlightColor; 9] = [
         HighlightColor::Amber,
         HighlightColor::Cyan,
         HighlightColor::Magenta,
@@ -767,6 +847,7 @@ impl HighlightColor {
         HighlightColor::White,
         HighlightColor::Purple,
         HighlightColor::Orange,
+        HighlightColor::Custom([255, 180, 0]),
     ];
 
     pub fn to_rgb(self) -> [f32; 3] {
@@ -779,6 +860,9 @@ impl HighlightColor {
             HighlightColor::White => [1.0, 1.0, 1.0],
             HighlightColor::Purple => [0.68, 0.36, 0.96],
             HighlightColor::Orange => [1.0, 0.50, 0.05],
+            HighlightColor::Custom([r, g, b]) => {
+                [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0]
+            }
         }
     }
 }
@@ -794,6 +878,7 @@ impl std::fmt::Display for HighlightColor {
             HighlightColor::White => write!(f, "White"),
             HighlightColor::Purple => write!(f, "Purple"),
             HighlightColor::Orange => write!(f, "Orange"),
+            HighlightColor::Custom([r, g, b]) => write!(f, "Custom RGB ({r}, {g}, {b})"),
         }
     }
 }

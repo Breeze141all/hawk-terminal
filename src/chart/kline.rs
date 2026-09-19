@@ -1,6 +1,6 @@
 use super::{
-    Action, Basis, Chart, Interaction, Message, PlotConstants, PlotData, TEXT_SIZE, ViewState,
-    indicator, request_fetch, scale::linear::PriceInfoLabel,
+    Action, Basis, Chart, Interaction, Message, PlotConstants, PlotData, PriceAxisBadge, TEXT_SIZE,
+    ViewState, indicator, request_fetch, scale::linear::PriceInfoLabel,
 };
 use crate::chart::indicator::kline::KlineIndicatorImpl;
 use crate::{modal::pane::settings::study, style};
@@ -27,13 +27,17 @@ use exchange::{
 use iced::task::Handle;
 use iced::theme::palette::Extended;
 use iced::widget::canvas::{self, Event, Geometry, Path, Stroke};
-use iced::{Alignment, Element, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
+use iced::{Alignment, Color, Element, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 
 use enum_map::EnumMap;
 use std::time::{Duration, Instant};
 
 impl Chart for KlineChart {
     type IndicatorKind = KlineIndicator;
+
+    fn y_axis_badges(&self) -> Vec<PriceAxisBadge> {
+        self.y_axis_badges()
+    }
 
     fn state(&self) -> &ViewState {
         &self.chart
@@ -82,6 +86,11 @@ impl Chart for KlineChart {
             if !selected_indicator.is_panel() {
                 continue;
             }
+            if *selected_indicator == KlineIndicator::RollingVwap
+                && !self.config.rolling_vwap_show_panel
+            {
+                continue;
+            }
             if let Some(indi) = self.indicators[*selected_indicator].as_ref() {
                 elements.push(indi.element(chart_state, earliest..=latest));
             }
@@ -115,7 +124,11 @@ impl Chart for KlineChart {
                 Some((earliest, latest))
             }
             Basis::Tick(_) => {
-                unimplemented!()
+                let (earliest, latest) = chart.interval_range(&region);
+                if earliest > latest {
+                    return None;
+                }
+                Some((earliest, latest))
             }
         }
     }
@@ -289,6 +302,9 @@ pub(crate) struct DrawingState {
     pub start_point: Option<(u64, f32)>,
     pub selected_drawing: Option<uuid::Uuid>,
     pub drag: Option<DrawingDrag>,
+    pub shift_pressed: bool,
+    pub ctrl_pressed: bool,
+    pub last_cursor_frame_pos: Option<Point>,
 }
 
 pub struct KlineChart {
@@ -312,6 +328,7 @@ pub struct KlineChart {
     pub alerts: Vec<PriceAlert>,
     pub alert_drag_state: RefCell<Option<(uuid::Uuid, f32)>>,
     pub replay: Option<ReplayState>,
+    pub expanded_indicator: Option<KlineIndicator>,
 }
 
 impl KlineChart {
@@ -409,6 +426,7 @@ impl KlineChart {
                         && let Some(any) = indi.as_any_mut()
                         && let Some(rv) = any.downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>()
                     {
+                        rv.set_colors(config.rolling_vwap_colors);
                         rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
                     }
                     indi.rebuild_from_source(&data_source);
@@ -460,6 +478,7 @@ impl KlineChart {
                     alerts: Vec::new(),
                     alert_drag_state: RefCell::new(None),
                     replay: None,
+                    expanded_indicator: None,
                 }
             }
             Basis::Tick(interval) => {
@@ -520,6 +539,7 @@ impl KlineChart {
                         && let Some(any) = indi.as_any_mut()
                         && let Some(rv) = any.downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>()
                     {
+                        rv.set_colors(config.rolling_vwap_colors);
                         rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
                     }
                     indi.rebuild_from_source(&data_source);
@@ -551,6 +571,7 @@ impl KlineChart {
                     alerts: Vec::new(),
                     alert_drag_state: RefCell::new(None),
                     replay: None,
+                    expanded_indicator: None,
                 }
             }
         }
@@ -616,6 +637,8 @@ impl KlineChart {
             }
             PlotData::TickBased(_) => {}
         }
+
+        self.invalidate(None);
     }
 
     pub fn kind(&self) -> &KlineChartKind {
@@ -1007,9 +1030,100 @@ impl KlineChart {
         self.invalidate_all();
     }
 
+    pub fn find_target_position(&self) -> Option<data::journal::PositionAutofill> {
+        let d_state = self.drawing_state.borrow();
+
+        // 1. Dragging handle or drawing of a Position
+        if let Some(ref drag) = d_state.drag
+            && let Some(autofill) = self.position_to_autofill(&drag.current_drawing().kind)
+        {
+            return Some(autofill);
+        }
+
+        // 2. Currently in-progress drawing of a Position
+        if let Some(ref in_prog) = d_state.in_progress
+            && let Some(autofill) = self.position_to_autofill(&in_prog.kind)
+        {
+            return Some(autofill);
+        }
+
+        // 3. Selected drawing by UUID or is_selected flag
+        if let Some(selected_id) = d_state.selected_drawing
+            && let Some(d) = self.drawings.iter().find(|d| d.id == selected_id)
+            && let Some(autofill) = self.position_to_autofill(&d.kind)
+        {
+            return Some(autofill);
+        }
+        if let Some(d) = self.drawings.iter().find(|d| d.is_selected)
+            && let Some(autofill) = self.position_to_autofill(&d.kind)
+        {
+            return Some(autofill);
+        }
+
+        // 4. Most recent Position in chart drawings
+        for d in self.drawings.iter().rev() {
+            if let Some(autofill) = self.position_to_autofill(&d.kind) {
+                return Some(autofill);
+            }
+        }
+
+        None
+    }
+
+    fn position_to_autofill(&self, kind: &DrawingKind) -> Option<data::journal::PositionAutofill> {
+        if let DrawingKind::Position {
+            entry,
+            stop_price,
+            target_price,
+            is_long,
+            ..
+        } = kind
+        {
+            let side = if *is_long {
+                data::journal::TradeSide::Long
+            } else {
+                data::journal::TradeSide::Short
+            };
+            let ticker = self.ticker_info.ticker.to_string();
+            let exchange = self.ticker_info.ticker.exchange.to_string();
+            Some(data::journal::PositionAutofill::new(
+                ticker,
+                exchange,
+                side,
+                entry.1 as f64,
+                *stop_price as f64,
+                *target_price as f64,
+                entry.0,
+            ))
+        } else {
+            None
+        }
+    }
+
     pub fn update_selected_drawing_color(&mut self, color: [f32; 4]) {
         if let Some(d) = self.selected_drawing_mut() {
             d.color = color;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn update_selected_position_profit_color(&mut self, color: [f32; 4]) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.set_position_profit_color(color);
+            self.invalidate_all();
+        }
+    }
+
+    pub fn update_selected_position_stop_color(&mut self, color: [f32; 4]) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.set_position_stop_color(color);
+            self.invalidate_all();
+        }
+    }
+
+    pub fn update_selected_position_entry_color(&mut self, color: [f32; 4]) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.set_position_entry_color(color);
             self.invalidate_all();
         }
     }
@@ -1028,18 +1142,262 @@ impl KlineChart {
         }
     }
 
+    pub fn y_axis_badges(&self) -> Vec<PriceAxisBadge> {
+        let mut badges = Vec::new();
+        let d_state = self.drawing_state.borrow();
+
+        // 1. Dragging position: uses live dragged coordinates
+        let mut dragged_id = None;
+        if let Some(ref drag) = d_state.drag {
+            let current = drag.current_drawing();
+            if let DrawingKind::Position {
+                entry,
+                target_price,
+                stop_price,
+                ..
+            } = &current.kind
+            {
+                dragged_id = Some(current.id);
+                let style = current.position_style();
+                let tp_color = Color::from_rgb(
+                    style.profit_color[0],
+                    style.profit_color[1],
+                    style.profit_color[2],
+                );
+                let sl_color = Color::from_rgb(
+                    style.stop_color[0],
+                    style.stop_color[1],
+                    style.stop_color[2],
+                );
+                let entry_color = Color::from_rgb(
+                    style.entry_color[0],
+                    style.entry_color[1],
+                    style.entry_color[2],
+                );
+
+                badges.push(PriceAxisBadge {
+                    price: *target_price,
+                    background_color: tp_color,
+                    text_color: Color::WHITE,
+                });
+                badges.push(PriceAxisBadge {
+                    price: *stop_price,
+                    background_color: sl_color,
+                    text_color: Color::WHITE,
+                });
+                badges.push(PriceAxisBadge {
+                    price: entry.1,
+                    background_color: entry_color,
+                    text_color: Color::WHITE,
+                });
+            }
+        }
+
+        // 2. In-progress position drawing
+        if let Some(ref in_prog) = d_state.in_progress
+            && let DrawingKind::Position {
+                entry,
+                target_price,
+                stop_price,
+                ..
+            } = &in_prog.kind
+        {
+            let style = in_prog.position_style();
+            let tp_color = Color::from_rgb(
+                style.profit_color[0],
+                style.profit_color[1],
+                style.profit_color[2],
+            );
+            let sl_color = Color::from_rgb(
+                style.stop_color[0],
+                style.stop_color[1],
+                style.stop_color[2],
+            );
+            let entry_color = Color::from_rgb(
+                style.entry_color[0],
+                style.entry_color[1],
+                style.entry_color[2],
+            );
+
+            badges.push(PriceAxisBadge {
+                price: *target_price,
+                background_color: tp_color,
+                text_color: Color::WHITE,
+            });
+            badges.push(PriceAxisBadge {
+                price: *stop_price,
+                background_color: sl_color,
+                text_color: Color::WHITE,
+            });
+            badges.push(PriceAxisBadge {
+                price: entry.1,
+                background_color: entry_color,
+                text_color: Color::WHITE,
+            });
+        }
+
+        // 3. All position drawings in self.drawings (skipping the one currently being dragged)
+        for d in &self.drawings {
+            if Some(d.id) == dragged_id {
+                continue;
+            }
+            if let DrawingKind::Position {
+                entry,
+                target_price,
+                stop_price,
+                ..
+            } = &d.kind
+            {
+                let style = d.position_style();
+                let tp_color = Color::from_rgb(
+                    style.profit_color[0],
+                    style.profit_color[1],
+                    style.profit_color[2],
+                );
+                let sl_color = Color::from_rgb(
+                    style.stop_color[0],
+                    style.stop_color[1],
+                    style.stop_color[2],
+                );
+                let entry_color = Color::from_rgb(
+                    style.entry_color[0],
+                    style.entry_color[1],
+                    style.entry_color[2],
+                );
+
+                badges.push(PriceAxisBadge {
+                    price: *target_price,
+                    background_color: tp_color,
+                    text_color: Color::WHITE,
+                });
+                badges.push(PriceAxisBadge {
+                    price: *stop_price,
+                    background_color: sl_color,
+                    text_color: Color::WHITE,
+                });
+                badges.push(PriceAxisBadge {
+                    price: entry.1,
+                    background_color: entry_color,
+                    text_color: Color::WHITE,
+                });
+            }
+        }
+
+        badges
+    }
+
     pub fn set_active_drawing_tool(&mut self, tool: DrawingTool) {
         {
             let mut d = self.drawing_state.borrow_mut();
             d.active_tool = tool;
             d.in_progress = None;
             d.start_point = None;
+            d.shift_pressed = false;
+            d.ctrl_pressed = false;
+            d.last_cursor_frame_pos = None;
         }
         self.invalidate_all();
     }
 
     pub fn active_drawing_tool(&self) -> DrawingTool {
         self.drawing_state.borrow().active_tool
+    }
+
+    pub fn toggle_magnet_mode(&mut self) {
+        self.config.magnet_mode = !self.config.magnet_mode;
+        self.invalidate_all();
+    }
+
+    pub fn is_magnet_active(&self) -> bool {
+        self.config.magnet_mode ^ self.drawing_state.borrow().ctrl_pressed
+    }
+
+    pub(crate) fn snap_point_to_candle(&self, frame_pos: Point) -> (u64, f32) {
+        snap_to_smart_magnet(&self.data_source, self.state(), frame_pos)
+    }
+
+    pub(crate) fn apply_handle_movement(
+        &self,
+        handle_idx: usize,
+        initial_drawing: &Drawing,
+        current_drawing: &mut Drawing,
+        frame_pos: Point,
+        shift: bool,
+        is_magnet_active: bool,
+    ) {
+        let chart = self.state();
+        let time = chart.x_to_interval(frame_pos.x);
+        let price = chart.y_to_price(frame_pos.y).to_f32();
+        let snapped = if is_magnet_active {
+            self.snap_point_to_candle(frame_pos)
+        } else {
+            (time, price)
+        };
+
+        *current_drawing = initial_drawing.clone();
+        match &mut current_drawing.kind {
+            DrawingKind::HorizontalLine { price: p } => *p = snapped.1,
+            DrawingKind::Trendline { p1, p2 } => {
+                if handle_idx == 0 {
+                    *p1 = if shift {
+                        snap_to_45_degrees(*p2, frame_pos, chart)
+                    } else {
+                        snapped
+                    };
+                } else {
+                    *p2 = if shift {
+                        snap_to_45_degrees(*p1, frame_pos, chart)
+                    } else {
+                        snapped
+                    };
+                }
+            }
+            DrawingKind::Rectangle { p1, p2 } => match handle_idx {
+                0 => *p1 = snapped,
+                1 => p1.1 = snapped.1,
+                2 => {
+                    p2.0 = snapped.0;
+                    p1.1 = snapped.1;
+                }
+                3 => p2.0 = snapped.0,
+                4 => *p2 = snapped,
+                5 => p2.1 = snapped.1,
+                6 => {
+                    p1.0 = snapped.0;
+                    p2.1 = snapped.1;
+                }
+                7 => p1.0 = snapped.0,
+                _ => {}
+            },
+            DrawingKind::Path { points } => {
+                let anchor = if handle_idx > 0 {
+                    points.get(handle_idx - 1).copied()
+                } else if points.len() > 1 {
+                    points.get(1).copied()
+                } else {
+                    None
+                };
+                if let Some(pt) = points.get_mut(handle_idx) {
+                    *pt = if shift && let Some(anc) = anchor {
+                        snap_to_45_degrees(anc, frame_pos, chart)
+                    } else {
+                        snapped
+                    };
+                }
+            }
+            DrawingKind::Brush { .. } => {}
+            DrawingKind::Position {
+                entry,
+                target_price,
+                stop_price,
+                ..
+            } => match handle_idx {
+                0 => *entry = snapped,
+                1 => *target_price = snapped.1,
+                2 => *stop_price = snapped.1,
+                _ => {}
+            },
+        }
     }
 
     pub fn add_alert(&mut self, alert: PriceAlert) {
@@ -1843,7 +2201,7 @@ impl KlineChart {
                 self.indicators
                     .values_mut()
                     .filter_map(Option::as_mut)
-                    .for_each(|indi| indi.on_insert_klines(klines_raw));
+                    .for_each(|indi| indi.rebuild_from_source(&self.data_source));
 
                 if self.liquidation_heatmap.config.enabled {
                     self.rebuild_liquidation_heatmap();
@@ -2098,6 +2456,7 @@ impl KlineChart {
             .iter()
             .filter(|(kind, val)| {
                 kind.is_panel()
+                    && (*kind != KlineIndicator::RollingVwap || self.config.rolling_vwap_show_panel)
                     && KlineIndicator::for_market(market).contains(kind)
                     && val.is_some()
             })
@@ -2109,6 +2468,9 @@ impl KlineChart {
 
         if self.indicators[indicator].is_some() {
             self.indicators[indicator] = None;
+            if self.expanded_indicator == Some(indicator) {
+                self.expanded_indicator = None;
+            }
             if indicator == KlineIndicator::LiquidationHeatmap {
                 self.liquidation_heatmap.config.enabled = false;
                 self.liquidation_heatmap.clear();
@@ -2125,6 +2487,7 @@ impl KlineChart {
                 && let Some(any) = box_indi.as_any_mut()
                 && let Some(rv) = any.downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>()
             {
+                rv.set_colors(self.config.rolling_vwap_colors);
                 rv.set_window_hours(self.config.rolling_vwap_window_hours, &self.data_source);
             }
             if indicator == KlineIndicator::LiquidationHeatmap {
@@ -2137,8 +2500,8 @@ impl KlineChart {
 
         self.invalidate(None);
 
-        if indicator.is_panel() {
-            let current_panel_count = self.active_panel_indicators_count();
+        let current_panel_count = self.active_panel_indicators_count();
+        if prev_panel_count != current_panel_count {
             if current_panel_count == 0 {
                 self.chart.layout.splits.clear();
             } else {
@@ -2152,13 +2515,36 @@ impl KlineChart {
         }
     }
 
+    pub fn toggle_indicator_settings(&mut self, indicator: KlineIndicator) {
+        if self.expanded_indicator == Some(indicator) {
+            self.expanded_indicator = None;
+        } else {
+            self.expanded_indicator = Some(indicator);
+        }
+    }
+
     pub fn config(&self) -> data::chart::kline::Config {
         self.config
     }
 
     pub fn set_visual_config(&mut self, config: data::chart::kline::Config) {
+        let prev_panel_count = self.active_panel_indicators_count();
         self.config = config;
         data::chart::kline::set_user_default_kline_config(config);
+
+        let current_panel_count = self.active_panel_indicators_count();
+        if prev_panel_count != current_panel_count {
+            if current_panel_count == 0 {
+                self.chart.layout.splits.clear();
+            } else {
+                let main_split = self.chart.layout.splits.first().copied().unwrap_or(0.8);
+                self.chart.layout.splits = data::util::calc_panel_splits(
+                    main_split,
+                    current_panel_count,
+                    Some(prev_panel_count),
+                );
+            }
+        }
 
         if let Some(indi) = self.indicators[KlineIndicator::PositionFlow].as_mut()
             && let Some(any) = indi.as_any_mut()
@@ -2173,6 +2559,7 @@ impl KlineChart {
                 .downcast_mut::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>(
                 )
         {
+            rv.set_colors(config.rolling_vwap_colors);
             rv.set_window_hours(config.rolling_vwap_window_hours, &self.data_source);
         }
 
@@ -2190,6 +2577,278 @@ impl canvas::Program<Message> for KlineChart {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<canvas::Action<Message>> {
+        if let Some(pos) = cursor.position_in(bounds) {
+            let chart = self.state();
+            let frame_pos = Point::new(
+                (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
+                (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
+            );
+            self.drawing_state.borrow_mut().last_cursor_frame_pos = Some(frame_pos);
+        }
+
+        if let Event::Keyboard(kb_event) = event {
+            let mut d_state = self.drawing_state.borrow_mut();
+            match kb_event {
+                iced::keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    physical_key,
+                    ..
+                } => {
+                    if matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift)
+                    ) || modifiers.shift()
+                    {
+                        d_state.shift_pressed = true;
+                    }
+                    if matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(
+                            iced::keyboard::key::Named::Control
+                                | iced::keyboard::key::Named::Super
+                                | iced::keyboard::key::Named::Meta
+                        )
+                    ) || modifiers.control()
+                        || modifiers.command()
+                    {
+                        d_state.ctrl_pressed = true;
+                    }
+
+                    let is_g = matches!(key.as_ref(), iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("g"))
+                        || matches!(
+                            physical_key,
+                            iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyG)
+                        );
+                    if (modifiers.shift() || d_state.shift_pressed) && is_g {
+                        drop(d_state);
+                        if let Some(autofill) = self.find_target_position() {
+                            return Some(
+                                canvas::Action::publish(Message::AutofillPosition(autofill))
+                                    .and_capture(),
+                            );
+                        }
+                        return None;
+                    }
+
+                    // Escape: cancel in-progress drawing, active tool, drag, or drawing selection
+                    if matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
+                    ) {
+                        let had_in_prog = d_state.in_progress.take().is_some();
+                        let had_tool = d_state.active_tool != DrawingTool::None;
+                        d_state.active_tool = DrawingTool::None;
+                        d_state.start_point = None;
+
+                        if let Some(DrawingDrag::MovingDrawing { .. }) = d_state.drag.take() {
+                            drop(d_state);
+                            self.chart.cache.clear_crosshair();
+                            return Some(
+                                canvas::Action::publish(Message::CrosshairMoved).and_capture(),
+                            );
+                        }
+                        if d_state.selected_drawing.take().is_some() {
+                            drop(d_state);
+                            return Some(
+                                canvas::Action::publish(Message::SelectDrawing(None)).and_capture(),
+                            );
+                        }
+                        if had_in_prog || had_tool {
+                            drop(d_state);
+                            return Some(canvas::Action::capture());
+                        }
+                    }
+
+                    // Delete / Backspace: delete currently selected drawing
+                    if matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete)
+                            | iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace)
+                    ) && let Some(id) = d_state.selected_drawing.take()
+                    {
+                        drop(d_state);
+                        return Some(
+                            canvas::Action::publish(Message::DeleteDrawing(id)).and_capture(),
+                        );
+                    }
+
+                    // Tool shortcuts without modifiers: T (Trendline), H (HorizontalLine), B (Brush), R (Rectangle)
+                    if !modifiers.control()
+                        && !modifiers.command()
+                        && !modifiers.alt()
+                        && !modifiers.shift()
+                        && !d_state.shift_pressed
+                        && !d_state.ctrl_pressed
+                    {
+                        let tool_to_set = match key.as_ref() {
+                            iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("t") => {
+                                Some(if d_state.active_tool == DrawingTool::Trendline {
+                                    DrawingTool::None
+                                } else {
+                                    DrawingTool::Trendline
+                                })
+                            }
+                            iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("h") => {
+                                Some(if d_state.active_tool == DrawingTool::HorizontalLine {
+                                    DrawingTool::None
+                                } else {
+                                    DrawingTool::HorizontalLine
+                                })
+                            }
+                            iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("b") => {
+                                Some(if d_state.active_tool == DrawingTool::Brush {
+                                    DrawingTool::None
+                                } else {
+                                    DrawingTool::Brush
+                                })
+                            }
+                            iced::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("r") => {
+                                Some(if d_state.active_tool == DrawingTool::Rectangle {
+                                    DrawingTool::None
+                                } else {
+                                    DrawingTool::Rectangle
+                                })
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(tool) = tool_to_set {
+                            d_state.active_tool = tool;
+                            d_state.in_progress = None;
+                            d_state.start_point = None;
+                            drop(d_state);
+                            return Some(canvas::Action::capture());
+                        }
+                    }
+                }
+                iced::keyboard::Event::KeyReleased { key, modifiers, .. } => {
+                    if matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift)
+                    ) {
+                        d_state.shift_pressed = false;
+                    } else {
+                        d_state.shift_pressed = modifiers.shift();
+                    }
+                    if matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(
+                            iced::keyboard::key::Named::Control
+                                | iced::keyboard::key::Named::Super
+                                | iced::keyboard::key::Named::Meta
+                        )
+                    ) {
+                        d_state.ctrl_pressed = false;
+                    } else {
+                        d_state.ctrl_pressed = modifiers.control() || modifiers.command();
+                    }
+                }
+                iced::keyboard::Event::ModifiersChanged(modifiers) => {
+                    d_state.shift_pressed = modifiers.shift();
+                    d_state.ctrl_pressed = modifiers.control() || modifiers.command();
+                }
+            }
+
+            let is_modifier_event = match kb_event {
+                iced::keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Named(
+                            iced::keyboard::key::Named::Shift
+                                | iced::keyboard::key::Named::Control
+                                | iced::keyboard::key::Named::Super
+                                | iced::keyboard::key::Named::Meta
+                        )
+                    ) || modifiers.shift()
+                        || modifiers.control()
+                        || modifiers.command()
+                }
+                iced::keyboard::Event::KeyReleased { key, .. } => matches!(
+                    key.as_ref(),
+                    iced::keyboard::Key::Named(
+                        iced::keyboard::key::Named::Shift
+                            | iced::keyboard::key::Named::Control
+                            | iced::keyboard::key::Named::Super
+                            | iced::keyboard::key::Named::Meta
+                    )
+                ),
+                iced::keyboard::Event::ModifiersChanged(_) => true,
+            };
+
+            if is_modifier_event
+                && (d_state.active_tool != DrawingTool::None
+                    || d_state.in_progress.is_some()
+                    || d_state.drag.is_some())
+            {
+                if matches!(*interaction, Interaction::Ruler { .. }) {
+                    *interaction = Interaction::None;
+                }
+                let chart = self.state();
+                if let Some(frame_pos) = d_state.last_cursor_frame_pos {
+                    let time = chart.x_to_interval(frame_pos.x);
+                    let price = chart.y_to_price(frame_pos.y).to_f32();
+                    let shift = d_state.shift_pressed;
+                    let is_magnet_active = self.config.magnet_mode ^ d_state.ctrl_pressed;
+                    let snapped = if is_magnet_active {
+                        self.snap_point_to_candle(frame_pos)
+                    } else {
+                        (time, price)
+                    };
+
+                    if let Some(ref mut in_prog) = d_state.in_progress {
+                        match &mut in_prog.kind {
+                            DrawingKind::Trendline { p1, p2 } => {
+                                *p2 = if shift {
+                                    snap_to_45_degrees(*p1, frame_pos, chart)
+                                } else {
+                                    snapped
+                                };
+                            }
+                            DrawingKind::Rectangle { p2, .. } => {
+                                *p2 = snapped;
+                            }
+                            DrawingKind::HorizontalLine { price: p } => {
+                                *p = snapped.1;
+                            }
+                            DrawingKind::Path { points } if points.len() >= 2 => {
+                                let anchor = points[points.len() - 2];
+                                if let Some(last) = points.last_mut() {
+                                    *last = if shift {
+                                        snap_to_45_degrees(anchor, frame_pos, chart)
+                                    } else {
+                                        snapped
+                                    };
+                                }
+                            }
+                            DrawingKind::Position { stop_price, .. } => {
+                                *stop_price = snapped.1;
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    if let Some(DrawingDrag::MovingHandle {
+                        handle_idx,
+                        initial_drawing,
+                        current_drawing,
+                        ..
+                    }) = &mut d_state.drag
+                    {
+                        self.apply_handle_movement(
+                            *handle_idx,
+                            initial_drawing,
+                            current_drawing,
+                            frame_pos,
+                            shift,
+                            is_magnet_active,
+                        );
+                    }
+                }
+                return Some(canvas::Action::request_redraw().and_capture());
+            }
+        }
+
         // 1. Dismiss context menu on Escape key
         if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event
             && matches!(
@@ -2376,30 +3035,50 @@ impl canvas::Program<Message> for KlineChart {
                     );
                     let time = chart.x_to_interval(frame_pos.x);
                     let price = chart.y_to_price(frame_pos.y).to_f32();
+                    let shift = d_state.shift_pressed;
+                    let is_magnet_active = self.config.magnet_mode ^ d_state.ctrl_pressed;
+                    let snapped = if is_magnet_active {
+                        self.snap_point_to_candle(frame_pos)
+                    } else {
+                        (time, price)
+                    };
 
                     match event {
                         Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                             if let Some(ref mut in_prog) = d_state.in_progress {
                                 match &mut in_prog.kind {
-                                    DrawingKind::Trendline { p2, .. } => {
-                                        *p2 = (time, price);
+                                    DrawingKind::Trendline { p1, p2 } => {
+                                        *p2 = if shift {
+                                            snap_to_45_degrees(*p1, frame_pos, chart)
+                                        } else {
+                                            snapped
+                                        };
                                     }
                                     DrawingKind::Rectangle { p2, .. } => {
-                                        *p2 = (time, price);
+                                        *p2 = snapped;
                                     }
                                     DrawingKind::HorizontalLine { price: p } => {
-                                        *p = price;
+                                        *p = snapped.1;
                                     }
                                     DrawingKind::Brush { points } => {
                                         points.push((time, price));
                                     }
                                     DrawingKind::Path { points } => {
-                                        if let Some(last) = points.last_mut() {
-                                            *last = (time, price);
+                                        if points.len() >= 2 {
+                                            let anchor = points[points.len() - 2];
+                                            if let Some(last) = points.last_mut() {
+                                                *last = if shift {
+                                                    snap_to_45_degrees(anchor, frame_pos, chart)
+                                                } else {
+                                                    snapped
+                                                };
+                                            }
+                                        } else if let Some(last) = points.last_mut() {
+                                            *last = snapped;
                                         }
                                     }
                                     DrawingKind::Position { stop_price, .. } => {
-                                        *stop_price = price;
+                                        *stop_price = snapped.1;
                                     }
                                 }
                                 return Some(canvas::Action::request_redraw().and_capture());
@@ -2408,8 +3087,11 @@ impl canvas::Program<Message> for KlineChart {
                         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                             match d_state.active_tool {
                                 DrawingTool::HorizontalLine => {
-                                    let drawing =
-                                        Drawing::horizontal(price, [0.95, 0.65, 0.15, 1.0], 1.5);
+                                    let drawing = Drawing::horizontal(
+                                        snapped.1,
+                                        [0.95, 0.65, 0.15, 1.0],
+                                        1.5,
+                                    );
                                     d_state.active_tool = DrawingTool::None;
                                     d_state.in_progress = None;
                                     return Some(
@@ -2419,9 +3101,14 @@ impl canvas::Program<Message> for KlineChart {
                                 }
                                 DrawingTool::Trendline => {
                                     if let Some(start) = d_state.start_point.take() {
+                                        let p2 = if d_state.shift_pressed {
+                                            snap_to_45_degrees(start, frame_pos, chart)
+                                        } else {
+                                            snapped
+                                        };
                                         let drawing = Drawing::trendline(
                                             start,
-                                            (time, price),
+                                            p2,
                                             [0.3, 0.75, 1.0, 1.0],
                                             1.5,
                                         );
@@ -2432,10 +3119,10 @@ impl canvas::Program<Message> for KlineChart {
                                                 .and_capture(),
                                         );
                                     } else {
-                                        d_state.start_point = Some((time, price));
+                                        d_state.start_point = Some(snapped);
                                         d_state.in_progress = Some(Drawing::trendline(
-                                            (time, price),
-                                            (time, price),
+                                            snapped,
+                                            snapped,
                                             [0.3, 0.75, 1.0, 1.0],
                                             1.5,
                                         ));
@@ -2448,7 +3135,7 @@ impl canvas::Program<Message> for KlineChart {
                                     if let Some(start) = d_state.start_point.take() {
                                         let drawing = Drawing::rectangle(
                                             start,
-                                            (time, price),
+                                            snapped,
                                             [0.3, 0.6, 0.95, 0.8],
                                             1.0,
                                         );
@@ -2459,10 +3146,10 @@ impl canvas::Program<Message> for KlineChart {
                                                 .and_capture(),
                                         );
                                     } else {
-                                        d_state.start_point = Some((time, price));
+                                        d_state.start_point = Some(snapped);
                                         d_state.in_progress = Some(Drawing::rectangle(
-                                            (time, price),
-                                            (time, price),
+                                            snapped,
+                                            snapped,
                                             [0.3, 0.6, 0.95, 0.8],
                                             1.0,
                                         ));
@@ -2486,7 +3173,19 @@ impl canvas::Program<Message> for KlineChart {
                                         ..
                                     }) = &mut d_state.in_progress
                                     {
-                                        points.push((time, price));
+                                        let pt = if shift && points.len() >= 2 {
+                                            snap_to_45_degrees(
+                                                points[points.len() - 2],
+                                                frame_pos,
+                                                chart,
+                                            )
+                                        } else {
+                                            snapped
+                                        };
+                                        if let Some(last) = points.last_mut() {
+                                            *last = pt;
+                                        }
+                                        points.push(pt);
                                         if points.len() >= 4
                                             && let Some(drawing) = d_state.in_progress.take()
                                         {
@@ -2503,7 +3202,7 @@ impl canvas::Program<Message> for KlineChart {
                                         );
                                     } else {
                                         d_state.in_progress = Some(Drawing::path(
-                                            vec![(time, price), (time, price)],
+                                            vec![snapped, snapped],
                                             [0.3, 0.75, 1.0, 1.0],
                                             1.5,
                                         ));
@@ -2513,10 +3212,11 @@ impl canvas::Program<Message> for KlineChart {
                                     }
                                 }
                                 DrawingTool::ShortPosition => {
-                                    let stop_price = price * 1.015;
-                                    let target_price = price * 0.955;
+                                    let entry_price = snapped.1;
+                                    let stop_price = entry_price * 1.015;
+                                    let target_price = entry_price * 0.955;
                                     let drawing = Drawing::position(
-                                        (time, price),
+                                        snapped,
                                         stop_price,
                                         target_price,
                                         false,
@@ -2531,10 +3231,11 @@ impl canvas::Program<Message> for KlineChart {
                                     );
                                 }
                                 DrawingTool::LongPosition => {
-                                    let stop_price = price * 0.985;
-                                    let target_price = price * 1.045;
+                                    let entry_price = snapped.1;
+                                    let stop_price = entry_price * 0.985;
+                                    let target_price = entry_price * 1.045;
                                     let drawing = Drawing::position(
-                                        (time, price),
+                                        snapped,
                                         stop_price,
                                         target_price,
                                         true,
@@ -2572,30 +3273,6 @@ impl canvas::Program<Message> for KlineChart {
 
         // 5.5. Handle Drawing Selection, Moving & Modification (TradingView style)
         if self.drawing_state.borrow().active_tool == DrawingTool::None {
-            // Cancel / deselect on Escape
-            if let Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event {
-                if matches!(
-                    key.as_ref(),
-                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape)
-                ) {
-                    let mut d_state = self.drawing_state.borrow_mut();
-                    if d_state.selected_drawing.take().is_some() {
-                        return Some(
-                            canvas::Action::publish(Message::SelectDrawing(None)).and_capture(),
-                        );
-                    }
-                }
-                // Delete selected drawing on Delete or Backspace
-                if matches!(
-                    key.as_ref(),
-                    iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete)
-                        | iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace)
-                ) && let Some(id) = self.drawing_state.borrow_mut().selected_drawing.take()
-                {
-                    return Some(canvas::Action::publish(Message::DeleteDrawing(id)).and_capture());
-                }
-            }
-
             // Dragging an existing drawing or handle
             let is_drawing_drag = self.drawing_state.borrow().drag.is_some();
             if is_drawing_drag {
@@ -2611,6 +3288,9 @@ impl canvas::Program<Message> for KlineChart {
                     match event {
                         Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                             let mut d_state = self.drawing_state.borrow_mut();
+                            let shift = d_state.shift_pressed;
+                            let ctrl = d_state.ctrl_pressed;
+                            let is_magnet_active = self.config.magnet_mode ^ ctrl;
                             if let Some(DrawingDrag::MovingDrawing {
                                 start_time,
                                 start_price,
@@ -2623,7 +3303,15 @@ impl canvas::Program<Message> for KlineChart {
                                 let price_delta = price - *start_price;
                                 *current_drawing = initial_drawing.clone();
                                 current_drawing.translate(time_delta, price_delta);
-                                return Some(canvas::Action::request_redraw().and_capture());
+                                if matches!(current_drawing.kind, DrawingKind::Position { .. }) {
+                                    self.chart.cache.clear_crosshair();
+                                    return Some(
+                                        canvas::Action::publish(Message::CrosshairMoved)
+                                            .and_capture(),
+                                    );
+                                } else {
+                                    return Some(canvas::Action::request_redraw().and_capture());
+                                }
                             } else if let Some(DrawingDrag::MovingHandle {
                                 handle_idx,
                                 initial_drawing,
@@ -2631,59 +3319,23 @@ impl canvas::Program<Message> for KlineChart {
                                 ..
                             }) = &mut d_state.drag
                             {
-                                *current_drawing = initial_drawing.clone();
-                                match &mut current_drawing.kind {
-                                    DrawingKind::HorizontalLine { price: p } => *p = price,
-                                    DrawingKind::Trendline { p1, p2 } => {
-                                        if *handle_idx == 0 {
-                                            *p1 = (time, price);
-                                        } else {
-                                            *p2 = (time, price);
-                                        }
-                                    }
-                                    DrawingKind::Rectangle { p1, p2 } => {
-                                        if *handle_idx == 0 {
-                                            *p1 = (time, price);
-                                        } else if *handle_idx == 1 {
-                                            p1.1 = price;
-                                        } else if *handle_idx == 2 {
-                                            p2.0 = time;
-                                            p1.1 = price;
-                                        } else if *handle_idx == 3 {
-                                            p2.0 = time;
-                                        } else if *handle_idx == 4 {
-                                            *p2 = (time, price);
-                                        } else if *handle_idx == 5 {
-                                            p2.1 = price;
-                                        } else if *handle_idx == 6 {
-                                            p1.0 = time;
-                                            p2.1 = price;
-                                        } else if *handle_idx == 7 {
-                                            p1.0 = time;
-                                        }
-                                    }
-                                    DrawingKind::Path { points } => {
-                                        if let Some(pt) = points.get_mut(*handle_idx) {
-                                            *pt = (time, price);
-                                        }
-                                    }
-                                    DrawingKind::Brush { .. } => {}
-                                    DrawingKind::Position {
-                                        entry,
-                                        target_price,
-                                        stop_price,
-                                        ..
-                                    } => {
-                                        if *handle_idx == 0 {
-                                            *entry = (time, price);
-                                        } else if *handle_idx == 1 {
-                                            *target_price = price;
-                                        } else if *handle_idx == 2 {
-                                            *stop_price = price;
-                                        }
-                                    }
+                                self.apply_handle_movement(
+                                    *handle_idx,
+                                    initial_drawing,
+                                    current_drawing,
+                                    frame_pos,
+                                    shift,
+                                    is_magnet_active,
+                                );
+                                if matches!(current_drawing.kind, DrawingKind::Position { .. }) {
+                                    self.chart.cache.clear_crosshair();
+                                    return Some(
+                                        canvas::Action::publish(Message::CrosshairMoved)
+                                            .and_capture(),
+                                    );
+                                } else {
+                                    return Some(canvas::Action::request_redraw().and_capture());
                                 }
-                                return Some(canvas::Action::request_redraw().and_capture());
                             }
                         }
                         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -2697,6 +3349,7 @@ impl canvas::Program<Message> for KlineChart {
                                         current_drawing, ..
                                     } => current_drawing,
                                 };
+                                self.chart.cache.clear_crosshair();
                                 return Some(
                                     canvas::Action::publish(Message::UpdateDrawing(
                                         current_drawing,
@@ -2748,8 +3401,14 @@ impl canvas::Program<Message> for KlineChart {
                                 Some(DrawingDrag::MovingHandle {
                                     handle_idx: idx,
                                     initial_drawing: sel_d.clone(),
-                                    current_drawing: sel_d,
+                                    current_drawing: sel_d.clone(),
                                 });
+                            if matches!(sel_d.kind, DrawingKind::Position { .. }) {
+                                self.chart.cache.clear_crosshair();
+                                return Some(
+                                    canvas::Action::publish(Message::CrosshairMoved).and_capture(),
+                                );
+                            }
                         }
                         return Some(canvas::Action::request_redraw().and_capture());
                     }
@@ -2780,6 +3439,9 @@ impl canvas::Program<Message> for KlineChart {
                                         current_drawing: drawing.clone(),
                                     });
                                 }
+                            }
+                            if matches!(drawing.kind, DrawingKind::Position { .. }) {
+                                self.chart.cache.clear_crosshair();
                             }
                         }
                         return Some(
@@ -3280,7 +3942,12 @@ impl canvas::Program<Message> for KlineChart {
                 );
             }
 
-            if self.indicators[KlineIndicator::RollingVwap].is_some() {
+            if self.indicators[KlineIndicator::RollingVwap].is_some()
+                && (self.config.rolling_vwap_show_7d
+                    || self.config.rolling_vwap_show_30d
+                    || self.config.rolling_vwap_show_90d
+                    || self.config.rolling_vwap_show_365d)
+            {
                 let rolling_indicator = self.indicators[KlineIndicator::RollingVwap]
                     .as_ref()
                     .and_then(|box_indi| box_indi.as_any())
@@ -3352,6 +4019,29 @@ impl canvas::Program<Message> for KlineChart {
         let d_state = self.drawing_state.borrow();
         let selected_drawing_id = d_state.selected_drawing;
         let drag_drawing = d_state.drag.as_ref().map(|d| d.current_drawing());
+        let is_magnet_active = self.config.magnet_mode ^ d_state.ctrl_pressed;
+        let magnet_indicator = if is_magnet_active
+            && (d_state.active_tool != DrawingTool::None
+                && d_state.active_tool != DrawingTool::Brush
+                || d_state.in_progress.is_some()
+                || matches!(d_state.drag, Some(DrawingDrag::MovingHandle { .. })))
+        {
+            d_state.last_cursor_frame_pos.and_then(|pos| {
+                let snapped = self.snap_point_to_candle(pos);
+                let candle_x = chart.interval_to_x(snapped.0);
+                let max_x_dist = (chart.cell_width * 3.0).max(40.0 / chart.scaling);
+                if (pos.x - candle_x).abs() <= max_x_dist {
+                    Some(Point::new(
+                        candle_x,
+                        chart.price_to_y(Price::from_f32(snapped.1)),
+                    ))
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
         draw_chart_drawings(
             &mut dynamic_frame,
             &self.drawings,
@@ -3360,6 +4050,7 @@ impl canvas::Program<Message> for KlineChart {
             chart,
             &region,
             selected_drawing_id,
+            magnet_indicator,
         );
         draw_chart_alerts(
             &mut dynamic_frame,
@@ -4097,7 +4788,6 @@ fn draw_cluster_search_highlights(
 
     let rgb = color.to_rgb();
     let base_color = iced::Color::from_rgb(rgb[0], rgb[1], rgb[2]);
-    let border_w = (2.0 / scaling).clamp(1.0, 3.5);
     let is_thin = cell_width < (25.0 / scaling);
 
     for (price, group) in &footprint.trades {
@@ -4122,7 +4812,7 @@ fn draw_cluster_search_highlights(
 
         let y = price_to_y(*price);
 
-        // Volumetric scaling factor: markers scale dynamically with anomaly magnitude
+        // Volumetric scaling factor: harmonious scaling with anomaly magnitude
         let threshold_ref = if min_volume > 0.0 {
             min_volume
         } else if min_delta > 0.0 {
@@ -4136,7 +4826,12 @@ fn draw_cluster_search_highlights(
             delta.abs()
         };
         let vol_ratio = (anomaly_metric / threshold_ref.max(1.0)).max(1.0);
-        let scale_factor = vol_ratio.sqrt().clamp(1.0, 3.0);
+        let scale_factor = vol_ratio.sqrt().clamp(1.0, 1.5);
+        let border_w = if is_thin {
+            1.0
+        } else {
+            (1.2 / scaling.sqrt()).clamp(1.0, 1.5)
+        };
 
         match style {
             HighlightStyle::Border => {
@@ -4202,15 +4897,15 @@ fn draw_cluster_search_highlights(
                 );
             }
             HighlightStyle::Circle => {
-                let base_r = (cell_height * 0.85).clamp(8.0 / scaling, 18.0 / scaling);
-                let radius = (base_r * scale_factor).clamp(7.0 / scaling, 36.0 / scaling);
+                let base_r = (cell_height * 0.75).clamp(8.0, 14.0);
+                let radius = (base_r * scale_factor).clamp(7.5, 18.0);
                 let circle_path = Path::circle(Point::new(x_position, y), radius);
                 frame.fill(&circle_path, base_color.scale_alpha(0.35));
                 frame.stroke(
                     &circle_path,
                     Stroke::with_color(
                         Stroke {
-                            width: border_w,
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.95),
@@ -4218,14 +4913,14 @@ fn draw_cluster_search_highlights(
                 );
             }
             HighlightStyle::Ring => {
-                let base_r = (cell_height * 0.85).clamp(8.0 / scaling, 18.0 / scaling);
-                let radius = (base_r * scale_factor).clamp(7.0 / scaling, 36.0 / scaling);
+                let base_r = (cell_height * 0.75).clamp(8.0, 14.0);
+                let radius = (base_r * scale_factor).clamp(7.5, 18.0);
                 let ring_path = Path::circle(Point::new(x_position, y), radius);
                 frame.stroke(
                     &ring_path,
                     Stroke::with_color(
                         Stroke {
-                            width: border_w * 1.2,
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.95),
@@ -4233,28 +4928,28 @@ fn draw_cluster_search_highlights(
                 );
             }
             HighlightStyle::Concentric => {
-                let base_r = (cell_height * 0.80).clamp(7.5 / scaling, 17.0 / scaling);
-                let inner_radius = (base_r * scale_factor).clamp(6.5 / scaling, 30.0 / scaling);
+                let base_r = (cell_height * 0.70).clamp(7.0, 13.0);
+                let inner_radius = (base_r * scale_factor).clamp(6.5, 16.0);
                 let inner_path = Path::circle(Point::new(x_position, y), inner_radius);
                 frame.fill(&inner_path, base_color.scale_alpha(0.35));
                 frame.stroke(
                     &inner_path,
                     Stroke::with_color(
                         Stroke {
-                            width: border_w,
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.95),
                     ),
                 );
 
-                let outer_radius = inner_radius * 1.45;
+                let outer_radius = inner_radius + 4.5;
                 let outer_path = Path::circle(Point::new(x_position, y), outer_radius);
                 frame.stroke(
                     &outer_path,
                     Stroke::with_color(
                         Stroke {
-                            width: border_w * 1.1,
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.85),
@@ -4262,8 +4957,8 @@ fn draw_cluster_search_highlights(
                 );
             }
             HighlightStyle::Triangle => {
-                let base_size = (cell_height * 0.85).clamp(8.0 / scaling, 18.0 / scaling);
-                let half_size = (base_size * scale_factor).clamp(7.0 / scaling, 34.0 / scaling);
+                let base_size = (cell_height * 0.75).clamp(8.0, 14.0);
+                let half_size = (base_size * scale_factor).clamp(7.5, 18.0);
                 let tri_path = {
                     let mut builder = canvas::path::Builder::new();
                     if delta >= 0.0 {
@@ -4297,7 +4992,7 @@ fn draw_cluster_search_highlights(
                     &tri_path,
                     Stroke::with_color(
                         Stroke {
-                            width: border_w,
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.95),
@@ -4305,8 +5000,8 @@ fn draw_cluster_search_highlights(
                 );
             }
             HighlightStyle::Square => {
-                let base_size = (cell_height * 0.75).clamp(7.0 / scaling, 16.0 / scaling);
-                let half_size = (base_size * scale_factor).clamp(6.0 / scaling, 30.0 / scaling);
+                let base_size = (cell_height * 0.70).clamp(7.0, 13.0);
+                let half_size = (base_size * scale_factor).clamp(6.5, 16.0);
                 let rect = Path::rectangle(
                     Point::new(x_position - half_size, y - half_size),
                     Size::new(half_size * 2.0, half_size * 2.0),
@@ -4316,11 +5011,63 @@ fn draw_cluster_search_highlights(
                     &rect,
                     Stroke::with_color(
                         Stroke {
-                            width: border_w,
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.95),
                     ),
+                );
+            }
+            HighlightStyle::ClassicCircle => {
+                let radius = (cell_height * 0.40).clamp(3.5 / scaling, 8.0 / scaling);
+                let center_x = if is_thin {
+                    x_position
+                } else if delta >= 0.0 {
+                    x_position + cell_width / 2.0 - radius - (2.0 / scaling)
+                } else {
+                    x_position - cell_width / 2.0 + radius + (2.0 / scaling)
+                };
+                let circle_path = Path::circle(Point::new(center_x, y), radius);
+                frame.fill(&circle_path, base_color);
+            }
+            HighlightStyle::ClassicTriangle => {
+                let half_size = (cell_height * 0.42).clamp(3.5 / scaling, 8.0 / scaling);
+                let center_x = if is_thin {
+                    x_position
+                } else if delta >= 0.0 {
+                    x_position + cell_width / 2.0 - half_size - (2.0 / scaling)
+                } else {
+                    x_position - cell_width / 2.0 + half_size + (2.0 / scaling)
+                };
+                let tri_path = {
+                    let mut builder = canvas::path::Builder::new();
+                    if delta >= 0.0 {
+                        builder.move_to(Point::new(center_x, y - half_size));
+                        builder.line_to(Point::new(center_x + half_size, y + half_size));
+                        builder.line_to(Point::new(center_x - half_size, y + half_size));
+                    } else {
+                        builder.move_to(Point::new(center_x, y + half_size));
+                        builder.line_to(Point::new(center_x + half_size, y - half_size));
+                        builder.line_to(Point::new(center_x - half_size, y - half_size));
+                    }
+                    builder.close();
+                    builder.build()
+                };
+                frame.fill(&tri_path, base_color);
+            }
+            HighlightStyle::ClassicSquare => {
+                let half_size = (cell_height * 0.38).clamp(3.0 / scaling, 7.0 / scaling);
+                let center_x = if is_thin {
+                    x_position
+                } else if delta >= 0.0 {
+                    x_position + cell_width / 2.0 - half_size - (2.0 / scaling)
+                } else {
+                    x_position - cell_width / 2.0 + half_size + (2.0 / scaling)
+                };
+                frame.fill_rectangle(
+                    Point::new(center_x - half_size, y - half_size),
+                    Size::new(half_size * 2.0, half_size * 2.0),
+                    base_color,
                 );
             }
         }
@@ -5622,81 +6369,119 @@ fn draw_rolling_vwap_overlay(
     let mut prev_90d: Option<(f32, f32)> = None;
     let mut prev_365d: Option<(f32, f32)> = None;
 
+    let rgb_7d = config.rolling_vwap_colors.d7_rgb();
+    let rgb_30d = config.rolling_vwap_colors.d30_rgb();
+    let rgb_90d = config.rolling_vwap_colors.d90_rgb();
+    let rgb_365d = config.rolling_vwap_colors.d365_rgb();
+
     let stroke_7d = Stroke::default()
-        .with_color(iced::Color::from_rgb(0.0, 0.9, 1.0)) // Cyan (7d)
+        .with_color(iced::Color::from_rgb8(rgb_7d[0], rgb_7d[1], rgb_7d[2]))
         .with_width(1.5);
     let stroke_30d = Stroke::default()
-        .with_color(iced::Color::from_rgb(1.0, 0.84, 0.0)) // Gold (30d)
+        .with_color(iced::Color::from_rgb8(rgb_30d[0], rgb_30d[1], rgb_30d[2]))
         .with_width(1.5);
     let stroke_90d = Stroke::default()
-        .with_color(iced::Color::from_rgb(1.0, 0.45, 0.1)) // Orange (90d)
+        .with_color(iced::Color::from_rgb8(rgb_90d[0], rgb_90d[1], rgb_90d[2]))
         .with_width(1.5);
     let stroke_365d = Stroke::default()
-        .with_color(iced::Color::from_rgb(0.85, 0.15, 0.95)) // Magenta (365d)
+        .with_color(iced::Color::from_rgb8(
+            rgb_365d[0],
+            rgb_365d[1],
+            rgb_365d[2],
+        ))
         .with_width(1.5);
 
-    if let Some(indicator) = rolling_indicator {
+    let max_gap_ms: u64 = match data_source {
+        PlotData::TimeBased(ts) => ts.interval.to_milliseconds().saturating_mul(3),
+        PlotData::TickBased(_) => u64::MAX,
+    };
+
+    let use_cached = rolling_indicator
+        .map(|ind| !ind.data.is_empty())
+        .unwrap_or(false);
+
+    if use_cached {
+        let indicator = rolling_indicator.unwrap();
+        let mut prev_time: Option<u64> = None;
+
         for (&time_u64, pt) in &indicator.data {
             if time_u64 > latest {
                 break;
             }
+
+            if prev_time.is_some_and(|last_t| time_u64.saturating_sub(last_t) > max_gap_ms) {
+                prev_7d = None;
+                prev_30d = None;
+                prev_90d = None;
+                prev_365d = None;
+            }
+            prev_time = Some(time_u64);
+
             let x = interval_to_x(time_u64);
 
-            if config.rolling_vwap_show_7d
-                && let Some(d7) = pt.d7
-            {
-                let y = price_to_y(Price::from_f32(d7.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_7d
-                {
-                    frame.stroke(&Path::line(Point::new(px, py), Point::new(x, y)), stroke_7d);
+            if config.rolling_vwap_show_7d {
+                if let Some(d7) = pt.d7 {
+                    let y = price_to_y(Price::from_f32(d7.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_7d
+                    {
+                        frame.stroke(&Path::line(Point::new(px, py), Point::new(x, y)), stroke_7d);
+                    }
+                    prev_7d = Some((x, y));
+                } else {
+                    prev_7d = None;
                 }
-                prev_7d = Some((x, y));
             }
 
-            if config.rolling_vwap_show_30d
-                && let Some(d30) = pt.d30
-            {
-                let y = price_to_y(Price::from_f32(d30.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_30d
-                {
-                    frame.stroke(
-                        &Path::line(Point::new(px, py), Point::new(x, y)),
-                        stroke_30d,
-                    );
+            if config.rolling_vwap_show_30d {
+                if let Some(d30) = pt.d30 {
+                    let y = price_to_y(Price::from_f32(d30.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_30d
+                    {
+                        frame.stroke(
+                            &Path::line(Point::new(px, py), Point::new(x, y)),
+                            stroke_30d,
+                        );
+                    }
+                    prev_30d = Some((x, y));
+                } else {
+                    prev_30d = None;
                 }
-                prev_30d = Some((x, y));
             }
 
-            if config.rolling_vwap_show_90d
-                && let Some(d90) = pt.d90
-            {
-                let y = price_to_y(Price::from_f32(d90.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_90d
-                {
-                    frame.stroke(
-                        &Path::line(Point::new(px, py), Point::new(x, y)),
-                        stroke_90d,
-                    );
+            if config.rolling_vwap_show_90d {
+                if let Some(d90) = pt.d90 {
+                    let y = price_to_y(Price::from_f32(d90.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_90d
+                    {
+                        frame.stroke(
+                            &Path::line(Point::new(px, py), Point::new(x, y)),
+                            stroke_90d,
+                        );
+                    }
+                    prev_90d = Some((x, y));
+                } else {
+                    prev_90d = None;
                 }
-                prev_90d = Some((x, y));
             }
 
-            if config.rolling_vwap_show_365d
-                && let Some(d365) = pt.d365
-            {
-                let y = price_to_y(Price::from_f32(d365.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_365d
-                {
-                    frame.stroke(
-                        &Path::line(Point::new(px, py), Point::new(x, y)),
-                        stroke_365d,
-                    );
+            if config.rolling_vwap_show_365d {
+                if let Some(d365) = pt.d365 {
+                    let y = price_to_y(Price::from_f32(d365.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_365d
+                    {
+                        frame.stroke(
+                            &Path::line(Point::new(px, py), Point::new(x, y)),
+                            stroke_365d,
+                        );
+                    }
+                    prev_365d = Some((x, y));
+                } else {
+                    prev_365d = None;
                 }
-                prev_365d = Some((x, y));
             }
         }
     } else {
@@ -5737,65 +6522,84 @@ fn draw_rolling_vwap_overlay(
         }
 
         let points = data::chart::vwap::calculate_multi_rolling_vwap_series(&candles);
+        let mut prev_time: Option<u64> = None;
+
         for (i, pt) in points.iter().enumerate() {
             let time_u64 = candles[i].0 as u64;
+
+            if prev_time.is_some_and(|last_t| time_u64.saturating_sub(last_t) > max_gap_ms) {
+                prev_7d = None;
+                prev_30d = None;
+                prev_90d = None;
+                prev_365d = None;
+            }
+            prev_time = Some(time_u64);
+
             let x = interval_to_x(time_u64);
 
-            if config.rolling_vwap_show_7d
-                && let Some(d7) = pt.d7
-            {
-                let y = price_to_y(Price::from_f32(d7.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_7d
-                {
-                    frame.stroke(&Path::line(Point::new(px, py), Point::new(x, y)), stroke_7d);
+            if config.rolling_vwap_show_7d {
+                if let Some(d7) = pt.d7 {
+                    let y = price_to_y(Price::from_f32(d7.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_7d
+                    {
+                        frame.stroke(&Path::line(Point::new(px, py), Point::new(x, y)), stroke_7d);
+                    }
+                    prev_7d = Some((x, y));
+                } else {
+                    prev_7d = None;
                 }
-                prev_7d = Some((x, y));
             }
 
-            if config.rolling_vwap_show_30d
-                && let Some(d30) = pt.d30
-            {
-                let y = price_to_y(Price::from_f32(d30.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_30d
-                {
-                    frame.stroke(
-                        &Path::line(Point::new(px, py), Point::new(x, y)),
-                        stroke_30d,
-                    );
+            if config.rolling_vwap_show_30d {
+                if let Some(d30) = pt.d30 {
+                    let y = price_to_y(Price::from_f32(d30.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_30d
+                    {
+                        frame.stroke(
+                            &Path::line(Point::new(px, py), Point::new(x, y)),
+                            stroke_30d,
+                        );
+                    }
+                    prev_30d = Some((x, y));
+                } else {
+                    prev_30d = None;
                 }
-                prev_30d = Some((x, y));
             }
 
-            if config.rolling_vwap_show_90d
-                && let Some(d90) = pt.d90
-            {
-                let y = price_to_y(Price::from_f32(d90.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_90d
-                {
-                    frame.stroke(
-                        &Path::line(Point::new(px, py), Point::new(x, y)),
-                        stroke_90d,
-                    );
+            if config.rolling_vwap_show_90d {
+                if let Some(d90) = pt.d90 {
+                    let y = price_to_y(Price::from_f32(d90.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_90d
+                    {
+                        frame.stroke(
+                            &Path::line(Point::new(px, py), Point::new(x, y)),
+                            stroke_90d,
+                        );
+                    }
+                    prev_90d = Some((x, y));
+                } else {
+                    prev_90d = None;
                 }
-                prev_90d = Some((x, y));
             }
 
-            if config.rolling_vwap_show_365d
-                && let Some(d365) = pt.d365
-            {
-                let y = price_to_y(Price::from_f32(d365.vwap as f32));
-                if time_u64 >= earliest
-                    && let Some((px, py)) = prev_365d
-                {
-                    frame.stroke(
-                        &Path::line(Point::new(px, py), Point::new(x, y)),
-                        stroke_365d,
-                    );
+            if config.rolling_vwap_show_365d {
+                if let Some(d365) = pt.d365 {
+                    let y = price_to_y(Price::from_f32(d365.vwap as f32));
+                    if time_u64 >= earliest
+                        && let Some((px, py)) = prev_365d
+                    {
+                        frame.stroke(
+                            &Path::line(Point::new(px, py), Point::new(x, y)),
+                            stroke_365d,
+                        );
+                    }
+                    prev_365d = Some((x, y));
+                } else {
+                    prev_365d = None;
                 }
-                prev_365d = Some((x, y));
             }
         }
     }
@@ -5805,6 +6609,168 @@ fn draw_rolling_vwap_overlay(
 enum HitTarget {
     Handle(usize),
     Body,
+}
+
+pub(crate) fn snap_to_45_degrees(
+    anchor: (u64, f32),
+    frame_pos: Point,
+    chart: &ViewState,
+) -> (u64, f32) {
+    let anchor_x = chart.interval_to_x(anchor.0);
+    let anchor_y = chart.price_to_y(Price::from_f32(anchor.1));
+
+    let dx = frame_pos.x - anchor_x;
+    let dy = frame_pos.y - anchor_y;
+
+    if dx.abs() < 1e-4 && dy.abs() < 1e-4 {
+        return anchor;
+    }
+
+    let angle = dy.atan2(dx);
+    let step = std::f32::consts::FRAC_PI_4;
+    let k = (angle / step).round() as i32;
+
+    let (snapped_x, snapped_y) = match k {
+        0 => (frame_pos.x, anchor_y),
+        1 => {
+            let d = (dx + dy) * 0.5;
+            (anchor_x + d, anchor_y + d)
+        }
+        2 => (anchor_x, frame_pos.y),
+        3 => {
+            let d = (-dx + dy) * 0.5;
+            (anchor_x - d, anchor_y + d)
+        }
+        4 | -4 => (frame_pos.x, anchor_y),
+        -3 => {
+            let d = (-dx - dy) * 0.5;
+            (anchor_x - d, anchor_y - d)
+        }
+        -2 => (anchor_x, frame_pos.y),
+        -1 => {
+            let d = (dx - dy) * 0.5;
+            (anchor_x + d, anchor_y - d)
+        }
+        _ => (frame_pos.x, frame_pos.y),
+    };
+
+    let snapped_time = if k == 2 || k == -2 {
+        anchor.0
+    } else {
+        chart.x_to_interval(snapped_x)
+    };
+
+    let snapped_price = if k == 0 || k == 4 || k == -4 {
+        anchor.1
+    } else {
+        chart.y_to_price(snapped_y).to_f32()
+    };
+
+    (snapped_time, snapped_price)
+}
+
+pub(crate) fn snap_to_smart_magnet(
+    data_source: &PlotData<KlineDataPoint>,
+    chart: &ViewState,
+    frame_pos: Point,
+) -> (u64, f32) {
+    let cursor_time = chart.x_to_interval(frame_pos.x);
+    let cursor_price = chart.y_to_price(frame_pos.y).to_f32();
+
+    match data_source {
+        PlotData::TimeBased(ts) => {
+            let prev = ts.datapoints.range(..=cursor_time).next_back();
+            let next = ts.datapoints.range(cursor_time..).next();
+
+            let best_candlestick = match (prev, next) {
+                (Some((t1, dp1)), Some((t2, dp2))) => {
+                    let x1 = chart.interval_to_x(*t1);
+                    let x2 = chart.interval_to_x(*t2);
+                    if (frame_pos.x - x1).abs() <= (frame_pos.x - x2).abs() {
+                        Some((*t1, &dp1.kline))
+                    } else {
+                        Some((*t2, &dp2.kline))
+                    }
+                }
+                (Some((t1, dp1)), None) => Some((*t1, &dp1.kline)),
+                (None, Some((t2, dp2))) => Some((*t2, &dp2.kline)),
+                (None, None) => None,
+            };
+
+            if let Some((candle_time, kline)) = best_candlestick {
+                let candle_x = chart.interval_to_x(candle_time);
+                let max_x_dist = (chart.cell_width * 3.0).max(40.0 / chart.scaling);
+                if (frame_pos.x - candle_x).abs() <= max_x_dist {
+                    let h = kline.high.to_f32();
+                    let l = kline.low.to_f32();
+                    let o = kline.open.to_f32();
+                    let c = kline.close.to_f32();
+
+                    let levels = [h, l, o, c];
+                    let mut best_level = h;
+                    let mut min_diff = (cursor_price - h).abs();
+                    for &lvl in &levels[1..] {
+                        let diff = (cursor_price - lvl).abs();
+                        if diff < min_diff {
+                            min_diff = diff;
+                            best_level = lvl;
+                        }
+                    }
+                    return (candle_time, best_level);
+                }
+            }
+
+            (cursor_time, cursor_price)
+        }
+        PlotData::TickBased(tick_aggr) => {
+            let n = tick_aggr.datapoints.len();
+            if n == 0 {
+                return (cursor_time, cursor_price);
+            }
+
+            let tick = cursor_time as usize;
+            let clamped_idx = tick.min(n - 1);
+            let candidates = [
+                clamped_idx.saturating_sub(1),
+                clamped_idx,
+                (clamped_idx + 1).min(n - 1),
+            ];
+
+            let mut best_idx = clamped_idx;
+            let mut min_x_dist = f32::MAX;
+            for &idx in &candidates {
+                let x = chart.interval_to_x(idx as u64);
+                let dist = (frame_pos.x - x).abs();
+                if dist < min_x_dist {
+                    min_x_dist = dist;
+                    best_idx = idx;
+                }
+            }
+
+            let max_x_dist = (chart.cell_width * 3.0).max(40.0 / chart.scaling);
+            if min_x_dist <= max_x_dist && best_idx < n {
+                let kline = &tick_aggr.datapoints[n - 1 - best_idx].kline;
+                let h = kline.high.to_f32();
+                let l = kline.low.to_f32();
+                let o = kline.open.to_f32();
+                let c = kline.close.to_f32();
+
+                let levels = [h, l, o, c];
+                let mut best_level = h;
+                let mut min_diff = (cursor_price - h).abs();
+                for &lvl in &levels[1..] {
+                    let diff = (cursor_price - lvl).abs();
+                    if diff < min_diff {
+                        min_diff = diff;
+                        best_level = lvl;
+                    }
+                }
+                return (best_idx as u64, best_level);
+            }
+
+            (cursor_time, cursor_price)
+        }
+    }
 }
 
 fn dist_to_segment(p: Point, a: Point, b: Point) -> f32 {
@@ -5994,6 +6960,7 @@ fn draw_chart_drawings(
     chart: &ViewState,
     region: &Rectangle,
     selected_id: Option<uuid::Uuid>,
+    magnet_indicator: Option<Point>,
 ) {
     let handle_radius = 4.0 / chart.scaling;
     let handle_stroke_w = 1.5 / chart.scaling;
@@ -6216,12 +7183,22 @@ fn draw_chart_drawings(
                 let stop_y = chart.price_to_y(Price::from_f32(*stop_price));
                 let box_w = 140.0 / chart.scaling;
 
+                let pos_style = drawing.position_style();
+                let p_col = pos_style.profit_color;
+                let s_col = pos_style.stop_color;
+                let e_col = pos_style.entry_color;
+
                 // Profit zone
                 let p_min_y = entry_y.min(target_y);
                 let p_h = (entry_y - target_y).abs();
-                let profit_fill = iced::Color::from_rgba(0.12, 0.78, 0.42, 0.2);
+                let profit_fill = iced::Color::from_rgba(p_col[0], p_col[1], p_col[2], p_col[3]);
                 let profit_stroke = Stroke {
-                    style: canvas::Style::Solid(iced::Color::from_rgba(0.12, 0.78, 0.42, 0.8)),
+                    style: canvas::Style::Solid(iced::Color::from_rgba(
+                        p_col[0],
+                        p_col[1],
+                        p_col[2],
+                        (p_col[3] * 2.0).clamp(0.6, 1.0),
+                    )),
                     width: 1.0,
                     ..Default::default()
                 };
@@ -6238,9 +7215,14 @@ fn draw_chart_drawings(
                 // Stop zone
                 let s_min_y = entry_y.min(stop_y);
                 let s_h = (entry_y - stop_y).abs();
-                let stop_fill = iced::Color::from_rgba(0.88, 0.24, 0.24, 0.2);
+                let stop_fill = iced::Color::from_rgba(s_col[0], s_col[1], s_col[2], s_col[3]);
                 let stop_stroke = Stroke {
-                    style: canvas::Style::Solid(iced::Color::from_rgba(0.88, 0.24, 0.24, 0.8)),
+                    style: canvas::Style::Solid(iced::Color::from_rgba(
+                        s_col[0],
+                        s_col[1],
+                        s_col[2],
+                        (s_col[3] * 2.0).clamp(0.6, 1.0),
+                    )),
                     width: 1.0,
                     ..Default::default()
                 };
@@ -6261,8 +7243,10 @@ fn draw_chart_drawings(
                         Point::new(entry_x + box_w, entry_y),
                     ),
                     Stroke {
-                        style: canvas::Style::Solid(iced::Color::from_rgba(0.85, 0.9, 0.95, 0.9)),
-                        width: 1.2,
+                        style: canvas::Style::Solid(iced::Color::from_rgba(
+                            e_col[0], e_col[1], e_col[2], e_col[3],
+                        )),
+                        width: drawing.width.max(1.0),
                         ..Default::default()
                     },
                 );
@@ -6290,6 +7274,20 @@ fn draw_chart_drawings(
                 }
             }
         }
+    }
+
+    if let Some(pt) = magnet_indicator {
+        let r = 5.0 / chart.scaling;
+        let magnet_color = iced::Color::from_rgb(0.2, 0.65, 1.0);
+        frame.stroke(
+            &Path::circle(pt, r),
+            Stroke {
+                style: canvas::Style::Solid(magnet_color),
+                width: 1.5 / chart.scaling,
+                ..Default::default()
+            },
+        );
+        frame.fill(&Path::circle(pt, 2.0 / chart.scaling), magnet_color);
     }
 }
 
@@ -6687,10 +7685,73 @@ mod tests {
             panic!("Expected ClusterSearch variant");
         }
 
+        let custom_rule = FootprintStudy::ClusterSearch {
+            id: 7,
+            min_volume: 50000.0,
+            min_delta: 20000.0,
+            side: ClusterSearchSide::Both,
+            style: HighlightStyle::ClassicCircle,
+            color: HighlightColor::Custom([255, 100, 50]),
+        };
+
+        if let FootprintStudy::ClusterSearch { style, color, .. } = custom_rule {
+            assert_eq!(format!("{}", style), "Dot (Classic)");
+            assert_eq!(format!("{}", color), "Custom RGB (255, 100, 50)");
+            let rgb = color.to_rgb();
+            assert!((rgb[0] - 1.0).abs() < 1e-4);
+            assert!((rgb[1] - 100.0 / 255.0).abs() < 1e-4);
+            assert!((rgb[2] - 50.0 / 255.0).abs() < 1e-4);
+        } else {
+            panic!("Expected ClusterSearch variant");
+        }
+
+        let classic_tri = HighlightStyle::ClassicTriangle;
+        let classic_sq = HighlightStyle::ClassicSquare;
+        assert_eq!(format!("{}", classic_tri), "Triangle (Classic)");
+        assert_eq!(format!("{}", classic_sq), "Square (Classic)");
+
         let serialized = serde_json::to_string(&concentric_rule).expect("serialize concentric");
         let deserialized: FootprintStudy =
             serde_json::from_str(&serialized).expect("deserialize concentric");
         assert_eq!(concentric_rule, deserialized);
+
+        let serialized_custom = serde_json::to_string(&custom_rule).expect("serialize custom");
+        let deserialized_custom: FootprintStudy =
+            serde_json::from_str(&serialized_custom).expect("deserialize custom");
+        assert_eq!(custom_rule, deserialized_custom);
+    }
+
+    #[test]
+    fn test_dynamic_cluster_search_creation_and_removal() {
+        use crate::modal::pane::settings::study::Study;
+        use data::chart::kline::FootprintStudy;
+
+        let active: Vec<FootprintStudy> = FootprintStudy::ALL.to_vec();
+        let next_rule = FootprintStudy::create_next(&active).expect("next rule");
+        if let FootprintStudy::ClusterSearch { id, .. } = next_rule {
+            assert_eq!(id, 5);
+        } else {
+            panic!("Expected ClusterSearch variant");
+        }
+        assert!(next_rule.can_remove());
+
+        // Default rules cannot be removed
+        for s in &active {
+            if let FootprintStudy::ClusterSearch { id, .. } = s
+                && *id <= 4
+            {
+                assert!(!s.can_remove());
+            }
+        }
+
+        let mut extended = active.clone();
+        extended.push(next_rule);
+        let next_rule_6 = FootprintStudy::create_next(&extended).expect("next rule 6");
+        if let FootprintStudy::ClusterSearch { id, .. } = next_rule_6 {
+            assert_eq!(id, 6);
+        } else {
+            panic!("Expected ClusterSearch variant");
+        }
     }
 
     #[test]
@@ -6700,13 +7761,13 @@ mod tests {
         let total_vol_large = 20000.0_f32;
         let total_vol_huge = 45000.0_f32;
 
-        let scale_normal = (total_vol_normal / threshold).sqrt().clamp(1.0, 3.0);
-        let scale_large = (total_vol_large / threshold).sqrt().clamp(1.0, 3.0);
-        let scale_huge = (total_vol_huge / threshold).sqrt().clamp(1.0, 3.0);
+        let scale_normal = (total_vol_normal / threshold).sqrt().clamp(1.0, 1.5);
+        let scale_large = (total_vol_large / threshold).sqrt().clamp(1.0, 1.5);
+        let scale_huge = (total_vol_huge / threshold).sqrt().clamp(1.0, 1.5);
 
         assert!((scale_normal - 1.0).abs() < 1e-4);
-        assert!((scale_large - 2.0).abs() < 1e-4);
-        assert!((scale_huge - 3.0).abs() < 1e-4);
+        assert!((scale_large - 1.5).abs() < 1e-4);
+        assert!((scale_huge - 1.5).abs() < 1e-4);
     }
 
     #[test]
@@ -7147,6 +8208,154 @@ mod tests {
     }
 
     #[test]
+    fn test_position_price_axis_badges_during_drag() {
+        use iced::widget::canvas::Program;
+
+        let mut chart = make_test_chart();
+
+        // 0. Empty chart -> empty badges
+        assert!(chart.y_axis_badges().is_empty());
+
+        let pos = Drawing::position((1000, 100.0), 95.0, 110.0, true, [0.2, 0.8, 0.4, 1.0], 1.0);
+        chart.add_drawing(pos.clone());
+
+        // 1. Position on chart -> 3 badges (TP, SL, Entry) permanently visible on Y axis
+        let badges = chart.y_axis_badges();
+        assert_eq!(badges.len(), 3);
+        assert_eq!(badges[0].price, 110.0);
+        assert_eq!(badges[1].price, 95.0);
+        assert_eq!(badges[2].price, 100.0);
+
+        // 2. Drag handle 1 (Take Profit) -> live Target price badge updated
+        let mut tp_drag = pos.clone();
+        if let DrawingKind::Position {
+            ref mut target_price,
+            ..
+        } = tp_drag.kind
+        {
+            *target_price = 115.0;
+        }
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingHandle {
+            handle_idx: 1,
+            initial_drawing: pos.clone(),
+            current_drawing: tp_drag,
+        });
+        let badges = chart.y_axis_badges();
+        assert_eq!(badges.len(), 3);
+        assert_eq!(badges[0].price, 115.0);
+        assert_eq!(badges[1].price, 95.0);
+        assert_eq!(badges[2].price, 100.0);
+
+        // 3. Drag handle 2 (Stop Loss) -> live Stop price badge updated
+        let mut sl_drag = pos.clone();
+        if let DrawingKind::Position {
+            ref mut stop_price, ..
+        } = sl_drag.kind
+        {
+            *stop_price = 90.0;
+        }
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingHandle {
+            handle_idx: 2,
+            initial_drawing: pos.clone(),
+            current_drawing: sl_drag,
+        });
+        let badges = chart.y_axis_badges();
+        assert_eq!(badges.len(), 3);
+        assert_eq!(badges[0].price, 110.0);
+        assert_eq!(badges[1].price, 90.0);
+        assert_eq!(badges[2].price, 100.0);
+
+        // 4. Drag handle 0 (Entry) -> live Entry price badge updated
+        let mut entry_drag = pos.clone();
+        if let DrawingKind::Position { ref mut entry, .. } = entry_drag.kind {
+            entry.1 = 102.0;
+        }
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingHandle {
+            handle_idx: 0,
+            initial_drawing: pos.clone(),
+            current_drawing: entry_drag,
+        });
+        let badges = chart.y_axis_badges();
+        assert_eq!(badges.len(), 3);
+        assert_eq!(badges[0].price, 110.0);
+        assert_eq!(badges[1].price, 95.0);
+        assert_eq!(badges[2].price, 102.0);
+
+        // 5. Drag whole Position body (MovingDrawing) -> All 3 badges shifted
+        let mut body_drag = pos.clone();
+        if let DrawingKind::Position {
+            ref mut entry,
+            ref mut target_price,
+            ref mut stop_price,
+            ..
+        } = body_drag.kind
+        {
+            entry.1 = 105.0;
+            *target_price = 115.0;
+            *stop_price = 100.0;
+        }
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingDrawing {
+            start_time: 1000,
+            start_price: 100.0,
+            initial_drawing: pos.clone(),
+            current_drawing: body_drag,
+        });
+        let badges = chart.y_axis_badges();
+        assert_eq!(badges.len(), 3);
+        assert_eq!(badges[0].price, 115.0);
+        assert_eq!(badges[1].price, 100.0);
+        assert_eq!(badges[2].price, 105.0);
+
+        // 6. Other drawing tools alone must NOT show badges
+        let mut chart_other = make_test_chart();
+        let rect = Drawing::rectangle((1000, 100.0), (2000, 110.0), [0.2, 0.5, 0.9, 1.0], 1.0);
+        chart_other.add_drawing(rect.clone());
+        assert!(chart_other.y_axis_badges().is_empty());
+        chart_other.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingDrawing {
+            start_time: 1000,
+            start_price: 100.0,
+            initial_drawing: rect.clone(),
+            current_drawing: rect.clone(),
+        });
+        assert!(chart_other.y_axis_badges().is_empty());
+
+        // 7. Interactive drag movement with update() publishes CrosshairMoved and clears cache
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingHandle {
+            handle_idx: 1,
+            initial_drawing: pos.clone(),
+            current_drawing: pos.clone(),
+        });
+        let cursor = mouse::Cursor::Available(Point::new(400.0, 300.0));
+        let move_event = Event::Mouse(mouse::Event::CursorMoved {
+            position: Point::new(400.0, 300.0),
+        });
+        let action = chart.update(&mut interaction, &move_event, bounds, cursor);
+        assert!(action.is_some());
+        assert!(chart.drawing_state.borrow().drag.is_some());
+
+        // 8. Escape cancels Position drag, returning to stored drawing badges
+        let esc_event = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::Escape),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
+        });
+        let esc_action = chart.update(&mut interaction, &esc_event, bounds, cursor);
+        assert!(esc_action.is_some());
+        assert!(chart.drawing_state.borrow().drag.is_none());
+        assert_eq!(chart.y_axis_badges().len(), 3);
+
+        // 9. Deleting position removes all badges
+        chart.delete_drawing(pos.id);
+        assert!(chart.y_axis_badges().is_empty());
+    }
+
+    #[test]
     fn test_kline_chart_brush_fixed_drag_only() {
         let chart = make_test_chart();
         let brush = Drawing::brush(
@@ -7407,5 +8616,938 @@ mod tests {
         } else {
             panic!("PositionFlow indicator should be present after toggle");
         }
+    }
+
+    #[test]
+    fn test_snap_to_45_degrees() {
+        let chart = make_test_chart();
+        let view_state = chart.state();
+
+        let anchor = (1000, 100.0);
+        let anchor_x = view_state.interval_to_x(anchor.0);
+        let anchor_y = view_state.price_to_y(Price::from_f32(anchor.1));
+
+        // 1. Zero delta returns anchor unchanged
+        let (t0, p0) = snap_to_45_degrees(anchor, Point::new(anchor_x, anchor_y), view_state);
+        assert_eq!(t0, anchor.0);
+        assert_eq!(p0, anchor.1);
+
+        // 2. Near-horizontal motion (10 degrees) snaps to exact 0 degrees
+        let near_h = Point::new(anchor_x + 100.0, anchor_y + 10.0);
+        let (th, ph) = snap_to_45_degrees(anchor, near_h, view_state);
+        assert_eq!(ph, anchor.1);
+        assert!(th > anchor.0);
+
+        // 3. Near-horizontal left motion (170 degrees) snaps to 180 degrees
+        let near_hl = Point::new(anchor_x - 100.0, anchor_y + 10.0);
+        let (thl, phl) = snap_to_45_degrees(anchor, near_hl, view_state);
+        assert_eq!(phl, anchor.1);
+        assert!(thl < anchor.0);
+
+        // 4. Near-vertical down motion (85 degrees) snaps to 90 degrees
+        let near_v = Point::new(anchor_x + 8.0, anchor_y + 100.0);
+        let (tv, pv) = snap_to_45_degrees(anchor, near_v, view_state);
+        assert_eq!(tv, anchor.0);
+        assert_ne!(pv, anchor.1);
+
+        // 5. Near-vertical up motion (-85 degrees) snaps to -90 degrees
+        let near_vu = Point::new(anchor_x + 8.0, anchor_y - 100.0);
+        let (tvu, pvu) = snap_to_45_degrees(anchor, near_vu, view_state);
+        assert_eq!(tvu, anchor.0);
+        assert_ne!(pvu, anchor.1);
+
+        // 6. Near 45-degree diagonal (40 degrees) snaps to 45 degrees
+        let near_diag = Point::new(anchor_x + 100.0, anchor_y + 80.0);
+        let (td, pd) = snap_to_45_degrees(anchor, near_diag, view_state);
+        let diag_x = view_state.interval_to_x(td);
+        let diag_y = view_state.price_to_y(Price::from_f32(pd));
+        let dx = (diag_x - anchor_x).abs();
+        let dy = (diag_y - anchor_y).abs();
+        assert!((dx - dy).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_trendline_drawing_angle_snap_with_shift() {
+        use iced::widget::canvas::Program;
+
+        let mut chart = make_test_chart();
+        chart.chart.latest_x = 100_000_000;
+        chart.chart.base_price_y = Price::from_f32(100.0);
+        chart.chart.cell_width = 10.0;
+        chart.chart.cell_height = 10.0;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+
+        chart.set_active_drawing_tool(DrawingTool::Trendline);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Trendline);
+
+        // 1. Click first point at screen center (400, 300) -> frame (0, 0)
+        let pt1 = Point::new(400.0, 300.0);
+        let click1_event = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let action1 = chart.update(
+            &mut interaction,
+            &click1_event,
+            bounds,
+            mouse::Cursor::Available(pt1),
+        );
+        assert!(action1.is_some());
+        assert!(chart.drawing_state.borrow().in_progress.is_some());
+
+        // 2. Move cursor near horizontal (600, 310) -> frame (200, 10), angle ~2.8 deg
+        let shift_key_down = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::SHIFT,
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::ShiftLeft),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift),
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &shift_key_down,
+            bounds,
+            mouse::Cursor::Available(pt1),
+        );
+        assert!(chart.drawing_state.borrow().shift_pressed);
+
+        let pt2_near_h = Point::new(600.0, 310.0);
+        let move_event = Event::Mouse(mouse::Event::CursorMoved {
+            position: pt2_near_h,
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &move_event,
+            bounds,
+            mouse::Cursor::Available(pt2_near_h),
+        );
+
+        // Trendline p2 should be snapped to horizontal (same price as p1)
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p1, p2 } = in_prog.kind {
+            assert_eq!(p1.1, p2.1);
+        } else {
+            panic!("Expected Trendline in progress");
+        }
+
+        // 3. Releasing Shift un-snaps on next move
+        let shift_key_up = Event::Keyboard(iced::keyboard::Event::KeyReleased {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::ShiftLeft),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift),
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &shift_key_up,
+            bounds,
+            mouse::Cursor::Available(pt2_near_h),
+        );
+        assert!(!chart.drawing_state.borrow().shift_pressed);
+
+        let _ = chart.update(
+            &mut interaction,
+            &move_event,
+            bounds,
+            mouse::Cursor::Available(pt2_near_h),
+        );
+        let in_prog_unsnapped = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p1, p2 } = in_prog_unsnapped.kind {
+            assert_ne!(p1.1, p2.1);
+        } else {
+            panic!("Expected Trendline in progress");
+        }
+
+        // 4. Press Shift again and click to finalize line
+        let _ = chart.update(
+            &mut interaction,
+            &shift_key_down,
+            bounds,
+            mouse::Cursor::Available(pt2_near_h),
+        );
+        let in_prog_snapped_again = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p1, p2 } = in_prog_snapped_again.kind {
+            assert_eq!(p1.1, p2.1);
+        } else {
+            panic!("Expected Trendline in progress");
+        }
+
+        let click2_event = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let finish_action = chart.update(
+            &mut interaction,
+            &click2_event,
+            bounds,
+            mouse::Cursor::Available(pt2_near_h),
+        );
+        assert!(finish_action.is_some());
+        assert!(chart.drawing_state.borrow().in_progress.is_none());
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::None);
+    }
+
+    #[test]
+    fn test_trendline_handle_drag_angle_snap_with_shift() {
+        use iced::widget::canvas::Program;
+
+        let mut chart = make_test_chart();
+        chart.chart.latest_x = 100_000_000;
+        chart.chart.base_price_y = Price::from_f32(100.0);
+        chart.chart.cell_width = 10.0;
+        chart.chart.cell_height = 10.0;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+
+        let tl = Drawing::trendline(
+            (100_000_000, 100.0),
+            (100_300_000, 110.0),
+            [0.3, 0.75, 1.0, 1.0],
+            1.5,
+        );
+        let tl_id = tl.id;
+        chart.add_drawing(tl.clone());
+        chart.drawing_state.borrow_mut().selected_drawing = Some(tl_id);
+
+        // Begin dragging handle 1 (endpoint p2)
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingHandle {
+            handle_idx: 1,
+            initial_drawing: tl.clone(),
+            current_drawing: tl,
+        });
+
+        // Set Shift active
+        chart.drawing_state.borrow_mut().shift_pressed = true;
+
+        // Move cursor near horizontal to p1 in screen coordinates
+        let p1_frame_x = chart.state().interval_to_x(100_000_000);
+        let p1_frame_y = chart.state().price_to_y(Price::from_f32(100.0));
+        let near_h_screen = Point::new(
+            p1_frame_x + 150.0 + bounds.width / 2.0,
+            p1_frame_y + 8.0 + bounds.height / 2.0,
+        );
+        let move_event = Event::Mouse(mouse::Event::CursorMoved {
+            position: near_h_screen,
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &move_event,
+            bounds,
+            mouse::Cursor::Available(near_h_screen),
+        );
+
+        if let Some(DrawingDrag::MovingHandle {
+            current_drawing, ..
+        }) = &chart.drawing_state.borrow().drag
+        {
+            if let DrawingKind::Trendline { p1, p2 } = current_drawing.kind {
+                assert_eq!(p1.1, p2.1);
+            } else {
+                panic!("Expected Trendline in drag");
+            }
+        } else {
+            panic!("Expected MovingHandle drag");
+        }
+    }
+
+    #[test]
+    fn test_drawing_active_prevents_ruler() {
+        use iced::widget::canvas::Program;
+
+        let mut chart = make_test_chart();
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+
+        chart.set_active_drawing_tool(DrawingTool::Trendline);
+
+        let shift_key = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::SHIFT,
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::ShiftLeft),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Shift),
+        });
+
+        let cursor_pos = Point::new(300.0, 300.0);
+        let action = chart.update(
+            &mut interaction,
+            &shift_key,
+            bounds,
+            mouse::Cursor::Available(cursor_pos),
+        );
+        assert!(action.is_some());
+        assert!(!matches!(interaction, Interaction::Ruler { .. }));
+        assert!(chart.drawing_state.borrow().shift_pressed);
+    }
+
+    #[test]
+    fn test_smart_magnet_snap_to_ohlc() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let klines = vec![exchange::Kline {
+            time: 1_000_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(110.0),
+            low: Price::from_f32(90.0),
+            close: Price::from_f32(105.0),
+            volume: (10.0, 10.0),
+        }];
+        let chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &klines,
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        let view_state = chart.state();
+        let candle_x = view_state.interval_to_x(1_000_000);
+
+        // 1. Cursor near High (109.0) -> snaps to High (110.0)
+        let pos_near_high = Point::new(
+            candle_x + 2.0,
+            view_state.price_to_y(Price::from_f32(109.0)),
+        );
+        let (t_h, p_h) = snap_to_smart_magnet(&chart.data_source, view_state, pos_near_high);
+        assert_eq!(t_h, 1_000_000);
+        assert!((p_h - 110.0).abs() < 1e-3);
+
+        // 2. Cursor near Close (104.0) -> snaps to Close (105.0)
+        let pos_near_close = Point::new(candle_x, view_state.price_to_y(Price::from_f32(104.0)));
+        let (t_c, p_c) = snap_to_smart_magnet(&chart.data_source, view_state, pos_near_close);
+        assert_eq!(t_c, 1_000_000);
+        assert!((p_c - 105.0).abs() < 1e-3);
+
+        // 3. Cursor near Open (101.0) -> snaps to Open (100.0)
+        let pos_near_open = Point::new(
+            candle_x - 2.0,
+            view_state.price_to_y(Price::from_f32(101.0)),
+        );
+        let (t_o, p_o) = snap_to_smart_magnet(&chart.data_source, view_state, pos_near_open);
+        assert_eq!(t_o, 1_000_000);
+        assert!((p_o - 100.0).abs() < 1e-3);
+
+        // 4. Cursor near Low (92.0) -> snaps to Low (90.0)
+        let pos_near_low = Point::new(candle_x, view_state.price_to_y(Price::from_f32(92.0)));
+        let (t_l, p_l) = snap_to_smart_magnet(&chart.data_source, view_state, pos_near_low);
+        assert_eq!(t_l, 1_000_000);
+        assert!((p_l - 90.0).abs() < 1e-3);
+
+        // 5. Cursor too far horizontally -> does not snap, retains raw cursor coordinates
+        let pos_far_x = Point::new(
+            candle_x + 500.0,
+            view_state.price_to_y(Price::from_f32(109.0)),
+        );
+        let (t_far, p_far) = snap_to_smart_magnet(&chart.data_source, view_state, pos_far_x);
+        assert_ne!(t_far, 1_000_000);
+        assert!((p_far - 109.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_smart_magnet_ctrl_inversion_and_settings() {
+        use iced::widget::canvas::Program;
+
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let klines = vec![exchange::Kline {
+            time: 1_000_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(110.0),
+            low: Price::from_f32(90.0),
+            close: Price::from_f32(105.0),
+            volume: (10.0, 10.0),
+        }];
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &klines,
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+        chart.set_active_drawing_tool(DrawingTool::Trendline);
+        assert!(chart.is_magnet_active());
+
+        let candle_x = chart.chart.interval_to_x(1_000_000);
+        let cursor_pt = Point::new(
+            bounds.width / 2.0 + candle_x * chart.chart.scaling,
+            bounds.height / 2.0
+                + chart.chart.price_to_y(Price::from_f32(108.0)) * chart.chart.scaling,
+        );
+
+        // 1. First click: start trendline -> snaps to High (110.0)
+        let click1 = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let _ = chart.update(
+            &mut interaction,
+            &click1,
+            bounds,
+            mouse::Cursor::Available(cursor_pt),
+        );
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p1, .. } = in_prog.kind {
+            assert!((p1.1 - 110.0).abs() < 1e-3);
+            assert_eq!(p1.0, 1_000_000);
+        } else {
+            panic!("Expected Trendline");
+        }
+
+        // 2. Cursor moved near Close (104.0) -> p2 snaps to 105.0
+        let move_near_close = Point::new(
+            bounds.width / 2.0 + candle_x * chart.chart.scaling,
+            bounds.height / 2.0
+                + chart.chart.price_to_y(Price::from_f32(104.0)) * chart.chart.scaling,
+        );
+        let move_event = Event::Mouse(mouse::Event::CursorMoved {
+            position: move_near_close,
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &move_event,
+            bounds,
+            mouse::Cursor::Available(move_near_close),
+        );
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p2, .. } = in_prog.kind {
+            assert!((p2.1 - 105.0).abs() < 1e-3);
+        }
+
+        // 3. Holding Ctrl temporarily disables magnet
+        let ctrl_down = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Control),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::CTRL,
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(
+                iced::keyboard::key::Code::ControlLeft,
+            ),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Control),
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &ctrl_down,
+            bounds,
+            mouse::Cursor::Available(move_near_close),
+        );
+        assert!(chart.drawing_state.borrow().ctrl_pressed);
+        assert!(!chart.is_magnet_active());
+
+        // While Ctrl held, cursor at 104.0 is unsnapped (price 104.0)
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p2, .. } = in_prog.kind {
+            assert!((p2.1 - 104.0).abs() < 1e-3);
+        }
+
+        // 4. Releasing Ctrl re-enables magnet
+        let ctrl_up = Event::Keyboard(iced::keyboard::Event::KeyReleased {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Control),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            physical_key: iced::keyboard::key::Physical::Code(
+                iced::keyboard::key::Code::ControlLeft,
+            ),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Control),
+        });
+        let _ = chart.update(
+            &mut interaction,
+            &ctrl_up,
+            bounds,
+            mouse::Cursor::Available(move_near_close),
+        );
+        assert!(!chart.drawing_state.borrow().ctrl_pressed);
+        assert!(chart.is_magnet_active());
+
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p2, .. } = in_prog.kind {
+            assert!((p2.1 - 105.0).abs() < 1e-3);
+        }
+
+        // 5. Magnet disabled in settings -> inverted by Ctrl
+        chart.toggle_magnet_mode();
+        assert!(!chart.config.magnet_mode);
+        assert!(!chart.is_magnet_active());
+
+        // Without Ctrl, it's unsnapped
+        let _ = chart.update(
+            &mut interaction,
+            &move_event,
+            bounds,
+            mouse::Cursor::Available(move_near_close),
+        );
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p2, .. } = in_prog.kind {
+            assert!((p2.1 - 104.0).abs() < 1e-3);
+        }
+
+        // With Ctrl held, it temporarily enables magnet
+        let _ = chart.update(
+            &mut interaction,
+            &ctrl_down,
+            bounds,
+            mouse::Cursor::Available(move_near_close),
+        );
+        assert!(chart.is_magnet_active());
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Trendline { p2, .. } = in_prog.kind {
+            assert!((p2.1 - 105.0).abs() < 1e-3);
+        }
+    }
+
+    #[test]
+    fn test_insert_hist_klines_rebuilds_rolling_vwap() {
+        const DAY_MS: u64 = 86_400_000;
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+
+        // 1. Start with recent candles (Day 20, Day 21)
+        let recent_klines = vec![
+            Kline {
+                time: 20 * DAY_MS,
+                open: Price::from_f32(200.0),
+                high: Price::from_f32(200.0),
+                low: Price::from_f32(200.0),
+                close: Price::from_f32(200.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: 21 * DAY_MS,
+                open: Price::from_f32(210.0),
+                high: Price::from_f32(210.0),
+                low: Price::from_f32(210.0),
+                close: Price::from_f32(210.0),
+                volume: (10.0, 10.0),
+            },
+        ];
+
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::D1),
+            1.0,
+            &recent_klines,
+            Vec::new(),
+            &[KlineIndicator::RollingVwap],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        // 2. Fetch earlier historical candles (Day 1, Day 2)
+        let hist_klines = vec![
+            Kline {
+                time: DAY_MS,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(100.0),
+                low: Price::from_f32(100.0),
+                close: Price::from_f32(100.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: 2 * DAY_MS,
+                open: Price::from_f32(110.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(110.0),
+                close: Price::from_f32(110.0),
+                volume: (10.0, 10.0),
+            },
+        ];
+
+        chart.insert_hist_klines(uuid::Uuid::new_v4(), &hist_klines);
+
+        // 3. Verify RollingVwapIndicator was cleanly rebuilt in chronological order
+        let rolling_indi = chart.indicators[KlineIndicator::RollingVwap]
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>())
+            .unwrap();
+
+        assert_eq!(rolling_indi.data.len(), 4);
+
+        // Historical Day 1 point must NOT be polluted by Day 20/21 values (must equal 100.0)
+        let pt_day1 = rolling_indi.data.get(&DAY_MS).unwrap();
+        assert_eq!(pt_day1.d7.unwrap().vwap, 100.0);
+        assert_eq!(pt_day1.d30.unwrap().vwap, 100.0);
+        assert_eq!(pt_day1.d90.unwrap().vwap, 100.0);
+        assert_eq!(pt_day1.d365.unwrap().vwap, 100.0);
+
+        // Day 20 point (19 days after Day 1):
+        // 7d window must only contain Day 20 (200.0)
+        let pt_day20 = rolling_indi.data.get(&(20 * DAY_MS)).unwrap();
+        assert_eq!(pt_day20.d7.unwrap().vwap, 200.0);
+
+        // 4. Ensure insert_trades_buffer on TimeBased does not insert trade timestamps into Rolling VWAP data
+        let sample_trade = exchange::Trade {
+            time: 21 * DAY_MS + 5_000,
+            is_sell: false,
+            price: Price::from_f32(212.0),
+            qty: 1.0,
+        };
+        chart.insert_trades_buffer(&[sample_trade]);
+
+        let rolling_indi_after = chart.indicators[KlineIndicator::RollingVwap]
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>())
+            .unwrap();
+
+        // Length must still be 4 candle timestamps, not 5 with trade timestamp
+        assert_eq!(rolling_indi_after.data.len(), 4);
+        assert!(!rolling_indi_after.data.contains_key(&(21 * DAY_MS + 5_000)));
+    }
+
+    #[test]
+    fn test_kline_indicator_settings_expansion_and_reset() {
+        let mut chart = make_test_chart();
+        assert_eq!(chart.expanded_indicator, None);
+
+        // 1. Toggle expansion
+        chart.toggle_indicator_settings(KlineIndicator::RollingVwap);
+        assert_eq!(chart.expanded_indicator, Some(KlineIndicator::RollingVwap));
+
+        // 2. Toggling the same indicator collapses it
+        chart.toggle_indicator_settings(KlineIndicator::RollingVwap);
+        assert_eq!(chart.expanded_indicator, None);
+
+        // 3. Switch to another indicator
+        chart.toggle_indicator(KlineIndicator::PositionFlow);
+        assert!(chart.indicators[KlineIndicator::PositionFlow].is_some());
+        chart.toggle_indicator_settings(KlineIndicator::PositionFlow);
+        assert_eq!(chart.expanded_indicator, Some(KlineIndicator::PositionFlow));
+
+        // 4. Removing the active indicator resets expanded_indicator
+        chart.toggle_indicator(KlineIndicator::PositionFlow);
+        assert!(chart.indicators[KlineIndicator::PositionFlow].is_none());
+        assert_eq!(chart.expanded_indicator, None);
+    }
+
+    #[test]
+    fn test_kline_indicator_rolling_vwap_isolation() {
+        let mut chart = make_test_chart();
+        assert!(chart.indicators[KlineIndicator::RollingVwap].is_none());
+        assert!(chart.config.rolling_vwap_show_7d);
+
+        // Indicator not present on chart: condition must evaluate to false
+        let should_draw_phantom = chart.indicators[KlineIndicator::RollingVwap].is_some()
+            && (chart.config.rolling_vwap_show_7d
+                || chart.config.rolling_vwap_show_30d
+                || chart.config.rolling_vwap_show_90d
+                || chart.config.rolling_vwap_show_365d);
+        assert!(!should_draw_phantom);
+
+        // Add indicator to chart: condition evaluates to true
+        chart.toggle_indicator(KlineIndicator::RollingVwap);
+        assert!(chart.indicators[KlineIndicator::RollingVwap].is_some());
+        let should_draw_active = chart.indicators[KlineIndicator::RollingVwap].is_some()
+            && (chart.config.rolling_vwap_show_7d
+                || chart.config.rolling_vwap_show_30d
+                || chart.config.rolling_vwap_show_90d
+                || chart.config.rolling_vwap_show_365d);
+        assert!(should_draw_active);
+
+        // Remove indicator: condition must evaluate to false again
+        chart.toggle_indicator(KlineIndicator::RollingVwap);
+        assert!(chart.indicators[KlineIndicator::RollingVwap].is_none());
+        let should_draw_after_removal = chart.indicators[KlineIndicator::RollingVwap].is_some()
+            && (chart.config.rolling_vwap_show_7d
+                || chart.config.rolling_vwap_show_30d
+                || chart.config.rolling_vwap_show_90d
+                || chart.config.rolling_vwap_show_365d);
+        assert!(!should_draw_after_removal);
+    }
+
+    #[test]
+    fn test_rolling_vwap_panel_toggle_and_color_customization() {
+        let mut chart = make_test_chart();
+        assert!(!chart.config.rolling_vwap_show_panel);
+
+        // 1. Enabling RollingVwap when rolling_vwap_show_panel is false:
+        // Overlay is active, but panel count is 0 and no layout splits are added.
+        chart.toggle_indicator(KlineIndicator::RollingVwap);
+        assert!(chart.indicators[KlineIndicator::RollingVwap].is_some());
+        assert_eq!(chart.active_panel_indicators_count(), 0);
+        assert!(chart.chart.layout.splits.is_empty());
+
+        // 2. Enabling rolling_vwap_show_panel via set_visual_config:
+        // Panel count becomes 1, layout splits dynamically allocated.
+        let mut cfg = chart.config();
+        cfg.rolling_vwap_show_panel = true;
+        cfg.rolling_vwap_colors.d7 = data::chart::kline::TpoElementColor::Red;
+        cfg.rolling_vwap_colors.d30 = data::chart::kline::TpoElementColor::Green;
+        cfg.rolling_vwap_colors.d90 = data::chart::kline::TpoElementColor::Blue;
+        cfg.rolling_vwap_colors.d365 = data::chart::kline::TpoElementColor::White;
+        chart.set_visual_config(cfg);
+
+        assert_eq!(chart.active_panel_indicators_count(), 1);
+        assert_eq!(chart.chart.layout.splits.len(), 1);
+
+        // Verify colors updated on indicator
+        let rv = chart.indicators[KlineIndicator::RollingVwap]
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::chart::indicator::kline::rolling_vwap::RollingVwapIndicator>())
+            .unwrap();
+        assert_eq!(rv.colors.d7, data::chart::kline::TpoElementColor::Red);
+        assert_eq!(rv.colors.d30, data::chart::kline::TpoElementColor::Green);
+        assert_eq!(rv.colors.d90, data::chart::kline::TpoElementColor::Blue);
+        assert_eq!(rv.colors.d365, data::chart::kline::TpoElementColor::White);
+        assert_eq!(rv.colors.d7_rgb(), [235, 75, 75]);
+
+        // 3. Disabling rolling_vwap_show_panel removes sub-panel and clears splits
+        cfg.rolling_vwap_show_panel = false;
+        chart.set_visual_config(cfg);
+        assert_eq!(chart.active_panel_indicators_count(), 0);
+        assert!(chart.chart.layout.splits.is_empty());
+        // Overlay indicator is still enabled on the chart
+        assert!(chart.indicators[KlineIndicator::RollingVwap].is_some());
+    }
+
+    #[test]
+    fn test_find_target_position() {
+        let mut chart = make_test_chart();
+        assert!(chart.find_target_position().is_none());
+
+        // Add a long position
+        let long_pos = Drawing {
+            id: uuid::Uuid::new_v4(),
+            kind: DrawingKind::Position {
+                entry: (1600000000000, 50000.0),
+                target_price: 53000.0,
+                stop_price: 49000.0,
+                is_long: true,
+                style: None,
+            },
+            color: [0.0, 1.0, 0.0, 1.0],
+            width: 1.0,
+            is_selected: false,
+            is_locked: false,
+        };
+        chart.add_drawing(long_pos);
+
+        let autofill = chart.find_target_position().expect("should find position");
+        assert_eq!(autofill.side, data::journal::TradeSide::Long);
+        assert_eq!(autofill.entry_price, 50000.0);
+        assert_eq!(autofill.stop_price, 49000.0);
+        assert_eq!(autofill.target_price, 53000.0);
+        assert!(autofill.notes.contains("R:R: 1:3.00"));
+
+        // Add a short position (which is now latest)
+        let short_id = uuid::Uuid::new_v4();
+        let short_pos = Drawing {
+            id: short_id,
+            kind: DrawingKind::Position {
+                entry: (1600000050000, 52000.0),
+                target_price: 50000.0,
+                stop_price: 53000.0,
+                is_long: false,
+                style: None,
+            },
+            color: [1.0, 0.0, 0.0, 1.0],
+            width: 1.0,
+            is_selected: false,
+            is_locked: false,
+        };
+        chart.add_drawing(short_pos);
+
+        // Without selection, should pick the latest (short)
+        let autofill_latest = chart.find_target_position().expect("should find latest");
+        assert_eq!(autofill_latest.side, data::journal::TradeSide::Short);
+        assert_eq!(autofill_latest.entry_price, 52000.0);
+
+        // If long is selected, should prioritize selected
+        chart.set_selected_drawing(Some(chart.drawings[0].id));
+        let autofill_sel = chart.find_target_position().expect("should find selected");
+        assert_eq!(autofill_sel.side, data::journal::TradeSide::Long);
+    }
+
+    #[test]
+    fn test_macos_command_key_and_modifiers() {
+        use iced::widget::canvas::Program;
+        let chart = make_test_chart();
+        let mut interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+
+        assert!(!chart.drawing_state.borrow().ctrl_pressed);
+
+        // 1. Press Super/Command key with COMMAND modifier
+        let cmd_down = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Super),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::COMMAND,
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::SuperLeft),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Super),
+        });
+        let _ = chart.update(&mut interaction, &cmd_down, bounds, cursor);
+        assert!(chart.drawing_state.borrow().ctrl_pressed);
+
+        // 2. Release Super/Command key
+        let cmd_up = Event::Keyboard(iced::keyboard::Event::KeyReleased {
+            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Super),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::default(),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::SuperLeft),
+            modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Super),
+        });
+        let _ = chart.update(&mut interaction, &cmd_up, bounds, cursor);
+        assert!(!chart.drawing_state.borrow().ctrl_pressed);
+
+        // 3. ModifiersChanged with COMMAND
+        let mods_changed = Event::Keyboard(iced::keyboard::Event::ModifiersChanged(
+            iced::keyboard::Modifiers::COMMAND,
+        ));
+        let _ = chart.update(&mut interaction, &mods_changed, bounds, cursor);
+        assert!(chart.drawing_state.borrow().ctrl_pressed);
+
+        // 4. ModifiersChanged reset
+        let mods_reset = Event::Keyboard(iced::keyboard::Event::ModifiersChanged(
+            iced::keyboard::Modifiers::default(),
+        ));
+        let _ = chart.update(&mut interaction, &mods_reset, bounds, cursor);
+        assert!(!chart.drawing_state.borrow().ctrl_pressed);
+    }
+
+    #[test]
+    fn test_drawing_tool_hotkeys_and_escape() {
+        use iced::widget::canvas::Program;
+        let chart = make_test_chart();
+        let mut interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+
+        let make_char_key = |c: &'static str| {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Character(c.into()),
+                location: iced::keyboard::Location::Standard,
+                modifiers: iced::keyboard::Modifiers::default(),
+                repeat: false,
+                text: Some(c.into()),
+                physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyA),
+                modified_key: iced::keyboard::Key::Character(c.into()),
+            })
+        };
+
+        let make_named_key = |named: iced::keyboard::key::Named| {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(named),
+                location: iced::keyboard::Location::Standard,
+                modifiers: iced::keyboard::Modifiers::default(),
+                repeat: false,
+                text: None,
+                physical_key: iced::keyboard::key::Physical::Code(
+                    iced::keyboard::key::Code::Escape,
+                ),
+                modified_key: iced::keyboard::Key::Named(named),
+            })
+        };
+
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::None);
+
+        // 1. Press 't' -> Trendline
+        let _ = chart.update(&mut interaction, &make_char_key("t"), bounds, cursor);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Trendline);
+
+        // 2. Press 't' again -> None (toggle off)
+        let _ = chart.update(&mut interaction, &make_char_key("t"), bounds, cursor);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::None);
+
+        // 3. Press 'h' -> HorizontalLine
+        let _ = chart.update(&mut interaction, &make_char_key("h"), bounds, cursor);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::HorizontalLine);
+
+        // 4. Press 'b' -> Brush
+        let _ = chart.update(&mut interaction, &make_char_key("b"), bounds, cursor);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Brush);
+
+        // 5. Press 'r' -> Rectangle
+        let _ = chart.update(&mut interaction, &make_char_key("r"), bounds, cursor);
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::Rectangle);
+
+        // 6. Press Escape -> resets active tool to None
+        let _ = chart.update(
+            &mut interaction,
+            &make_named_key(iced::keyboard::key::Named::Escape),
+            bounds,
+            cursor,
+        );
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::None);
+    }
+
+    #[test]
+    fn test_position_styling_mutations() {
+        let mut chart = make_test_chart();
+        let pos = Drawing::position((1000, 100.0), 95.0, 110.0, true, [0.2, 0.8, 0.4, 1.0], 1.0);
+        let id = pos.id;
+        chart.add_drawing(pos);
+        chart.set_selected_drawing(Some(id));
+
+        let new_profit = [0.1, 0.9, 0.3, 0.4];
+        let new_stop = [0.9, 0.1, 0.1, 0.5];
+        let new_entry = [0.7, 0.7, 0.8, 1.0];
+
+        chart.update_selected_position_profit_color(new_profit);
+        chart.update_selected_position_stop_color(new_stop);
+        chart.update_selected_position_entry_color(new_entry);
+
+        let d = chart
+            .drawings
+            .iter()
+            .find(|d| d.id == id)
+            .expect("drawing should exist");
+        let style = d.position_style();
+        assert_eq!(style.profit_color, new_profit);
+        assert_eq!(style.stop_color, new_stop);
+        assert_eq!(style.entry_color, new_entry);
+    }
+
+    #[test]
+    fn test_position_shift_g_keyboard_shortcut() {
+        use iced::widget::canvas::Program;
+        let mut chart = make_test_chart();
+        let mut interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+
+        let pos = Drawing::position((1000, 100.0), 95.0, 110.0, true, [0.2, 0.8, 0.4, 1.0], 1.0);
+        chart.add_drawing(pos);
+
+        // 1. Shift + G (ASCII)
+        let ascii_shift_g = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character("G".into()),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::SHIFT,
+            repeat: false,
+            text: Some("G".into()),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyG),
+            modified_key: iced::keyboard::Key::Character("G".into()),
+        });
+        let action = chart.update(&mut interaction, &ascii_shift_g, bounds, cursor);
+        assert!(action.is_some());
+
+        // 2. Shift + KeyG on Cyrillic/Ukrainian layout (Key::Character("П") with physical_key Code::KeyG)
+        let cyrillic_shift_g = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character("П".into()),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::SHIFT,
+            repeat: false,
+            text: Some("П".into()),
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyG),
+            modified_key: iced::keyboard::Key::Character("П".into()),
+        });
+        let action2 = chart.update(&mut interaction, &cyrillic_shift_g, bounds, cursor);
+        assert!(action2.is_some());
     }
 }

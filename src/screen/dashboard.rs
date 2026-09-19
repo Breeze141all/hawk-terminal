@@ -91,6 +91,7 @@ pub enum Event {
         pane_id: uuid::Uuid,
         streams: Vec<PersistStreamKind>,
     },
+    AutofillJournal(data::journal::PositionAutofill),
 }
 
 impl Dashboard {
@@ -142,6 +143,63 @@ impl Dashboard {
             popout,
             layout_id,
         }
+    }
+
+    pub fn find_active_position(&self) -> Option<data::journal::PositionAutofill> {
+        let check_pane = |win_id: window::Id,
+                          pane: pane_grid::Pane|
+         -> Option<data::journal::PositionAutofill> {
+            let pane_state = self.panes.get(pane).or_else(|| {
+                self.popout
+                    .get(&win_id)
+                    .and_then(|(panes, _)| panes.get(pane))
+            });
+            if let Some(pane_state) = pane_state
+                && let pane::Content::Kline {
+                    chart: Some(kline), ..
+                } = &pane_state.content
+            {
+                kline.find_target_position()
+            } else {
+                None
+            }
+        };
+
+        // 1. Try last focused kline pane
+        if let Some((win_id, pane)) = self.last_focused_kline
+            && let Some(autofill) = check_pane(win_id, pane)
+        {
+            return Some(autofill);
+        }
+        // 2. Try current focus pane
+        if let Some((win_id, pane)) = self.focus
+            && let Some(autofill) = check_pane(win_id, pane)
+        {
+            return Some(autofill);
+        }
+        // 3. Search all panes in self.panes
+        for (_pane, pane_state) in self.panes.iter() {
+            if let pane::Content::Kline {
+                chart: Some(kline), ..
+            } = &pane_state.content
+                && let Some(autofill) = kline.find_target_position()
+            {
+                return Some(autofill);
+            }
+        }
+        // 4. Search popouts
+        for (popout_panes, _) in self.popout.values() {
+            for (_pane, pane_state) in popout_panes.iter() {
+                if let pane::Content::Kline {
+                    chart: Some(kline), ..
+                } = &pane_state.content
+                    && let Some(autofill) = kline.find_target_position()
+                {
+                    return Some(autofill);
+                }
+            }
+        }
+        None
     }
 
     pub fn load_layout(&mut self, main_window: window::Id) -> Task<Message> {
@@ -416,6 +474,9 @@ impl Dashboard {
                                     }
                                 });
                                 return (task, None);
+                            }
+                            pane::Effect::AutofillJournal(autofill) => {
+                                return (Task::none(), Some(Event::AutofillJournal(autofill)));
                             }
                         };
                         return (task, None);

@@ -3,7 +3,11 @@ use crate::screen::dashboard::pane::{Event, Message};
 use crate::screen::dashboard::panel::timeandsales;
 use crate::split_column;
 use crate::widget::classic_slider_row;
-use crate::{style, tooltip, widget::scrollable_content};
+use crate::{
+    style::{self, Icon, icon_text},
+    tooltip,
+    widget::scrollable_content,
+};
 
 use data::chart::heatmap::HeatmapStudy;
 use data::chart::kline::FootprintStudy;
@@ -16,7 +20,7 @@ use data::chart::{
 use data::layout::pane::VisualConfig;
 use data::panel::ladder;
 use data::panel::timeandsales::{StackedBar, StackedBarRatio};
-use iced::widget::{checkbox, space};
+use iced::widget::{checkbox, rule, space};
 use iced::{
     Alignment, Element, Length,
     widget::{
@@ -512,109 +516,261 @@ fn tpo_element_color_picker<'a>(
     }
 }
 
-fn indicator_settings_section<'a>(
+fn drawing_tools_section<'a>(
     cfg: data::chart::kline::Config,
     pane: pane_grid::Pane,
 ) -> Element<'a, Message> {
-    let cur_pf = cfg.position_flow_colors;
-    let p_nl = tpo_element_color_picker("New Longs", cur_pf.new_longs, move |new_c| {
-        let mut new_cfg = cfg;
-        new_cfg.position_flow_colors.new_longs = new_c;
-        Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-    });
-
-    let p_ns = tpo_element_color_picker("New Shorts", cur_pf.new_shorts, move |new_c| {
-        let mut new_cfg = cfg;
-        new_cfg.position_flow_colors.new_shorts = new_c;
-        Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-    });
-
-    let p_lfc = tpo_element_color_picker(
-        "Long Forced Close",
-        cur_pf.long_forced_close,
-        move |new_c| {
-            let mut new_cfg = cfg;
-            new_cfg.position_flow_colors.long_forced_close = new_c;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        },
-    );
-
-    let p_sfc = tpo_element_color_picker(
-        "Short Forced Close",
-        cur_pf.short_forced_close,
-        move |new_c| {
-            let mut new_cfg = cfg;
-            new_cfg.position_flow_colors.short_forced_close = new_c;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        },
-    );
-
-    let cb_7d = checkbox(cfg.rolling_vwap_show_7d)
-        .label("Rolling VWAP 7D (Cyan)")
+    let cb_magnet = checkbox(cfg.magnet_mode)
+        .label("Smart Magnet Mode (Snap to OHLC)")
         .on_toggle(move |val| {
             let mut new_cfg = cfg;
-            new_cfg.rolling_vwap_show_7d = val;
+            new_cfg.magnet_mode = val;
             Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
         });
 
-    let cb_30d = checkbox(cfg.rolling_vwap_show_30d)
-        .label("Rolling VWAP 30D (Gold)")
-        .on_toggle(move |val| {
-            let mut new_cfg = cfg;
-            new_cfg.rolling_vwap_show_30d = val;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        });
+    column![text("Drawing Tools").size(14), cb_magnet,]
+        .spacing(8)
+        .into()
+}
 
-    let cb_90d = checkbox(cfg.rolling_vwap_show_90d)
-        .label("Rolling VWAP 90D (Orange)")
-        .on_toggle(move |val| {
-            let mut new_cfg = cfg;
-            new_cfg.rolling_vwap_show_90d = val;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        });
+fn indicator_settings_section<'a>(
+    cfg: data::chart::kline::Config,
+    pane: pane_grid::Pane,
+    indicators: &'a [KlineIndicator],
+    expanded_indicator: Option<KlineIndicator>,
+) -> Option<Element<'a, Message>> {
+    let configurable_indicators: Vec<KlineIndicator> = indicators
+        .iter()
+        .copied()
+        .filter(|&ind| {
+            matches!(
+                ind,
+                KlineIndicator::PositionFlow
+                    | KlineIndicator::RollingVwap
+                    | KlineIndicator::LiquidationHeatmap
+            )
+        })
+        .collect();
 
-    let cb_365d = checkbox(cfg.rolling_vwap_show_365d)
-        .label("Rolling VWAP 365D (Magenta)")
-        .on_toggle(move |val| {
-            let mut new_cfg = cfg;
-            new_cfg.rolling_vwap_show_365d = val;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        });
+    if configurable_indicators.is_empty() {
+        return None;
+    }
 
-    let cb_liq_bands = checkbox(cfg.liq_show_bands)
-        .label("Liquidation Heatmap: Full Bands")
-        .on_toggle(move |val| {
-            let mut new_cfg = cfg;
-            new_cfg.liq_show_bands = val;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        });
+    let mut cards = column![].spacing(6);
 
-    let cb_liq_hist = checkbox(cfg.liq_show_histogram)
-        .label("Liquidation Heatmap: Depth Histogram")
-        .on_toggle(move |val| {
-            let mut new_cfg = cfg;
-            new_cfg.liq_show_histogram = val;
-            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
-        });
+    for indicator in configurable_indicators {
+        let is_expanded = expanded_indicator == Some(indicator);
 
-    column![
-        text("Indicator Settings").size(14),
-        text("Position Flow Colors:").size(12),
-        p_nl,
-        p_ns,
-        p_lfc,
-        p_sfc,
-        text("Rolling VWAP Periods:").size(12),
-        cb_7d,
-        cb_30d,
-        cb_90d,
-        cb_365d,
-        text("Liquidation Heatmap:").size(12),
-        cb_liq_bands,
-        cb_liq_hist,
-    ]
-    .spacing(6)
-    .into()
+        let header = button(
+            row![
+                text(indicator.to_string()).size(13),
+                space::horizontal(),
+                icon_text(Icon::Cog, 12),
+            ]
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+        )
+        .on_press(Message::PaneEvent(
+            pane,
+            Event::ToggleIndicatorSettings(indicator),
+        ))
+        .style(move |theme, status| style::button::transparent(theme, status, is_expanded))
+        .width(Length::Fill);
+
+        let mut card_col = column![header];
+
+        if is_expanded {
+            let settings_content: Element<'a, Message> = match indicator {
+                KlineIndicator::PositionFlow => {
+                    let cur_pf = cfg.position_flow_colors;
+                    let p_nl =
+                        tpo_element_color_picker("New Longs", cur_pf.new_longs, move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.position_flow_colors.new_longs = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+
+                    let p_ns =
+                        tpo_element_color_picker("New Shorts", cur_pf.new_shorts, move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.position_flow_colors.new_shorts = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+
+                    let p_lfc = tpo_element_color_picker(
+                        "Long Forced Close",
+                        cur_pf.long_forced_close,
+                        move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.position_flow_colors.long_forced_close = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+
+                    let p_sfc = tpo_element_color_picker(
+                        "Short Forced Close",
+                        cur_pf.short_forced_close,
+                        move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.position_flow_colors.short_forced_close = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+
+                    column![
+                        text("Position Flow Colors:").size(12),
+                        p_nl,
+                        p_ns,
+                        p_lfc,
+                        p_sfc,
+                    ]
+                    .spacing(6)
+                    .into()
+                }
+                KlineIndicator::RollingVwap => {
+                    let cb_panel = checkbox(cfg.rolling_vwap_show_panel)
+                        .label("Show Sub-Panel")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_show_panel = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+
+                    let cb_7d = checkbox(cfg.rolling_vwap_show_7d)
+                        .label("Rolling VWAP 7D")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_show_7d = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+                    let p_7d = tpo_element_color_picker(
+                        "7D Color",
+                        cfg.rolling_vwap_colors.d7,
+                        move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_colors.d7 = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+
+                    let cb_30d = checkbox(cfg.rolling_vwap_show_30d)
+                        .label("Rolling VWAP 30D")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_show_30d = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+                    let p_30d = tpo_element_color_picker(
+                        "30D Color",
+                        cfg.rolling_vwap_colors.d30,
+                        move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_colors.d30 = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+
+                    let cb_90d = checkbox(cfg.rolling_vwap_show_90d)
+                        .label("Rolling VWAP 90D")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_show_90d = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+                    let p_90d = tpo_element_color_picker(
+                        "90D Color",
+                        cfg.rolling_vwap_colors.d90,
+                        move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_colors.d90 = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+
+                    let cb_365d = checkbox(cfg.rolling_vwap_show_365d)
+                        .label("Rolling VWAP 365D")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_show_365d = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+                    let p_365d = tpo_element_color_picker(
+                        "365D Color",
+                        cfg.rolling_vwap_colors.d365,
+                        move |new_c| {
+                            let mut new_cfg = cfg;
+                            new_cfg.rolling_vwap_colors.d365 = new_c;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+
+                    column![
+                        text("Rolling VWAP Settings:").size(12),
+                        cb_panel,
+                        cb_7d,
+                        p_7d,
+                        cb_30d,
+                        p_30d,
+                        cb_90d,
+                        p_90d,
+                        cb_365d,
+                        p_365d,
+                    ]
+                    .spacing(6)
+                    .into()
+                }
+                KlineIndicator::LiquidationHeatmap => {
+                    let cb_liq_bands =
+                        checkbox(cfg.liq_show_bands)
+                            .label("Full Bands")
+                            .on_toggle(move |val| {
+                                let mut new_cfg = cfg;
+                                new_cfg.liq_show_bands = val;
+                                Message::VisualConfigChanged(
+                                    pane,
+                                    VisualConfig::Kline(new_cfg),
+                                    false,
+                                )
+                            });
+
+                    let cb_liq_hist = checkbox(cfg.liq_show_histogram)
+                        .label("Depth Histogram")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.liq_show_histogram = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+
+                    column![
+                        text("Liquidation Heatmap:").size(12),
+                        cb_liq_bands,
+                        cb_liq_hist,
+                    ]
+                    .spacing(6)
+                    .into()
+                }
+                _ => column![].into(),
+            };
+
+            card_col = card_col.push(
+                container(settings_content)
+                    .padding(iced::padding::left(8).right(8).bottom(8))
+                    .width(Length::Fill),
+            );
+        }
+
+        cards = cards.push(
+            container(card_col)
+                .style(style::modal_container)
+                .width(Length::Fill),
+        );
+    }
+
+    Some(
+        column![text("Indicator Settings").size(14), cards,]
+            .spacing(8)
+            .into(),
+    )
 }
 
 pub fn kline_cfg_view<'a>(
@@ -624,17 +780,26 @@ pub fn kline_cfg_view<'a>(
     pane: pane_grid::Pane,
     basis: data::chart::Basis,
     indicators: &'a [KlineIndicator],
+    expanded_indicator: Option<KlineIndicator>,
 ) -> Element<'a, Message> {
     let content = match kind {
         KlineChartKind::Candles => {
-            split_column![
-                indicator_settings_section(cfg, pane),
-                row![
-                    space::horizontal(),
-                    sync_all_button(pane, VisualConfig::Kline(cfg))
-                ],
-                ; spacing = 12, align_x = Alignment::Start
-            ]
+            let mut col = column![drawing_tools_section(cfg, pane)].spacing(12);
+
+            if let Some(indicator_sec) =
+                indicator_settings_section(cfg, pane, indicators, expanded_indicator)
+            {
+                col = col.push(rule::horizontal(1.0).style(style::split_ruler));
+                col = col.push(indicator_sec);
+            }
+
+            col = col.push(rule::horizontal(1.0).style(style::split_ruler));
+            col = col.push(row![
+                space::horizontal(),
+                sync_all_button(pane, VisualConfig::Kline(cfg))
+            ]);
+
+            col
         }
         KlineChartKind::Tpo {
             show_candles,
@@ -1161,6 +1326,16 @@ pub fn kline_cfg_view<'a>(
                 col = col.push(sp_color_ui);
             }
 
+            col = col.push(rule::horizontal(1.0).style(style::split_ruler));
+            col = col.push(drawing_tools_section(cfg, pane));
+
+            if let Some(indicator_sec) =
+                indicator_settings_section(cfg, pane, indicators, expanded_indicator)
+            {
+                col = col.push(rule::horizontal(1.0).style(style::split_ruler));
+                col = col.push(indicator_sec);
+            }
+
             col
         }
         KlineChartKind::Footprint {
@@ -1230,7 +1405,7 @@ pub fn kline_cfg_view<'a>(
                         )
                     });
 
-            split_column![
+            let mut col = split_column![
                 column![text("Cluster type").size(14), cluster_picklist].spacing(8),
                 column![text("Cluster scaling").size(14), scaling].spacing(8),
                 column![text("Studies").size(14), study_cfg].spacing(8),
@@ -1239,13 +1414,24 @@ pub fn kline_cfg_view<'a>(
                     bottom_volume_checkbox,
                     volume_panel_checkbox,
                 ].spacing(8),
-                indicator_settings_section(cfg, pane),
-                row![
-                    space::horizontal(),
-                    sync_all_button(pane, VisualConfig::Kline(cfg))
-                ],
+                drawing_tools_section(cfg, pane),
                 ; spacing = 12, align_x = Alignment::Start
-            ]
+            ];
+
+            if let Some(indicator_sec) =
+                indicator_settings_section(cfg, pane, indicators, expanded_indicator)
+            {
+                col = col.push(rule::horizontal(1.0).style(style::split_ruler));
+                col = col.push(indicator_sec);
+            }
+
+            col = col.push(rule::horizontal(1.0).style(style::split_ruler));
+            col = col.push(row![
+                space::horizontal(),
+                sync_all_button(pane, VisualConfig::Kline(cfg))
+            ]);
+
+            col
         }
     };
 
@@ -1374,6 +1560,12 @@ pub mod study {
             basis: data::chart::Basis,
             on_change: impl Fn(Self) -> Message<Self> + Copy + 'a,
         ) -> Element<'a, Message<Self>>;
+        fn create_next(_active_studies: &[Self]) -> Option<Self> {
+            None
+        }
+        fn can_remove(&self) -> bool {
+            false
+        }
     }
 
     impl Study for FootprintStudy {
@@ -1383,6 +1575,32 @@ pub mod study {
 
         fn all() -> Vec<Self> {
             FootprintStudy::ALL.to_vec()
+        }
+
+        fn create_next(active_studies: &[Self]) -> Option<Self> {
+            let mut max_id = 4u8;
+            for s in active_studies {
+                if let FootprintStudy::ClusterSearch { id, .. } = s {
+                    max_id = max_id.max(*id);
+                }
+            }
+            let next_id = max_id.saturating_add(1);
+            Some(FootprintStudy::ClusterSearch {
+                id: next_id,
+                min_volume: 1000.0,
+                min_delta: 500.0,
+                side: data::chart::kline::ClusterSearchSide::Both,
+                style: data::chart::kline::HighlightStyle::Concentric,
+                color: data::chart::kline::HighlightColor::Amber,
+            })
+        }
+
+        fn can_remove(&self) -> bool {
+            if let FootprintStudy::ClusterSearch { id, .. } = self {
+                *id > 4
+            } else {
+                false
+            }
         }
 
         fn view_config<'a>(
@@ -1625,29 +1843,196 @@ pub mod study {
                         .spacing(8)
                         .padding(8);
 
-                    let color_picks = pick_list(
-                        data::chart::kline::HighlightColor::ALL,
-                        Some(color),
-                        move |new_color| {
-                            on_change(FootprintStudy::ClusterSearch {
-                                id,
-                                min_volume,
-                                min_delta,
-                                side,
-                                style,
-                                color: new_color,
-                            })
+                    let available_colors = [
+                        data::chart::kline::HighlightColor::Amber,
+                        data::chart::kline::HighlightColor::Cyan,
+                        data::chart::kline::HighlightColor::Magenta,
+                        data::chart::kline::HighlightColor::Green,
+                        data::chart::kline::HighlightColor::Red,
+                        data::chart::kline::HighlightColor::White,
+                        data::chart::kline::HighlightColor::Purple,
+                        data::chart::kline::HighlightColor::Orange,
+                        match color {
+                            data::chart::kline::HighlightColor::Custom(rgb) => {
+                                data::chart::kline::HighlightColor::Custom(rgb)
+                            }
+                            _ => data::chart::kline::HighlightColor::Custom([255, 180, 0]),
                         },
-                    );
+                    ];
+
+                    let color_picks = pick_list(available_colors, Some(color), move |new_color| {
+                        on_change(FootprintStudy::ClusterSearch {
+                            id,
+                            min_volume,
+                            min_delta,
+                            side,
+                            style,
+                            color: new_color,
+                        })
+                    });
 
                     let color_row = row![text("Color:").width(iced::Length::Fill), color_picks,]
                         .align_y(iced::Alignment::Center)
                         .spacing(8)
                         .padding(8);
 
-                    split_column![vol_slider, delta_slider, side_row, style_row, color_row]
+                    let rgb_section: Option<Element<'a, Message<Self>>> =
+                        if let data::chart::kline::HighlightColor::Custom([r, g, b]) = color {
+                            let preview = container(space::horizontal().height(16))
+                                .width(iced::Length::Fill)
+                                .style(move |_theme| container::Style {
+                                    background: Some(iced::Color::from_rgb8(r, g, b).into()),
+                                    border: iced::Border {
+                                        color: iced::Color::from_rgba(1.0, 1.0, 1.0, 0.25),
+                                        width: 1.0,
+                                        radius: 4.0.into(),
+                                    },
+                                    ..Default::default()
+                                });
+
+                            let r_input = text_input("0", &format!("{r}"))
+                                .width(iced::Length::Fixed(50.0))
+                                .padding(3)
+                                .style(|theme, status| {
+                                    crate::style::validated_text_input(theme, status, true)
+                                })
+                                .on_input(move |s| {
+                                    let val = s.trim().parse::<u16>().unwrap_or(0).min(255) as u8;
+                                    on_change(FootprintStudy::ClusterSearch {
+                                        id,
+                                        min_volume,
+                                        min_delta,
+                                        side,
+                                        style,
+                                        color: data::chart::kline::HighlightColor::Custom([
+                                            val, g, b,
+                                        ]),
+                                    })
+                                });
+                            let r_slider = slider(0u8..=255u8, r, move |new_r| {
+                                on_change(FootprintStudy::ClusterSearch {
+                                    id,
+                                    min_volume,
+                                    min_delta,
+                                    side,
+                                    style,
+                                    color: data::chart::kline::HighlightColor::Custom([
+                                        new_r, g, b,
+                                    ]),
+                                })
+                            });
+                            let r_row = row![
+                                text("R:").width(iced::Length::Fixed(20.0)),
+                                r_slider,
+                                r_input
+                            ]
+                            .align_y(iced::Alignment::Center)
+                            .spacing(6);
+
+                            let g_input = text_input("0", &format!("{g}"))
+                                .width(iced::Length::Fixed(50.0))
+                                .padding(3)
+                                .style(|theme, status| {
+                                    crate::style::validated_text_input(theme, status, true)
+                                })
+                                .on_input(move |s| {
+                                    let val = s.trim().parse::<u16>().unwrap_or(0).min(255) as u8;
+                                    on_change(FootprintStudy::ClusterSearch {
+                                        id,
+                                        min_volume,
+                                        min_delta,
+                                        side,
+                                        style,
+                                        color: data::chart::kline::HighlightColor::Custom([
+                                            r, val, b,
+                                        ]),
+                                    })
+                                });
+                            let g_slider = slider(0u8..=255u8, g, move |new_g| {
+                                on_change(FootprintStudy::ClusterSearch {
+                                    id,
+                                    min_volume,
+                                    min_delta,
+                                    side,
+                                    style,
+                                    color: data::chart::kline::HighlightColor::Custom([
+                                        r, new_g, b,
+                                    ]),
+                                })
+                            });
+                            let g_row = row![
+                                text("G:").width(iced::Length::Fixed(20.0)),
+                                g_slider,
+                                g_input
+                            ]
+                            .align_y(iced::Alignment::Center)
+                            .spacing(6);
+
+                            let b_input = text_input("0", &format!("{b}"))
+                                .width(iced::Length::Fixed(50.0))
+                                .padding(3)
+                                .style(|theme, status| {
+                                    crate::style::validated_text_input(theme, status, true)
+                                })
+                                .on_input(move |s| {
+                                    let val = s.trim().parse::<u16>().unwrap_or(0).min(255) as u8;
+                                    on_change(FootprintStudy::ClusterSearch {
+                                        id,
+                                        min_volume,
+                                        min_delta,
+                                        side,
+                                        style,
+                                        color: data::chart::kline::HighlightColor::Custom([
+                                            r, g, val,
+                                        ]),
+                                    })
+                                });
+                            let b_slider = slider(0u8..=255u8, b, move |new_b| {
+                                on_change(FootprintStudy::ClusterSearch {
+                                    id,
+                                    min_volume,
+                                    min_delta,
+                                    side,
+                                    style,
+                                    color: data::chart::kline::HighlightColor::Custom([
+                                        r, g, new_b,
+                                    ]),
+                                })
+                            });
+                            let b_row = row![
+                                text("B:").width(iced::Length::Fixed(20.0)),
+                                b_slider,
+                                b_input
+                            ]
+                            .align_y(iced::Alignment::Center)
+                            .spacing(6);
+
+                            Some(
+                                column![preview, r_row, g_row, b_row]
+                                    .padding(8)
+                                    .spacing(6)
+                                    .into(),
+                            )
+                        } else {
+                            None
+                        };
+
+                    if let Some(rgb_ui) = rgb_section {
+                        split_column![
+                            vol_slider,
+                            delta_slider,
+                            side_row,
+                            style_row,
+                            color_row,
+                            rgb_ui
+                        ]
                         .padding(4)
                         .into()
+                    } else {
+                        split_column![vol_slider, delta_slider, side_row, style_row, color_row]
+                            .padding(4)
+                            .into()
+                    }
                 }
             }
         }
@@ -1744,6 +2129,8 @@ pub mod study {
         CardToggled(S),
         StudyToggled(S, bool),
         StudyValueChanged(S),
+        AddStudy(S),
+        RemoveStudy(S),
     }
 
     pub enum Action<S: Study> {
@@ -1753,12 +2140,14 @@ pub mod study {
 
     pub struct Configurator<S: Study> {
         expanded_card: Option<S>,
+        extra_studies: Vec<S>,
     }
 
     impl<S: Study> Default for Configurator<S> {
         fn default() -> Self {
             Self {
                 expanded_card: None,
+                extra_studies: Vec::new(),
             }
         }
     }
@@ -1788,6 +2177,24 @@ pub mod study {
                 Message::StudyValueChanged(study) => {
                     return Some(Action::ConfigureStudy(study));
                 }
+                Message::AddStudy(study) => {
+                    if !self.extra_studies.iter().any(|s| s.is_same_type(&study)) {
+                        self.extra_studies.push(study);
+                    }
+                    self.expanded_card = Some(study);
+                    return Some(Action::ToggleStudy(study, true));
+                }
+                Message::RemoveStudy(study) => {
+                    self.extra_studies.retain(|s| !s.is_same_type(&study));
+                    if self
+                        .expanded_card
+                        .as_ref()
+                        .is_some_and(|expanded| expanded.is_same_type(&study))
+                    {
+                        self.expanded_card = None;
+                    }
+                    return Some(Action::ToggleStudy(study, false));
+                }
             }
 
             None
@@ -1800,9 +2207,55 @@ pub mod study {
         ) -> Element<'a, Message<S>> {
             let mut content = column![].spacing(4);
 
-            for available_study in S::all() {
+            let mut all_available = S::all();
+            for extra in &self.extra_studies {
+                if !all_available.iter().any(|s| s.is_same_type(extra)) {
+                    all_available.push(*extra);
+                }
+            }
+            for active in active_studies {
+                if !all_available.iter().any(|s| s.is_same_type(active)) {
+                    all_available.push(*active);
+                }
+            }
+
+            for available_study in &all_available {
                 content =
-                    content.push(self.create_study_row(available_study, active_studies, basis));
+                    content.push(self.create_study_row(*available_study, active_studies, basis));
+            }
+
+            if let Some(next_study) = S::create_next(&all_available) {
+                let add_button = button(text("+ Add Cluster Search").size(13))
+                    .on_press(Message::AddStudy(next_study))
+                    .padding([6, 12])
+                    .style(|theme: &iced::Theme, status| {
+                        let palette = theme.extended_palette();
+                        let bg = match status {
+                            iced::widget::button::Status::Hovered => {
+                                Some(palette.background.weak.color.into())
+                            }
+                            iced::widget::button::Status::Pressed => {
+                                Some(palette.background.strong.color.into())
+                            }
+                            _ => Some(palette.background.base.color.into()),
+                        };
+                        iced::widget::button::Style {
+                            background: bg,
+                            text_color: palette.primary.base.color,
+                            border: iced::Border {
+                                radius: 4.0.into(),
+                                width: 1.0,
+                                color: palette.background.strong.color,
+                            },
+                            ..Default::default()
+                        }
+                    });
+
+                content = content.push(
+                    container(add_button)
+                        .padding(padding::top(4).bottom(4))
+                        .center_x(iced::Length::Fill),
+                );
             }
 
             content.into()
@@ -1849,6 +2302,16 @@ pub mod study {
                         .on_press(Message::CardToggled(study))
                         .style(move |theme, status| {
                             style::button::transparent(theme, status, is_expanded)
+                        }),
+                );
+            }
+
+            if study.can_remove() {
+                checkbox_row = checkbox_row.push(
+                    button(icon_text(Icon::TrashBin, 12))
+                        .on_press(Message::RemoveStudy(study))
+                        .style(move |theme, status| {
+                            style::button::transparent(theme, status, false)
                         }),
                 );
             }

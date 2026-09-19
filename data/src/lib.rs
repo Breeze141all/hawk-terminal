@@ -23,7 +23,9 @@ pub use config::state::{Layouts, State};
 pub use config::theme::Theme;
 pub use config::timezone::UserTimezone;
 pub use journal::{
-    JournalEntry, JournalMode, JournalStats, TradeSide, TradeStatus, load_journal, save_journal,
+    JOURNAL_IMAGES_DIR, JournalEntry, JournalMode, JournalStats, PositionAutofill, TradeSide,
+    TradeStatus, delete_journal_image_files, journal_image_path, journal_images_dir,
+    journal_thumb_path, load_journal, save_journal,
 };
 
 use ::log::{error, info, warn};

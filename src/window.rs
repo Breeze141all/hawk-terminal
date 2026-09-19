@@ -15,6 +15,7 @@ pub fn copy_screenshot_to_clipboard(screenshot: &Screenshot) -> Result<(), Strin
     clipboard.set_image(image_data).map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clipboard.set_text(text).map_err(|e| e.to_string())
@@ -148,5 +149,16 @@ pub fn settings() -> Settings {
         icon: app_icon(),
         min_size: Some(Size::new(800.0, 600.0)),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_icon_loads() {
+        let icon = app_icon();
+        assert!(icon.is_some(), "app_icon() must return Some(Icon)");
     }
 }

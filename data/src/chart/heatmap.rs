@@ -160,7 +160,10 @@ impl HistoricalDepth {
             price_levels: BTreeMap::new(),
             aggr_time: match basis {
                 Basis::Time(interval) => interval.into(),
-                Basis::Tick(_) => unimplemented!(),
+                Basis::Tick(_) => {
+                    log::warn!("HistoricalDepth does not support tick basis; falling back to 1m");
+                    u64::from(exchange::Timeframe::M1)
+                }
             },
             tick_size,
             min_order_qty,
@@ -634,5 +637,19 @@ impl std::fmt::Display for ProfileKind {
             ProfileKind::FixedWindow(_) => write!(f, "Fixed window"),
             ProfileKind::VisibleRange => write!(f, "Visible range"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::util::PriceStep;
+
+    #[test]
+    fn test_historical_depth_tick_basis_fallback() {
+        let basis = Basis::Tick(crate::aggr::TickCount(100));
+        let depth = HistoricalDepth::new(0.01, PriceStep { units: 100 }, basis);
+        // Falls back to 1m interval = 60,000 ms
+        assert_eq!(depth.aggr_time, 60_000);
     }
 }

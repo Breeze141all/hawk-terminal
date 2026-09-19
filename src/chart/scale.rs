@@ -532,6 +532,13 @@ impl canvas::Program<Message> for AxisLabelsX<'_> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PriceAxisBadge {
+    pub price: f32,
+    pub background_color: Color,
+    pub text_color: Color,
+}
+
 // Y-AXIS LABELS
 pub struct AxisLabelsY<'a> {
     pub labels_cache: &'a Cache,
@@ -544,6 +551,7 @@ pub struct AxisLabelsY<'a> {
     pub cell_height: f32,
     pub basis: Basis,
     pub chart_bounds: Rectangle,
+    pub drag_badges: Vec<PriceAxisBadge>,
 }
 
 impl AxisLabelsY<'_> {
@@ -746,6 +754,26 @@ impl canvas::Program<Message> for AxisLabelsY<'_> {
                     value_label: label,
                     timer_label: None,
                 });
+            }
+
+            // Drag badges (priority 4 - highest priority during drag)
+            if range > 0.0 {
+                for badge in &self.drag_badges {
+                    let y_position =
+                        bounds.height - ((badge.price - lowest) / range * bounds.height);
+                    let label = LabelContent {
+                        content: format!("{:.*}", self.decimals, badge.price),
+                        background_color: Some(badge.background_color),
+                        text_color: badge.text_color,
+                        text_size: 12.0,
+                    };
+
+                    all_labels.push(AxisLabel::Y {
+                        bounds: calc_label_rect(y_position, 1, text_size, bounds),
+                        value_label: label,
+                        timer_label: None,
+                    });
+                }
             }
 
             AxisLabel::filter_and_draw(&all_labels, frame);

@@ -9,7 +9,7 @@ use crate::chart::{
 
 use data::chart::{
     PlotData,
-    kline::KlineDataPoint,
+    kline::{KlineDataPoint, RollingVwapColors},
     vwap::{MultiRollingVwapPoint, MultiRollingVwapTracker},
 };
 use exchange::{Kline, Trade};
@@ -21,6 +21,7 @@ pub struct RollingVwapIndicator {
     cache: Caches,
     pub data: BTreeMap<u64, MultiRollingVwapPoint>,
     tracker: MultiRollingVwapTracker,
+    pub colors: RollingVwapColors,
 }
 
 impl RollingVwapIndicator {
@@ -29,6 +30,7 @@ impl RollingVwapIndicator {
             cache: Caches::default(),
             data: BTreeMap::new(),
             tracker: MultiRollingVwapTracker::new(),
+            colors: RollingVwapColors::default(),
         }
     }
 
@@ -39,6 +41,11 @@ impl RollingVwapIndicator {
 
     pub fn set_window_hours(&mut self, _hours: u32, _source: &PlotData<KlineDataPoint>) {
         // Multi-period rolling VWAP tracks fixed 7d, 30d, 90d, and 365d windows.
+    }
+
+    pub fn set_colors(&mut self, colors: RollingVwapColors) {
+        self.colors = colors;
+        self.clear_all_caches();
     }
 
     fn indicator_elem<'a>(
@@ -157,17 +164,14 @@ impl KlineIndicatorImpl for RollingVwapIndicator {
 
     fn on_insert_trades(
         &mut self,
-        trades: &[Trade],
+        _trades: &[Trade],
         _old_dp_len: usize,
-        _source: &PlotData<KlineDataPoint>,
+        source: &PlotData<KlineDataPoint>,
     ) {
-        for trade in trades {
-            let price = trade.price.to_f32() as f64;
-            let qty = trade.qty as f64;
-            let pt = self.tracker.on_data_point(trade.time as i64, price, qty);
-            self.data.insert(trade.time, pt);
+        match source {
+            PlotData::TimeBased(_) => (),
+            PlotData::TickBased(_) => self.rebuild_from_source(source),
         }
-        self.clear_all_caches();
     }
 
     fn on_ticksize_change(&mut self, source: &PlotData<KlineDataPoint>) {

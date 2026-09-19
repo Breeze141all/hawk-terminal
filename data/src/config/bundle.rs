@@ -190,7 +190,17 @@ impl ConfigBundle {
                 MAX_BUNDLE_PAYLOAD_BYTES,
             ));
         }
-        let trimmed = raw.trim();
+        let mut trimmed = raw.trim();
+        if trimmed.starts_with("```") {
+            if let Some(stripped) = trimmed.strip_prefix("```json") {
+                trimmed = stripped.trim();
+            } else if let Some(stripped) = trimmed.strip_prefix("```") {
+                trimmed = stripped.trim();
+            }
+            if let Some(stripped) = trimmed.strip_suffix("```") {
+                trimmed = stripped.trim();
+            }
+        }
         if trimmed.is_empty() {
             return Err(BundleValidationError::EmptyBundle);
         }

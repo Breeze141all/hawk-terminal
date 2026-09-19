@@ -133,8 +133,14 @@ impl KlineIndicatorImpl for OpenInterestIndicator {
 
         let (oi_earliest, oi_latest) = self.oi_timerange(ctx.kline_latest);
 
-        if ctx.visible_earliest < oi_earliest {
-            return Some(FetchRange::OpenInterest(ctx.prefetch_earliest, oi_earliest));
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let thirty_days_ago = now_ms.saturating_sub(exchange::adapter::OI_RETENTION_MS);
+
+        if ctx.visible_earliest < oi_earliest && oi_earliest > thirty_days_ago {
+            let prefetch_start = ctx.prefetch_earliest.max(thirty_days_ago);
+            if prefetch_start < oi_earliest {
+                return Some(FetchRange::OpenInterest(prefetch_start, oi_earliest));
+            }
         }
 
         if oi_latest < ctx.kline_latest

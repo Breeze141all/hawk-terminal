@@ -149,7 +149,11 @@ impl From<&pane::State> for data::Pane {
                     visual_config: chart
                         .as_ref()
                         .map(|c| data::layout::pane::VisualConfig::Kline(c.config()))
-                        .or_else(|| pane.settings.visual_config.clone()),
+                        .or_else(|| pane.settings.visual_config.clone())
+                        .or_else(|| {
+                            data::chart::kline::user_default_kline_config()
+                                .map(data::layout::pane::VisualConfig::Kline)
+                        }),
                     ..pane.settings.clone()
                 };
 

@@ -21,8 +21,16 @@ pub enum Editing {
     None,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LayoutTab {
+    #[default]
+    Layouts,
+    WorkspaceBackup,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
+    SelectTab(LayoutTab),
     SelectActive(Uuid),
     SetLayoutName(Uuid, String),
     Renaming(String),
@@ -33,6 +41,7 @@ pub enum Message {
     Reorder(DragEvent),
     ExportLayout(Uuid),
     ExportWorkspace,
+    ImportFromFile,
     ImportFromClipboard,
     OpenExportsFolder,
 }
@@ -42,6 +51,7 @@ pub enum Action {
     Clone(Uuid),
     ExportLayout(Uuid),
     ExportWorkspace,
+    ImportFromFile,
     ImportFromClipboard,
     OpenExportsFolder,
 }
@@ -50,6 +60,7 @@ pub struct LayoutManager {
     pub layouts: Vec<Layout>,
     active_layout_id: Option<Uuid>,
     pub edit_mode: Editing,
+    pub tab: LayoutTab,
 }
 
 impl LayoutManager {
@@ -66,6 +77,7 @@ impl LayoutManager {
             }],
             active_layout_id: Some(default_layout.unique),
             edit_mode: Editing::None,
+            tab: LayoutTab::default(),
         }
     }
 
@@ -74,6 +86,7 @@ impl LayoutManager {
             layouts,
             active_layout_id: active_layout.map(|l| l.unique),
             edit_mode: Editing::None,
+            tab: LayoutTab::default(),
         }
     }
 
@@ -143,6 +156,9 @@ impl LayoutManager {
 
     pub fn update(&mut self, message: Message) -> Option<Action> {
         match message {
+            Message::SelectTab(new_tab) => {
+                self.tab = new_tab;
+            }
             Message::SelectActive(id) => {
                 self.active_layout_id = Some(id);
                 return Some(Action::Select(id));
@@ -201,6 +217,7 @@ impl LayoutManager {
             Message::Reorder(event) => column_drag::reorder_vec(&mut self.layouts, &event),
             Message::ExportLayout(id) => return Some(Action::ExportLayout(id)),
             Message::ExportWorkspace => return Some(Action::ExportWorkspace),
+            Message::ImportFromFile => return Some(Action::ImportFromFile),
             Message::ImportFromClipboard => return Some(Action::ImportFromClipboard),
             Message::OpenExportsFolder => return Some(Action::OpenExportsFolder),
         }
@@ -211,162 +228,224 @@ impl LayoutManager {
     pub fn view(&self) -> Element<'_, Message> {
         let mut content = column![].spacing(8);
 
-        let is_edit_mode = self.edit_mode != Editing::None;
-
-        let edit_btn = if is_edit_mode {
-            button(icon_text(style::Icon::Return, 12))
-                .on_press(Message::ToggleEditMode(Editing::Preview))
-        } else {
-            button(text("Edit")).on_press(Message::ToggleEditMode(Editing::Preview))
+        let tab_button = |label: &'static str, tab: LayoutTab| {
+            let is_selected = self.tab == tab;
+            button(text(label).size(12).align_y(iced::Alignment::Center))
+                .padding(padding::top(5).bottom(5).left(10).right(10))
+                .style(move |theme, status| style::button::modifier(theme, status, is_selected))
+                .on_press(Message::SelectTab(tab))
         };
 
-        content = content.push(row![
-            space::horizontal(),
-            if is_edit_mode {
-                row![edit_btn]
-            } else {
-                row![
-                    tooltip(
-                        button("i").style(style::button::info),
-                        Some("Layouts won't be saved if app exits abruptly"),
-                        TooltipPosition::Top,
-                    ),
-                    edit_btn,
-                ]
-                .spacing(4)
-            }
-        ]);
+        let tabs_row = row![
+            tab_button("Layouts", LayoutTab::Layouts),
+            tab_button("Workspace Backup", LayoutTab::WorkspaceBackup),
+        ]
+        .spacing(6);
 
-        let mut layout_widgets: Vec<Element<'_, Message>> = vec![];
+        content = content.push(tabs_row);
 
-        for layout in &self.layouts {
-            let layout_id = &layout.id;
+        match self.tab {
+            LayoutTab::Layouts => {
+                let is_edit_mode = self.edit_mode != Editing::None;
 
-            let mut layout_row = row![].height(iced::Length::Fixed(32.0)).padding(4);
+                let edit_btn = if is_edit_mode {
+                    button(icon_text(style::Icon::Return, 12))
+                        .on_press(Message::ToggleEditMode(Editing::Preview))
+                } else {
+                    button(text("Edit")).on_press(Message::ToggleEditMode(Editing::Preview))
+                };
 
-            let is_active = self.active_layout_id == Some(layout_id.unique);
-            match &self.edit_mode {
-                Editing::ConfirmingDelete(delete_id) => {
-                    if *delete_id == layout_id.unique {
-                        let (confirm_btn, cancel_btn) = create_confirm_delete_buttons(layout_id);
-
-                        layout_row = layout_row
-                            .push(center(text(format!("Delete {}?", layout.id.name)).size(12)))
-                            .push(confirm_btn)
-                            .push(cancel_btn);
+                content = content.push(row![
+                    space::horizontal(),
+                    if is_edit_mode {
+                        row![edit_btn]
                     } else {
-                        layout_row = layout_row.push(create_layout_button(layout_id, None));
+                        row![
+                            tooltip(
+                                button("i").style(style::button::info),
+                                Some("Layouts won't be saved if app exits abruptly"),
+                                TooltipPosition::Top,
+                            ),
+                            edit_btn,
+                        ]
+                        .spacing(4)
                     }
-                }
-                Editing::Renaming(renaming_id, name) => {
-                    if *renaming_id == layout_id.unique {
-                        let input_box = text_input("New layout name", name)
-                            .on_input(|new_name| Message::Renaming(new_name.clone()))
-                            .on_submit(Message::SetLayoutName(*renaming_id, name.clone()));
+                ]);
 
-                        let (_, cancel_btn) = create_confirm_delete_buttons(layout_id);
+                let mut layout_widgets: Vec<Element<'_, Message>> = vec![];
 
-                        layout_row = layout_row
-                            .push(center(input_box).padding(padding::left(4)))
-                            .push(cancel_btn);
-                    } else {
-                        layout_row = layout_row.push(create_layout_button(layout_id, None));
+                for layout in &self.layouts {
+                    let layout_id = &layout.id;
+
+                    let mut layout_row = row![].height(iced::Length::Fixed(32.0)).padding(4);
+
+                    let is_active = self.active_layout_id == Some(layout_id.unique);
+                    match &self.edit_mode {
+                        Editing::ConfirmingDelete(delete_id) => {
+                            if *delete_id == layout_id.unique {
+                                let (confirm_btn, cancel_btn) =
+                                    create_confirm_delete_buttons(layout_id);
+
+                                layout_row = layout_row
+                                    .push(center(
+                                        text(format!("Delete {}?", layout.id.name)).size(12),
+                                    ))
+                                    .push(confirm_btn)
+                                    .push(cancel_btn);
+                            } else {
+                                layout_row = layout_row.push(create_layout_button(layout_id, None));
+                            }
+                        }
+                        Editing::Renaming(renaming_id, name) => {
+                            if *renaming_id == layout_id.unique {
+                                let input_box = text_input("New layout name", name)
+                                    .on_input(|new_name| Message::Renaming(new_name.clone()))
+                                    .on_submit(Message::SetLayoutName(*renaming_id, name.clone()));
+
+                                let (_, cancel_btn) = create_confirm_delete_buttons(layout_id);
+
+                                layout_row = layout_row
+                                    .push(center(input_box).padding(padding::left(4)))
+                                    .push(cancel_btn);
+                            } else {
+                                layout_row = layout_row.push(create_layout_button(layout_id, None));
+                            }
+                        }
+                        Editing::Preview => {
+                            layout_row = layout_row
+                                .push(create_layout_button(layout_id, None))
+                                .push(create_export_button(layout_id))
+                                .push(create_clone_button(layout_id))
+                                .push(create_rename_button(layout_id));
+
+                            if !is_active {
+                                layout_row = layout_row.push(create_delete_button(layout_id));
+                            }
+                        }
+                        Editing::None => {
+                            layout_row = layout_row.push(create_layout_button(
+                                layout_id,
+                                if is_active {
+                                    None
+                                } else {
+                                    Some(Message::SelectActive(layout_id.unique))
+                                },
+                            ));
+                        }
                     }
-                }
-                Editing::Preview => {
-                    layout_row = layout_row
-                        .push(create_layout_button(layout_id, None))
-                        .push(create_export_button(layout_id))
-                        .push(create_clone_button(layout_id))
-                        .push(create_rename_button(layout_id));
 
-                    if !is_active {
-                        layout_row = layout_row.push(create_delete_button(layout_id));
+                    if is_active && !is_edit_mode {
+                        layout_row = layout_row.push(
+                            container(icon_text(Icon::Checkmark, 12)).padding(padding::right(16)),
+                        );
                     }
+
+                    let styled_container = container(layout_row.align_y(iced::Alignment::Center))
+                        .style(move |theme| {
+                            let palette = theme.extended_palette();
+                            let color = if is_active {
+                                palette.background.weak.color
+                            } else {
+                                palette.background.weakest.color
+                            };
+
+                            iced::widget::container::Style {
+                                background: Some(color.into()),
+                                ..Default::default()
+                            }
+                        })
+                        .into();
+
+                    layout_widgets.push(dragger_row(styled_container, is_edit_mode));
                 }
-                Editing::None => {
-                    layout_row = layout_row.push(create_layout_button(
-                        layout_id,
-                        if is_active {
-                            None
-                        } else {
-                            Some(Message::SelectActive(layout_id.unique))
-                        },
-                    ));
-                }
+
+                let layouts_list: Element<'_, Message> = if is_edit_mode {
+                    column_drag::Column::with_children(layout_widgets)
+                        .on_drag(Message::Reorder)
+                        .spacing(4)
+                        .into()
+                } else {
+                    iced::widget::Column::with_children(layout_widgets)
+                        .spacing(4)
+                        .into()
+                };
+
+                content = content.push(layouts_list);
+
+                content = content
+                    .push(
+                        button(text("+ Add Layout"))
+                            .style(move |t, s| style::button::transparent(t, s, true))
+                            .width(iced::Length::Fill)
+                            .on_press(Message::AddLayout),
+                    )
+                    .push(
+                        button(text("Import Layout (.json)"))
+                            .style(move |t, s| style::button::transparent(t, s, true))
+                            .width(iced::Length::Fill)
+                            .on_press(Message::ImportFromFile),
+                    )
+                    .push(
+                        button(text("Import from Clipboard"))
+                            .style(move |t, s| style::button::transparent(t, s, true))
+                            .width(iced::Length::Fill)
+                            .on_press(Message::ImportFromClipboard),
+                    );
             }
-
-            if is_active && !is_edit_mode {
-                layout_row = layout_row
-                    .push(container(icon_text(Icon::Checkmark, 12)).padding(padding::right(16)));
-            }
-
-            let styled_container = container(layout_row.align_y(iced::Alignment::Center))
-                .style(move |theme| {
-                    let palette = theme.extended_palette();
-                    let color = if is_active {
-                        palette.background.weak.color
-                    } else {
-                        palette.background.weakest.color
-                    };
-
-                    iced::widget::container::Style {
-                        background: Some(color.into()),
-                        ..Default::default()
-                    }
-                })
-                .into();
-
-            layout_widgets.push(dragger_row(styled_container, is_edit_mode));
-        }
-
-        let layouts_list: Element<'_, Message> = if is_edit_mode {
-            column_drag::Column::with_children(layout_widgets)
-                .on_drag(Message::Reorder)
-                .spacing(4)
-                .into()
-        } else {
-            iced::widget::Column::with_children(layout_widgets)
-                .spacing(4)
-                .into()
-        };
-
-        content = content.push(layouts_list);
-
-        if self.edit_mode != Editing::None {
-            content = content
-                .push(
-                    button(text("Add layout"))
-                        .style(move |t, s| style::button::transparent(t, s, true))
-                        .width(iced::Length::Fill)
-                        .on_press(Message::AddLayout),
+            LayoutTab::WorkspaceBackup => {
+                let backup_desc = container(
+                    text("Full workspace backup preserves all layouts, custom themes, indicator settings, and watchlists.")
+                        .size(12)
+                        .style(|theme: &Theme| {
+                            let palette = theme.extended_palette();
+                            iced::widget::text::Style {
+                                color: Some(palette.background.base.text.scale_alpha(0.7)),
+                            }
+                        }),
                 )
-                .push(
-                    button(text("Import from Clipboard"))
-                        .style(move |t, s| style::button::transparent(t, s, true))
-                        .width(iced::Length::Fill)
-                        .on_press(Message::ImportFromClipboard),
-                )
-                .push(
-                    button(text("Export Workspace"))
+                .padding(padding::top(4).bottom(4));
+
+                let backup_actions = column![
+                    button(text("Create Full Workspace Backup"))
                         .style(move |t, s| style::button::transparent(t, s, true))
                         .width(iced::Length::Fill)
                         .on_press(Message::ExportWorkspace),
-                )
-                .push(
-                    button(text("Open Exports Folder"))
+                    button(text("Restore Workspace from File"))
                         .style(move |t, s| style::button::transparent(t, s, true))
                         .width(iced::Length::Fill)
-                        .on_press(Message::OpenExportsFolder),
-                );
-        } else {
-            content = content.push(
-                button(text("Import from Clipboard"))
-                    .style(move |t, s| style::button::transparent(t, s, true))
-                    .width(iced::Length::Fill)
-                    .on_press(Message::ImportFromClipboard),
-            );
-        };
+                        .on_press(Message::ImportFromFile),
+                    button(text("Restore from Clipboard"))
+                        .style(move |t, s| style::button::transparent(t, s, true))
+                        .width(iced::Length::Fill)
+                        .on_press(Message::ImportFromClipboard),
+                ]
+                .spacing(4);
+
+                let folder_info = container(
+                    column![
+                        text("Local Backups Directory")
+                            .size(12)
+                            .style(|theme: &Theme| {
+                                let palette = theme.extended_palette();
+                                iced::widget::text::Style {
+                                    color: Some(palette.background.base.text.scale_alpha(0.6)),
+                                }
+                            }),
+                        button(text("Open Exports Folder"))
+                            .style(move |t, s| style::button::transparent(t, s, true))
+                            .width(iced::Length::Fill)
+                            .on_press(Message::OpenExportsFolder),
+                    ]
+                    .spacing(4),
+                )
+                .padding(padding::top(8));
+
+                content = content
+                    .push(backup_desc)
+                    .push(backup_actions)
+                    .push(folder_info);
+            }
+        }
 
         scrollable::Scrollable::with_direction(
             content,
@@ -474,4 +553,40 @@ fn create_icon_button<'a>(
     }
 
     btn
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_layout_manager_tab_switching() {
+        let mut lm = LayoutManager::new();
+        assert_eq!(lm.tab, LayoutTab::Layouts);
+
+        // Switch to WorkspaceBackup tab
+        let action = lm.update(Message::SelectTab(LayoutTab::WorkspaceBackup));
+        assert!(action.is_none());
+        assert_eq!(lm.tab, LayoutTab::WorkspaceBackup);
+
+        // Switch back to Layouts
+        let action = lm.update(Message::SelectTab(LayoutTab::Layouts));
+        assert!(action.is_none());
+        assert_eq!(lm.tab, LayoutTab::Layouts);
+    }
+
+    #[test]
+    fn test_layout_manager_export_actions() {
+        let mut lm = LayoutManager::new();
+        let layout_id = lm.layouts[0].id.unique;
+
+        let action = lm.update(Message::ExportLayout(layout_id));
+        assert!(matches!(action, Some(Action::ExportLayout(id)) if id == layout_id));
+
+        let action = lm.update(Message::ExportWorkspace);
+        assert!(matches!(action, Some(Action::ExportWorkspace)));
+
+        let action = lm.update(Message::OpenExportsFolder);
+        assert!(matches!(action, Some(Action::OpenExportsFolder)));
+    }
 }

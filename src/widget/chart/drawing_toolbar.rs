@@ -12,6 +12,7 @@ const ICON_SIZE: f32 = 22.0;
 pub enum ToolbarAction {
     SelectTool(DrawingTool),
     ClearDrawings,
+    ToggleMagnet,
 }
 
 struct ToolIconProgram {
@@ -198,9 +199,76 @@ impl<Message> canvas::Program<Message> for ToolIconProgram {
     }
 }
 
+struct MagnetIconProgram {
+    is_active: bool,
+}
+
+impl<Message> canvas::Program<Message> for MagnetIconProgram {
+    type State = ();
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &Renderer,
+        theme: &Theme,
+        bounds: Rectangle,
+        _cursor: mouse::Cursor,
+    ) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let palette = theme.extended_palette();
+
+        let stroke_color = if self.is_active {
+            palette.primary.base.color
+        } else {
+            palette.background.base.text
+        };
+
+        let stroke = Stroke {
+            style: canvas::Style::Solid(stroke_color),
+            width: 2.0,
+            line_cap: canvas::LineCap::Round,
+            line_join: canvas::LineJoin::Round,
+            ..Default::default()
+        };
+
+        // U-shaped magnet path
+        let u_path = Path::new(|builder| {
+            builder.move_to(Point::new(6.0, 5.0));
+            builder.line_to(Point::new(6.0, 12.0));
+            builder.arc_to(Point::new(6.0, 17.0), Point::new(11.0, 17.0), 5.0);
+            builder.arc_to(Point::new(16.0, 17.0), Point::new(16.0, 12.0), 5.0);
+            builder.line_to(Point::new(16.0, 5.0));
+        });
+        frame.stroke(&u_path, stroke);
+
+        // Pole tip markers
+        let cap_stroke = Stroke {
+            style: canvas::Style::Solid(if self.is_active {
+                palette.primary.strong.color
+            } else {
+                palette.background.base.text.scale_alpha(0.6)
+            }),
+            width: 2.0,
+            line_cap: canvas::LineCap::Butt,
+            ..Default::default()
+        };
+        frame.stroke(
+            &Path::line(Point::new(5.0, 8.0), Point::new(7.0, 8.0)),
+            cap_stroke,
+        );
+        frame.stroke(
+            &Path::line(Point::new(15.0, 8.0), Point::new(17.0, 8.0)),
+            cap_stroke,
+        );
+
+        vec![frame.into_geometry()]
+    }
+}
+
 pub fn view<'a, Message: 'a + Clone>(
     active_tool: DrawingTool,
     has_drawings: bool,
+    magnet_mode: bool,
     on_action: impl Fn(ToolbarAction) -> Message + 'a + Copy,
 ) -> Element<'a, Message> {
     let tools = [
@@ -240,6 +308,29 @@ pub fn view<'a, Message: 'a + Clone>(
 
         row_items = row_items.push(tip_btn);
     }
+
+    let magnet_icon = Canvas::new(MagnetIconProgram {
+        is_active: magnet_mode,
+    })
+    .width(Length::Fixed(ICON_SIZE))
+    .height(Length::Fixed(ICON_SIZE));
+
+    let magnet_btn = button(magnet_icon)
+        .padding(4)
+        .style(move |theme: &Theme, status| toolbar_button_style(theme, status, magnet_mode))
+        .on_press(on_action(ToolbarAction::ToggleMagnet));
+
+    let tip_magnet = tooltip(
+        magnet_btn,
+        Some(if magnet_mode {
+            "Smart Magnet: ON (Ctrl to invert)"
+        } else {
+            "Smart Magnet: OFF (Ctrl to invert)"
+        }),
+        iced::widget::tooltip::Position::Top,
+    );
+
+    row_items = row_items.push(tip_magnet);
 
     if has_drawings {
         let trash_icon = icon_text(Icon::TrashBin, 13);
