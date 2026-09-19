@@ -1,9 +1,6 @@
 use crate::modal::layout_manager::LayoutManager;
 use crate::screen::dashboard::{Dashboard, pane};
-use data::{
-    UserTimezone,
-    layout::{WindowSpec, pane::Axis},
-};
+use data::layout::{WindowSpec, pane::Axis};
 
 use iced::widget::pane_grid::{self, Configuration};
 use std::vec;
@@ -56,18 +53,7 @@ impl SavedState {
 
 impl Default for SavedState {
     fn default() -> Self {
-        SavedState {
-            layout_manager: LayoutManager::new(),
-            main_window: None,
-            scale_factor: data::ScaleFactor::default(),
-            timezone: UserTimezone::default(),
-            sidebar: data::Sidebar::default(),
-            theme: data::Theme::default(),
-            custom_theme: None,
-            audio_cfg: data::AudioStream::default(),
-            volume_size_unit: exchange::SizeUnit::Base,
-            journal_mode: data::JournalMode::default(),
-        }
+        state_to_saved_state(data::default_state())
     }
 }
 
@@ -300,83 +286,89 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
     }
 }
 
+pub fn state_to_saved_state(state: data::State) -> SavedState {
+    let mut de_layouts = vec![];
+
+    for layout in &state.layout_manager.layouts {
+        let mut popout_windows = Vec::new();
+
+        for (pane, window_spec) in &layout.dashboard.popout {
+            let configuration = configuration(pane.clone());
+            popout_windows.push((configuration, *window_spec));
+        }
+
+        let layout_id = Uuid::new_v4();
+
+        let dashboard = Dashboard::from_config(
+            configuration(layout.dashboard.pane.clone()),
+            popout_windows,
+            layout_id,
+        );
+
+        de_layouts.push((layout.name.clone(), layout_id, dashboard));
+    }
+
+    let layout_manager = {
+        let mut layouts = Vec::with_capacity(de_layouts.len());
+
+        for (name, layout_id, dashboard) in de_layouts {
+            let id = LayoutId {
+                unique: layout_id,
+                name,
+            };
+            layouts.push(Layout { id, dashboard });
+        }
+
+        let active_layout = state
+            .layout_manager
+            .active_layout
+            .as_ref()
+            .and_then(|target_name| {
+                layouts
+                    .iter()
+                    .find(|layout| layout.id.name == *target_name)
+                    .map(|layout| layout.id.clone())
+            });
+
+        LayoutManager::from_config(layouts, active_layout)
+    };
+
+    exchange::fetcher::toggle_trade_fetch(state.trade_fetch_enabled);
+    exchange::set_preferred_currency(state.size_in_quote_ccy);
+
+    if let Some(kline_cfg) = state.default_kline_config {
+        data::chart::kline::set_user_default_kline_config(kline_cfg);
+    }
+
+    SavedState {
+        theme: state.selected_theme,
+        custom_theme: state.custom_theme,
+        layout_manager,
+        main_window: state.main_window,
+        timezone: state.timezone,
+        sidebar: state.sidebar,
+        scale_factor: state.scale_factor,
+        audio_cfg: state.audio_cfg,
+        volume_size_unit: state.size_in_quote_ccy,
+        journal_mode: state.journal_mode,
+    }
+}
+
 pub fn load_saved_state() -> SavedState {
     match data::read_from_file(data::SAVED_STATE_PATH) {
-        Ok(state) => {
-            let mut de_layouts = vec![];
-
-            for layout in &state.layout_manager.layouts {
-                let mut popout_windows = Vec::new();
-
-                for (pane, window_spec) in &layout.dashboard.popout {
-                    let configuration = configuration(pane.clone());
-                    popout_windows.push((configuration, *window_spec));
-                }
-
-                let layout_id = Uuid::new_v4();
-
-                let dashboard = Dashboard::from_config(
-                    configuration(layout.dashboard.pane.clone()),
-                    popout_windows,
-                    layout_id,
-                );
-
-                de_layouts.push((layout.name.clone(), layout_id, dashboard));
-            }
-
-            let layout_manager = {
-                let mut layouts = Vec::with_capacity(de_layouts.len());
-
-                for (name, layout_id, dashboard) in de_layouts {
-                    let id = LayoutId {
-                        unique: layout_id,
-                        name,
-                    };
-                    layouts.push(Layout { id, dashboard });
-                }
-
-                let active_layout =
-                    state
-                        .layout_manager
-                        .active_layout
-                        .as_ref()
-                        .and_then(|target_name| {
-                            layouts
-                                .iter()
-                                .find(|layout| layout.id.name == *target_name)
-                                .map(|layout| layout.id.clone())
-                        });
-
-                LayoutManager::from_config(layouts, active_layout)
-            };
-
-            exchange::fetcher::toggle_trade_fetch(state.trade_fetch_enabled);
-            exchange::set_preferred_currency(state.size_in_quote_ccy);
-
-            if let Some(kline_cfg) = state.default_kline_config {
-                data::chart::kline::set_user_default_kline_config(kline_cfg);
-            }
-
-            SavedState {
-                theme: state.selected_theme,
-                custom_theme: state.custom_theme,
-                layout_manager,
-                main_window: state.main_window,
-                timezone: state.timezone,
-                sidebar: state.sidebar,
-                scale_factor: state.scale_factor,
-                audio_cfg: state.audio_cfg,
-                volume_size_unit: state.size_in_quote_ccy,
-                journal_mode: state.journal_mode,
-            }
-        }
+        Ok(state) => state_to_saved_state(state),
         Err(e) => {
-            log::error!(
-                "Failed to load/find layout state: {}. Starting with a new layout.",
+            log::info!(
+                "No existing state found ({}). Initializing default Hawk template...",
                 e
             );
 
-            SavedState::default()
+            let state = data::default_state();
+            if let Ok(json) = serde_json::to_string_pretty(&state) {
+                let _ = data::write_json_to_file(&json, data::SAVED_STATE_PATH);
+            }
+
+            state_to_saved_state(state)
         }
     }
 }

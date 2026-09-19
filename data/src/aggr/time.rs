@@ -270,8 +270,13 @@ impl TimeSeries<KlineDataPoint> {
         if aggr_time > 0 && max_trade_time >= min_trade_time && min_trade_time > 0 {
             let start_bucket = (min_trade_time / aggr_time) * aggr_time;
             let end_bucket = (max_trade_time / aggr_time) * aggr_time;
-            for (_, dp) in self.datapoints.range_mut(start_bucket..=end_bucket) {
-                if !dp.footprint.is_empty() || (dp.kline.volume.0 + dp.kline.volume.1) == 0.0 {
+            let latest_ts = self.latest_timestamp();
+            for (&time, dp) in self.datapoints.range_mut(start_bucket..=end_bucket) {
+                let candle_end = time.saturating_add(aggr_time);
+                let is_latest = latest_ts.is_some_and(|latest| time >= latest);
+                if (is_latest || candle_end <= max_trade_time)
+                    && (!dp.footprint.is_empty() || (dp.kline.volume.0 + dp.kline.volume.1) == 0.0)
+                {
                     dp.trades_fetched = true;
                 }
             }
@@ -292,7 +297,7 @@ impl TimeSeries<KlineDataPoint> {
             if let Some(existing) = self.datapoints.get_mut(&time) {
                 if !new_dp.footprint.is_empty() {
                     existing.footprint = new_dp.footprint;
-                    existing.trades_fetched = true;
+                    existing.trades_fetched = new_dp.trades_fetched;
                 }
             } else {
                 if new_dp.footprint.is_empty()
@@ -600,8 +605,6 @@ pub fn aggregate_trades_for_day(
         return Vec::new();
     }
 
-    let min_trade_t = trades.first().map(|t| t.time).unwrap_or(0);
-    let max_trade_t = trades.last().map(|t| t.time).unwrap_or(0);
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
     let mut map: BTreeMap<u64, KlineDataPoint> = BTreeMap::new();
@@ -631,15 +634,28 @@ pub fn aggregate_trades_for_day(
         .and_utc()
         .timestamp_millis() as u64;
 
+    let tolerance = (interval_ms / 10).clamp(500, 120_000).min(interval_ms / 2);
+
     for (&time, dp) in map.iter_mut() {
         dp.calculate_poc();
         let candle_end = time.saturating_add(interval_ms);
         let is_historical_day = time < today_midnight && candle_end <= today_midnight;
-        if is_historical_day
-            || (min_trade_t <= time && max_trade_t >= candle_end)
-            || (candle_end > now_ms && max_trade_t >= now_ms.saturating_sub(120_000))
-        {
+        if is_historical_day {
             dp.trades_fetched = true;
+        } else {
+            let first_t = dp.first_trade_time().unwrap_or(0);
+            let last_t = dp.last_trade_time().unwrap_or(0);
+            let has_trades = !dp.footprint.is_empty();
+            let start_ok = has_trades && first_t <= time.saturating_add(tolerance);
+            let end_ok = if candle_end <= now_ms {
+                has_trades && last_t >= candle_end.saturating_sub(tolerance)
+            } else {
+                has_trades && last_t >= now_ms.saturating_sub(tolerance)
+            };
+            let no_volume = (dp.kline.volume.0 + dp.kline.volume.1) == 0.0;
+            if (start_ok && end_ok) || no_volume {
+                dp.trades_fetched = true;
+            }
         }
     }
 
@@ -1035,6 +1051,123 @@ mod tests {
         assert!(ts.datapoints.values().next().unwrap().trades_fetched);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_aggregate_trades_for_day_today_partial_candle_remains_unfetched() {
+        let step = PriceStep::from_f32(1.0);
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let today_midnight = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        // Select a closed candle from earlier today (e.g. today_midnight + 1 hour)
+        let candle_time = today_midnight + 3_600_000;
+        if now_ms < candle_time + 3_600_000 {
+            return;
+        }
+
+        // Candle only has trades for the first 10 seconds (gap of 59.8 minutes)
+        let trades = vec![
+            Trade {
+                time: candle_time + 100,
+                price: Price::from_f32(100.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: candle_time + 10_000,
+                price: Price::from_f32(101.0),
+                qty: 1.0,
+                is_sell: true,
+            },
+        ];
+
+        let dps = aggregate_trades_for_day(&trades, Timeframe::H1, step);
+        assert_eq!(dps.len(), 1);
+        assert_eq!(dps[0].0, candle_time);
+        assert!(
+            !dps[0].1.trades_fetched,
+            "A candle with a 59-minute trailing gap must remain unfetched"
+        );
+    }
+
+    #[test]
+    fn test_insert_preaggregated_footprint_preserves_unfetched_status() {
+        let step = PriceStep::from_f32(1.0);
+        let klines = vec![Kline {
+            time: 100_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+        assert!(!ts.datapoints.get(&100_000).unwrap().trades_fetched);
+
+        let mut footprint = KlineTrades::new();
+        footprint.add_trade_to_nearest_bin(
+            &Trade {
+                time: 100_005,
+                price: Price::from_f32(100.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            step,
+        );
+        let new_dp = KlineDataPoint {
+            kline: klines[0],
+            footprint,
+            trades_fetched: false,
+        };
+
+        ts.insert_preaggregated_footprint(vec![(100_000, new_dp)]);
+
+        assert!(
+            !ts.datapoints.get(&100_000).unwrap().trades_fetched,
+            "insert_preaggregated_footprint must preserve new_dp.trades_fetched = false"
+        );
+    }
+
+    #[test]
+    fn test_insert_trades_existing_buckets_partial_batch_does_not_mark_earlier_candle_fetched() {
+        let step = PriceStep::from_f32(1.0);
+        let klines = vec![
+            Kline {
+                time: 0,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: 300_000,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(107.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(106.0),
+                volume: (15.0, 15.0),
+            },
+        ];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+
+        let trade = Trade {
+            time: 10_000,
+            price: Price::from_f32(101.0),
+            qty: 1.0,
+            is_sell: false,
+        };
+        ts.insert_trades_existing_buckets(&[trade]);
+
+        assert!(
+            !ts.datapoints.get(&0).unwrap().trades_fetched,
+            "Partial trade batch must not mark earlier closed candle as fetched"
+        );
     }
 
     #[test]

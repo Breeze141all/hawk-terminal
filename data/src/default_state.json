@@ -1,0 +1,572 @@
+{
+  "layout_manager": {
+    "layouts": [
+      {
+        "name": "Hawk",
+        "dashboard": {
+          "pane": {
+            "Split": {
+              "axis": "Vertical",
+              "ratio": 0.8,
+              "a": {
+                "Split": {
+                  "axis": "Horizontal",
+                  "ratio": 0.5488419,
+                  "a": {
+                    "Split": {
+                      "axis": "Vertical",
+                      "ratio": 0.56989247,
+                      "a": {
+                        "KlineChart": {
+                          "layout": {
+                            "splits": [
+                              0.8
+                            ],
+                            "autoscale": "FitToVisible"
+                          },
+                          "kind": {
+                            "Footprint": {
+                              "clusters": "DeltaProfile",
+                              "scaling": "VisibleRange",
+                              "studies": [
+                                {
+                                  "ClusterSearch": {
+                                    "id": 4,
+                                    "min_volume": 0.0,
+                                    "min_delta": 1000.0,
+                                    "side": "Both",
+                                    "style": "ClassicTriangle",
+                                    "color": "Red"
+                                  }
+                                }
+                              ],
+                              "show_bottom_volume": false
+                            }
+                          },
+                          "stream_type": [
+                            {
+                              "DepthAndTrades": {
+                                "ticker": "BinanceLinear:BTCUSDT",
+                                "depth_aggr": "Client",
+                                "push_freq": "ServerDefault"
+                              }
+                            },
+                            {
+                              "Kline": {
+                                "ticker": "BinanceLinear:BTCUSDT",
+                                "timeframe": "H1"
+                              }
+                            }
+                          ],
+                          "settings": {
+                            "tick_multiply": 100,
+                            "visual_config": {
+                              "Kline": {
+                                "position_flow_colors": {
+                                  "new_longs": "Green",
+                                  "new_shorts": "Red",
+                                  "long_forced_close": "Blue",
+                                  "short_forced_close": "Purple"
+                                },
+                                "rolling_vwap_colors": {
+                                  "d7": "Cyan",
+                                  "d30": "Yellow",
+                                  "d90": "Orange",
+                                  "d365": "White"
+                                },
+                                "rolling_vwap_window_hours": 24,
+                                "rolling_vwap_show_7d": false,
+                                "rolling_vwap_show_30d": false,
+                                "rolling_vwap_show_90d": false,
+                                "rolling_vwap_show_365d": false,
+                                "rolling_vwap_show_panel": false,
+                                "liq_show_bands": false,
+                                "liq_show_histogram": false,
+                                "magnet_mode": false
+                              }
+                            },
+                            "selected_basis": {
+                              "Time": "H1"
+                            }
+                          },
+                          "indicators": [
+                            "RollingVwap"
+                          ],
+                          "link_group": null
+                        }
+                      },
+                      "b": {
+                        "KlineChart": {
+                          "layout": {
+                            "splits": [],
+                            "autoscale": "FitToVisible"
+                          },
+                          "kind": "Candles",
+                          "stream_type": [
+                            {
+                              "Kline": {
+                                "ticker": "BinanceLinear:BTCUSDT",
+                                "timeframe": "M3"
+                              }
+                            }
+                          ],
+                          "settings": {
+                            "tick_multiply": null,
+                            "visual_config": {
+                              "Kline": {
+                                "position_flow_colors": {
+                                  "new_longs": "Green",
+                                  "new_shorts": "Red",
+                                  "long_forced_close": "Blue",
+                                  "short_forced_close": "Purple"
+                                },
+                                "rolling_vwap_colors": {
+                                  "d7": "Cyan",
+                                  "d30": "Yellow",
+                                  "d90": "Orange",
+                                  "d365": "White"
+                                },
+                                "rolling_vwap_window_hours": 24,
+                                "rolling_vwap_show_7d": false,
+                                "rolling_vwap_show_30d": false,
+                                "rolling_vwap_show_90d": false,
+                                "rolling_vwap_show_365d": false,
+                                "rolling_vwap_show_panel": false,
+                                "liq_show_bands": false,
+                                "liq_show_histogram": false,
+                                "magnet_mode": false
+                              }
+                            },
+                            "selected_basis": {
+                              "Time": "M3"
+                            }
+                          },
+                          "indicators": [],
+                          "link_group": null
+                        }
+                      }
+                    }
+                  },
+                  "b": {
+                    "KlineChart": {
+                      "layout": {
+                        "splits": [],
+                        "autoscale": "FitToVisible"
+                      },
+                      "kind": {
+                        "Tpo": {
+                          "show_candles": true,
+                          "show_letters": true,
+                          "show_ib": false,
+                          "show_va": true,
+                          "show_poc": true,
+                          "show_single_prints": false,
+                          "tick_step": "Auto",
+                          "period": "Weekly",
+                          "clusters": [
+                            {
+                              "session_starts": [
+                                1787529600000,
+                                1788134400000,
+                                1788739200000,
+                                1789344000000
+                              ]
+                            }
+                          ],
+                          "split_sessions": [
+                            1788739200000
+                          ],
+                          "color_scheme": "Monochrome",
+                          "ib_color": "Auto",
+                          "poc_color": "White",
+                          "single_prints_color": "Auto"
+                        }
+                      },
+                      "stream_type": [
+                        {
+                          "Kline": {
+                            "ticker": "BinanceLinear:BTCUSDT",
+                            "timeframe": "M30"
+                          }
+                        }
+                      ],
+                      "settings": {
+                        "tick_multiply": 10,
+                        "visual_config": {
+                          "Kline": {
+                            "position_flow_colors": {
+                              "new_longs": "Green",
+                              "new_shorts": "Red",
+                              "long_forced_close": "Blue",
+                              "short_forced_close": "Purple"
+                            },
+                            "rolling_vwap_colors": {
+                              "d7": "Cyan",
+                              "d30": "Yellow",
+                              "d90": "Orange",
+                              "d365": "Magenta"
+                            },
+                            "rolling_vwap_window_hours": 24,
+                            "rolling_vwap_show_7d": false,
+                            "rolling_vwap_show_30d": false,
+                            "rolling_vwap_show_90d": false,
+                            "rolling_vwap_show_365d": false,
+                            "rolling_vwap_show_panel": false,
+                            "liq_show_bands": true,
+                            "liq_show_histogram": true,
+                            "magnet_mode": false
+                          }
+                        },
+                        "selected_basis": {
+                          "Time": "M30"
+                        }
+                      },
+                      "indicators": [],
+                      "link_group": null
+                    }
+                  }
+                }
+              },
+              "b": {
+                "HeatmapChart": {
+                  "layout": {
+                    "splits": [],
+                    "autoscale": "CenterLatest"
+                  },
+                  "studies": [],
+                  "stream_type": [
+                    {
+                      "DepthAndTrades": {
+                        "ticker": "BinanceLinear:BTCUSDT",
+                        "depth_aggr": "Client",
+                        "push_freq": "ServerDefault"
+                      }
+                    }
+                  ],
+                  "settings": {
+                    "tick_multiply": 5,
+                    "visual_config": null,
+                    "selected_basis": {
+                      "Time": "MS100"
+                    }
+                  },
+                  "indicators": [
+                    "Volume"
+                  ],
+                  "link_group": null
+                }
+              }
+            }
+          },
+          "popout": []
+        }
+      },
+      {
+        "name": "Hawk (ETH)",
+        "dashboard": {
+          "pane": {
+            "Split": {
+              "axis": "Vertical",
+              "ratio": 0.8,
+              "a": {
+                "Split": {
+                  "axis": "Horizontal",
+                  "ratio": 0.59113795,
+                  "a": {
+                    "Split": {
+                      "axis": "Vertical",
+                      "ratio": 0.6028226,
+                      "a": {
+                        "KlineChart": {
+                          "layout": {
+                            "splits": [],
+                            "autoscale": "FitToVisible"
+                          },
+                          "kind": {
+                            "Footprint": {
+                              "clusters": "DeltaProfile",
+                              "scaling": "VisibleRange",
+                              "studies": [],
+                              "show_bottom_volume": false
+                            }
+                          },
+                          "stream_type": [
+                            {
+                              "Kline": {
+                                "ticker": "BinanceLinear:ETHUSDT",
+                                "timeframe": "H4"
+                              }
+                            },
+                            {
+                              "DepthAndTrades": {
+                                "ticker": "BinanceLinear:ETHUSDT",
+                                "depth_aggr": "Client",
+                                "push_freq": "ServerDefault"
+                              }
+                            }
+                          ],
+                          "settings": {
+                            "tick_multiply": 50,
+                            "visual_config": {
+                              "Kline": {
+                                "position_flow_colors": {
+                                  "new_longs": "Green",
+                                  "new_shorts": "Red",
+                                  "long_forced_close": "Blue",
+                                  "short_forced_close": "Purple"
+                                },
+                                "rolling_vwap_colors": {
+                                  "d7": "Cyan",
+                                  "d30": "Yellow",
+                                  "d90": "Orange",
+                                  "d365": "Magenta"
+                                },
+                                "rolling_vwap_window_hours": 24,
+                                "rolling_vwap_show_7d": false,
+                                "rolling_vwap_show_30d": false,
+                                "rolling_vwap_show_90d": false,
+                                "rolling_vwap_show_365d": false,
+                                "rolling_vwap_show_panel": false,
+                                "liq_show_bands": false,
+                                "liq_show_histogram": false,
+                                "magnet_mode": false
+                              }
+                            },
+                            "selected_basis": {
+                              "Time": "H4"
+                            }
+                          },
+                          "indicators": [],
+                          "link_group": null
+                        }
+                      },
+                      "b": {
+                        "KlineChart": {
+                          "layout": {
+                            "splits": [
+                              0.8
+                            ],
+                            "autoscale": "FitToVisible"
+                          },
+                          "kind": "Candles",
+                          "stream_type": [
+                            {
+                              "Kline": {
+                                "ticker": "BinanceLinear:ETHUSDT",
+                                "timeframe": "M15"
+                              }
+                            }
+                          ],
+                          "settings": {
+                            "tick_multiply": null,
+                            "visual_config": {
+                              "Kline": {
+                                "position_flow_colors": {
+                                  "new_longs": "Green",
+                                  "new_shorts": "Red",
+                                  "long_forced_close": "Blue",
+                                  "short_forced_close": "Purple"
+                                },
+                                "rolling_vwap_colors": {
+                                  "d7": "Cyan",
+                                  "d30": "Yellow",
+                                  "d90": "Orange",
+                                  "d365": "Magenta"
+                                },
+                                "rolling_vwap_window_hours": 24,
+                                "rolling_vwap_show_7d": false,
+                                "rolling_vwap_show_30d": false,
+                                "rolling_vwap_show_90d": false,
+                                "rolling_vwap_show_365d": false,
+                                "rolling_vwap_show_panel": false,
+                                "liq_show_bands": true,
+                                "liq_show_histogram": true,
+                                "magnet_mode": false
+                              }
+                            },
+                            "selected_basis": {
+                              "Time": "M15"
+                            }
+                          },
+                          "indicators": [
+                            "LiquidationHeatmap"
+                          ],
+                          "link_group": null
+                        }
+                      }
+                    }
+                  },
+                  "b": {
+                    "KlineChart": {
+                      "layout": {
+                        "splits": [],
+                        "autoscale": "FitToVisible"
+                      },
+                      "kind": {
+                        "Tpo": {
+                          "show_candles": true,
+                          "show_letters": true,
+                          "show_ib": false,
+                          "show_va": true,
+                          "show_poc": true,
+                          "show_single_prints": false,
+                          "tick_step": "Auto",
+                          "period": "Weekly",
+                          "clusters": [
+                            {
+                              "session_starts": [
+                                1787529600000,
+                                1788134400000,
+                                1788739200000,
+                                1789344000000
+                              ]
+                            }
+                          ],
+                          "split_sessions": [
+                            1787529600000
+                          ],
+                          "color_scheme": "Monochrome",
+                          "ib_color": "Auto",
+                          "poc_color": "White",
+                          "single_prints_color": "White"
+                        }
+                      },
+                      "stream_type": [
+                        {
+                          "Kline": {
+                            "ticker": "BinanceLinear:ETHUSDT",
+                            "timeframe": "H1"
+                          }
+                        }
+                      ],
+                      "settings": {
+                        "tick_multiply": 10,
+                        "visual_config": {
+                          "Kline": {
+                            "position_flow_colors": {
+                              "new_longs": "Green",
+                              "new_shorts": "Red",
+                              "long_forced_close": "Blue",
+                              "short_forced_close": "Purple"
+                            },
+                            "rolling_vwap_colors": {
+                              "d7": "Cyan",
+                              "d30": "Yellow",
+                              "d90": "Orange",
+                              "d365": "Magenta"
+                            },
+                            "rolling_vwap_window_hours": 24,
+                            "rolling_vwap_show_7d": false,
+                            "rolling_vwap_show_30d": false,
+                            "rolling_vwap_show_90d": false,
+                            "rolling_vwap_show_365d": false,
+                            "rolling_vwap_show_panel": false,
+                            "liq_show_bands": false,
+                            "liq_show_histogram": false,
+                            "magnet_mode": false
+                          }
+                        },
+                        "selected_basis": {
+                          "Time": "H1"
+                        }
+                      },
+                      "indicators": [],
+                      "link_group": null
+                    }
+                  }
+                }
+              },
+              "b": {
+                "HeatmapChart": {
+                  "layout": {
+                    "splits": [],
+                    "autoscale": "CenterLatest"
+                  },
+                  "studies": [],
+                  "stream_type": [
+                    {
+                      "DepthAndTrades": {
+                        "ticker": "BinanceLinear:ETHUSDT",
+                        "depth_aggr": "Client",
+                        "push_freq": "ServerDefault"
+                      }
+                    }
+                  ],
+                  "settings": {
+                    "tick_multiply": 5,
+                    "visual_config": null,
+                    "selected_basis": {
+                      "Time": "MS100"
+                    }
+                  },
+                  "indicators": [
+                    "Volume"
+                  ],
+                  "link_group": null
+                }
+              }
+            }
+          },
+          "popout": []
+        }
+      }
+    ],
+    "active_layout": "Hawk"
+  },
+  "selected_theme": {
+    "name": "hawk"
+  },
+  "custom_theme": null,
+  "main_window": null,
+  "timezone": "Local",
+  "sidebar": {
+    "position": "Left",
+    "tickers_table": {
+      "favorited_tickers": [],
+      "show_favorites": false,
+      "selected_sort_option": "VolumeDesc",
+      "selected_exchanges": [
+        "Bybit",
+        "Okex",
+        "Hyperliquid",
+        "Binance"
+      ],
+      "selected_markets": [
+        "Spot",
+        "InversePerps",
+        "LinearPerps"
+      ]
+    }
+  },
+  "scale_factor": 1.0,
+  "audio_cfg": {
+    "streams": {},
+    "volume": 100.0
+  },
+  "trade_fetch_enabled": true,
+  "size_in_quote_ccy": "Base",
+  "journal_mode": "Basic",
+  "default_kline_config": {
+    "position_flow_colors": {
+      "new_longs": "Green",
+      "new_shorts": "Red",
+      "long_forced_close": "Blue",
+      "short_forced_close": "Purple"
+    },
+    "rolling_vwap_colors": {
+      "d7": "Cyan",
+      "d30": "Yellow",
+      "d90": "Orange",
+      "d365": "Magenta"
+    },
+    "rolling_vwap_window_hours": 24,
+    "rolling_vwap_show_7d": false,
+    "rolling_vwap_show_30d": false,
+    "rolling_vwap_show_90d": false,
+    "rolling_vwap_show_365d": false,
+    "rolling_vwap_show_panel": false,
+    "liq_show_bands": true,
+    "liq_show_histogram": true,
+    "magnet_mode": false
+  }
+}

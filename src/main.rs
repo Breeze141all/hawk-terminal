@@ -857,7 +857,7 @@ impl HawkTerminal {
             let theme: iced::Theme = self.theme.clone().into();
             let bg_color = theme.palette().background;
 
-            return container(text("Centurion Client").size(48).font(iced::Font {
+            return container(text("hawk - terminal").size(48).font(iced::Font {
                 family: iced::font::Family::Name("Azeret Mono"),
                 weight: iced::font::Weight::Bold,
                 ..Default::default()

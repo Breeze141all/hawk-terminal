@@ -35,6 +35,7 @@ pub enum Message {
     SetLayoutName(Uuid, String),
     Renaming(String),
     AddLayout,
+    AddHawkTemplate,
     RemoveLayout(Uuid),
     ToggleEditMode(Editing),
     CloneLayout(Uuid),
@@ -63,17 +64,31 @@ pub struct LayoutManager {
     pub tab: LayoutTab,
 }
 
+impl Default for LayoutManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LayoutManager {
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        let hawk = data::default_hawk_layout();
         let default_layout = LayoutId {
             unique: Uuid::new_v4(),
-            name: "Layout 1".into(),
+            name: hawk.name,
         };
+
+        let dashboard = Dashboard::from_config(
+            crate::layout::configuration(hawk.dashboard.pane),
+            vec![],
+            default_layout.unique,
+        );
 
         Self {
             layouts: vec![Layout {
                 id: default_layout.clone(),
-                dashboard: Dashboard::default(),
+                dashboard,
             }],
             active_layout_id: Some(default_layout.unique),
             edit_mode: Editing::None,
@@ -185,6 +200,22 @@ impl LayoutManager {
                 self.insert_layout(new_layout.clone(), Dashboard::default());
 
                 return Some(Action::Select(new_layout.unique));
+            }
+            Message::AddHawkTemplate => {
+                let hawk = data::default_hawk_layout();
+                let unique_id = Uuid::new_v4();
+                let unique_name = self.ensure_unique_name(&hawk.name, unique_id);
+                let id = LayoutId {
+                    unique: unique_id,
+                    name: unique_name,
+                };
+                let dashboard = Dashboard::from_config(
+                    crate::layout::configuration(hawk.dashboard.pane),
+                    vec![],
+                    unique_id,
+                );
+                self.insert_layout(id.clone(), dashboard);
+                return Some(Action::Select(id.unique));
             }
             Message::RemoveLayout(id) => {
                 if Some(id) == self.active_layout_id {
@@ -374,7 +405,13 @@ impl LayoutManager {
 
                 content = content
                     .push(
-                        button(text("+ Add Layout"))
+                        button(text("+ Add Hawk Template"))
+                            .style(move |t, s| style::button::confirm(t, s, true))
+                            .width(iced::Length::Fill)
+                            .on_press(Message::AddHawkTemplate),
+                    )
+                    .push(
+                        button(text("+ Add Blank Layout"))
                             .style(move |t, s| style::button::transparent(t, s, true))
                             .width(iced::Length::Fill)
                             .on_press(Message::AddLayout),
@@ -588,5 +625,16 @@ mod tests {
 
         let action = lm.update(Message::OpenExportsFolder);
         assert!(matches!(action, Some(Action::OpenExportsFolder)));
+    }
+
+    #[test]
+    fn test_layout_manager_add_hawk_template() {
+        let mut lm = LayoutManager::new();
+        assert_eq!(lm.layouts[0].id.name, "Hawk");
+
+        let action = lm.update(Message::AddHawkTemplate);
+        assert!(action.is_some());
+        assert_eq!(lm.layouts.len(), 2);
+        assert_eq!(lm.layouts[1].id.name, "Hawk (2)");
     }
 }

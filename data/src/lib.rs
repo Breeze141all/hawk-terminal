@@ -19,7 +19,9 @@ pub use config::bundle::{
     BundleMetadata, BundlePayload, BundleValidationError, ConfigBundle, ExportType, WorkspaceBundle,
 };
 pub use config::sidebar::{self, Sidebar};
-pub use config::state::{Layouts, State};
+pub use config::state::{
+    DEFAULT_HAWK_STATE_JSON, Layouts, State, default_hawk_layout, default_state,
+};
 pub use config::theme::Theme;
 pub use config::timezone::UserTimezone;
 pub use journal::{

@@ -13,6 +13,23 @@ pub struct Layouts {
     pub active_layout: Option<String>,
 }
 
+pub const DEFAULT_HAWK_STATE_JSON: &str = include_str!("../default_state.json");
+
+pub fn default_state() -> State {
+    serde_json::from_str(DEFAULT_HAWK_STATE_JSON)
+        .expect("Embedded default_state.json must be valid")
+}
+
+pub fn default_hawk_layout() -> Layout {
+    let state = default_state();
+    state
+        .layout_manager
+        .layouts
+        .into_iter()
+        .next()
+        .expect("Default state must contain at least one layout")
+}
+
 #[derive(Default, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct State {
@@ -59,5 +76,21 @@ impl State {
             journal_mode,
             default_kline_config,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_state_contains_hawk_template() {
+        let state = default_state();
+        assert_eq!(state.layout_manager.active_layout.as_deref(), Some("Hawk"));
+        assert!(!state.layout_manager.layouts.is_empty());
+        assert_eq!(state.layout_manager.layouts[0].name, "Hawk");
+
+        let hawk_layout = default_hawk_layout();
+        assert_eq!(hawk_layout.name, "Hawk");
     }
 }

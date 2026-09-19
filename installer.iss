@@ -3,7 +3,7 @@
 ; Output: Single executable setup file
 
 #define MyAppName "Hawk Terminal"
-#define MyAppVersion "0.9.1"
+#define MyAppVersion "0.9.2"
 #define MyAppPublisher "Breeze"
 #define MyAppURL "https://breeze141all.github.io/hawk-site/"
 #define MyAppExeName "hawk-terminal.exe"
