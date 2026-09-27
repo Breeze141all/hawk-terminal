@@ -7,8 +7,8 @@ pub mod trades;
 pub mod util;
 
 use crate::util::{ContractSize, MinQtySize, MinTicksize, Price};
-pub use adapter::Event;
-use adapter::{Exchange, MarketKind, StreamKind};
+pub use adapter::{Event, Exchange};
+use adapter::{MarketKind, StreamKind};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -586,6 +586,28 @@ impl TickerInfo {
     pub fn exchange(&self) -> Exchange {
         self.ticker.exchange
     }
+
+    pub fn default_contract_size(ticker: &Ticker) -> Option<f32> {
+        match ticker.exchange {
+            Exchange::OkexLinear | Exchange::OkexInverse => {
+                let sym = ticker.display_symbol_and_type().0;
+                if sym.starts_with("BTC") {
+                    Some(0.01)
+                } else if sym.starts_with("ETH") {
+                    Some(0.1)
+                } else {
+                    Some(1.0)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn effective_contract_size(&self) -> Option<f32> {
+        self.contract_size
+            .map(f32::from)
+            .or_else(|| Self::default_contract_size(&self.ticker))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -595,6 +617,14 @@ pub struct Trade {
     pub is_sell: bool,
     pub price: Price,
     pub qty: f32,
+}
+
+impl Trade {
+    pub fn normalize_contract_qty(&mut self, contract_size: Option<f32>) {
+        if let Some(cs) = contract_size {
+            self.qty *= cs;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -535,67 +535,112 @@ impl TimeSeries<KlineDataPoint> {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let today_midnight = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
         let current_candle_start = (now_ms / interval_ms) * interval_ms;
 
         let aligned_earliest = (visible_earliest / interval_ms) * interval_ms;
         let aligned_latest = (visible_latest / interval_ms) * interval_ms;
 
-        // 1. Priority 1: Unfetched candles within the visible range [aligned_earliest, aligned_latest]
-        let mut visible_unfetched = self
+        // 1. Priority 1: Unfetched past-day candles in visible range [aligned_earliest, aligned_latest]
+        let mut visible_past_unfetched = self
             .datapoints
             .range(aligned_earliest..=aligned_latest)
             .filter(|(t, dp)| {
-                **t < current_candle_start
+                **t < today_midnight
+                    && **t < current_candle_start
                     && !dp.trades_fetched
                     && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
             })
             .map(|(&t, _)| t);
 
-        if let Some(first_unfetched) = visible_unfetched.next() {
-            let last_unfetched = visible_unfetched.next_back().unwrap_or(first_unfetched);
+        if let Some(first_unfetched) = visible_past_unfetched.next() {
+            let last_unfetched = visible_past_unfetched
+                .next_back()
+                .unwrap_or(first_unfetched);
             let fetch_from = first_unfetched;
             let fetch_to = last_unfetched.saturating_add(interval_ms);
             return Some((fetch_from, fetch_to));
         }
 
-        // 2. Priority 2: Prefetch earlier candles preceding the visible range
-        let prefetch_earliest = aligned_earliest.saturating_sub(7 * 24 * 3600 * 1000);
-        let aligned_prefetch_earliest = (prefetch_earliest / interval_ms) * interval_ms;
-        let mut past_unfetched = self
+        // 2. Priority 2: Unfetched past-day candles preceding visible range
+        let earliest_datapoint = self
             .datapoints
-            .range(aligned_prefetch_earliest..aligned_earliest)
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(aligned_earliest);
+        let prefetch_earliest = aligned_earliest
+            .saturating_sub(130 * 24 * 3600 * 1000)
+            .max(earliest_datapoint)
+            .min(aligned_earliest);
+        let aligned_prefetch_earliest = (prefetch_earliest / interval_ms) * interval_ms;
+        if aligned_prefetch_earliest < aligned_earliest {
+            let mut past_unfetched = self
+                .datapoints
+                .range(aligned_prefetch_earliest..aligned_earliest)
+                .filter(|(t, dp)| {
+                    **t < today_midnight
+                        && **t < current_candle_start
+                        && !dp.trades_fetched
+                        && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
+                })
+                .map(|(&t, _)| t);
+
+            if let Some(first_unfetched) = past_unfetched.next() {
+                let last_unfetched = past_unfetched.next_back().unwrap_or(first_unfetched);
+                let fetch_from = first_unfetched;
+                let fetch_to = last_unfetched.saturating_add(interval_ms);
+                return Some((fetch_from, fetch_to));
+            }
+        }
+
+        // 3. Priority 3: Today's unfetched candles in visible range
+        let mut visible_today_unfetched = self
+            .datapoints
+            .range(aligned_earliest..=aligned_latest)
             .filter(|(t, dp)| {
-                **t < current_candle_start
+                **t >= today_midnight
+                    && **t < current_candle_start
                     && !dp.trades_fetched
                     && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
             })
             .map(|(&t, _)| t);
 
-        if let Some(first_unfetched) = past_unfetched.next() {
-            let last_unfetched = past_unfetched.next_back().unwrap_or(first_unfetched);
+        if let Some(first_unfetched) = visible_today_unfetched.next() {
+            let last_unfetched = visible_today_unfetched
+                .next_back()
+                .unwrap_or(first_unfetched);
             let fetch_from = first_unfetched;
             let fetch_to = last_unfetched.saturating_add(interval_ms);
             return Some((fetch_from, fetch_to));
         }
 
-        // 3. Priority 3: Prefetch candles succeeding the visible range
+        // 4. Priority 4: Today's unfetched candles succeeding visible range
         let prefetch_latest = aligned_latest.saturating_add(7 * 24 * 3600 * 1000);
         let aligned_prefetch_latest = (prefetch_latest / interval_ms) * interval_ms;
-        let mut future_unfetched = self
-            .datapoints
-            .range(aligned_latest.saturating_add(interval_ms)..=aligned_prefetch_latest)
-            .filter(|(t, dp)| {
-                **t < current_candle_start
-                    && !dp.trades_fetched
-                    && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
-            })
-            .map(|(&t, _)| t);
+        let future_start = aligned_latest.saturating_add(interval_ms);
+        if future_start <= aligned_prefetch_latest {
+            let mut future_unfetched = self
+                .datapoints
+                .range(future_start..=aligned_prefetch_latest)
+                .filter(|(t, dp)| {
+                    **t < current_candle_start
+                        && !dp.trades_fetched
+                        && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
+                })
+                .map(|(&t, _)| t);
 
-        if let Some(first_unfetched) = future_unfetched.next() {
-            let last_unfetched = future_unfetched.next_back().unwrap_or(first_unfetched);
-            let fetch_from = first_unfetched;
-            let fetch_to = last_unfetched.saturating_add(interval_ms);
-            return Some((fetch_from, fetch_to));
+            if let Some(first_unfetched) = future_unfetched.next() {
+                let last_unfetched = future_unfetched.next_back().unwrap_or(first_unfetched);
+                let fetch_from = first_unfetched;
+                let fetch_to = last_unfetched.saturating_add(interval_ms);
+                return Some((fetch_from, fetch_to));
+            }
         }
 
         None
@@ -1047,6 +1092,56 @@ mod tests {
         // If user scrolls to past range 0..400_000, it MUST suggest fetching 0..600_000 (aligned candle end)
         let suggested = ts.suggest_trade_fetch_range(0, 400_000);
         assert_eq!(suggested, Some((0, 600_000)));
+    }
+
+    #[test]
+    fn test_suggest_trade_fetch_range_prioritizes_past_days_over_today() {
+        let step = PriceStep::from_f32(1.0);
+        let today_midnight = chrono::Utc::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        let past_candle_time = today_midnight - 300_000;
+        let today_candle_time = today_midnight + 300_000;
+
+        let klines = vec![
+            Kline {
+                time: past_candle_time,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: today_candle_time,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(107.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(106.0),
+                volume: (15.0, 15.0),
+            },
+        ];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M5, step, &klines);
+
+        // Visible range covers both past and today candles
+        let range = ts.suggest_trade_fetch_range(past_candle_time, today_candle_time + 300_000);
+        // It must prioritize the past candle first!
+        assert_eq!(range, Some((past_candle_time, past_candle_time + 300_000)));
+
+        // Once the past candle is marked as fetched:
+        ts.mark_trades_fetched(past_candle_time, past_candle_time + 300_000);
+
+        // Now it can suggest fetching today's candle:
+        let next_range =
+            ts.suggest_trade_fetch_range(past_candle_time, today_candle_time + 300_000);
+        assert_eq!(
+            next_range,
+            Some((today_candle_time, today_candle_time + 300_000))
+        );
     }
 
     #[test]

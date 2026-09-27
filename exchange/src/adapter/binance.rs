@@ -2119,7 +2119,11 @@ pub async fn get_hist_trades(
 
         log::info!("Downloading from {}", url);
 
-        let resp = reqwest::get(&url).await.map_err(AdapterError::FetchError)?;
+        let resp = limiter::HTTP_CLIENT
+            .get(&url)
+            .send()
+            .await
+            .map_err(AdapterError::FetchError)?;
 
         if !resp.status().is_success() {
             return Err(AdapterError::InvalidRequest(format!(

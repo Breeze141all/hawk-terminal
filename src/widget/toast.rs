@@ -33,31 +33,40 @@ pub enum Notification {
     Warn(String),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Toast {
-    title: String,
-    body: String,
-    status: Status,
+    pub title: String,
+    pub body: String,
+    pub status: Status,
+    pub closable: bool,
+    pub persistent: bool,
+}
+
+impl Default for Toast {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            body: String::new(),
+            status: Status::default(),
+            closable: true,
+            persistent: false,
+        }
+    }
 }
 
 impl Toast {
     pub fn new(context: Notification) -> Self {
-        match context {
-            Notification::Error(body) => Self {
-                title: "Error".to_string(),
-                body,
-                status: Status::Danger,
-            },
-            Notification::Info(body) => Self {
-                title: "Info".to_string(),
-                body,
-                status: Status::Primary,
-            },
-            Notification::Warn(body) => Self {
-                title: "Warning".to_string(),
-                body,
-                status: Status::Warning,
-            },
+        let (title, body, status) = match context {
+            Notification::Error(body) => ("Error".to_string(), body, Status::Danger),
+            Notification::Info(body) => ("Info".to_string(), body, Status::Primary),
+            Notification::Warn(body) => ("Warning".to_string(), body, Status::Warning),
+        };
+        Self {
+            title,
+            body,
+            status,
+            closable: true,
+            persistent: false,
         }
     }
 
@@ -66,6 +75,8 @@ impl Toast {
             title: "Info".to_string(),
             body: body.into(),
             status: Status::Primary,
+            closable: true,
+            persistent: false,
         }
     }
 
@@ -74,6 +85,8 @@ impl Toast {
             title: "Error".to_string(),
             body: body.into(),
             status: Status::Danger,
+            closable: true,
+            persistent: false,
         }
     }
 
@@ -82,13 +95,31 @@ impl Toast {
             title: "Warning".to_string(),
             body: body.into(),
             status: Status::Warning,
+            closable: true,
+            persistent: false,
         }
+    }
+
+    pub fn persistent(mut self) -> Self {
+        self.persistent = true;
+        self
+    }
+
+    pub fn closable(mut self, closable: bool) -> Self {
+        self.closable = closable;
+        self
+    }
+
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = title.into();
+        self
     }
 }
 
 pub struct Manager<'a, Message> {
     content: Element<'a, Message>,
     toasts: Vec<Element<'a, Message>>,
+    persistent: Vec<bool>,
     timeout_secs: u64,
     on_close: Box<dyn Fn(usize) -> Message + 'a>,
     alignment: Alignment,
@@ -104,23 +135,25 @@ where
         alignment: Alignment,
         on_close: impl Fn(usize) -> Message + 'a,
     ) -> Self {
+        let persistent = toasts.iter().map(|t| t.persistent).collect();
         let toasts = toasts
             .iter()
             .enumerate()
             .map(|(index, toast)| {
+                let close_btn: Element<Message> = if toast.closable {
+                    button("X")
+                        .on_press((on_close)(index))
+                        .style(move |theme, status| style::button::transparent(theme, status, true))
+                        .padding(padding::right(6).left(6).top(2).bottom(2))
+                        .into()
+                } else {
+                    space::horizontal().into()
+                };
+
                 container(column![
                     container(
-                        row![
-                            text(toast.title.as_str()),
-                            space::horizontal(),
-                            button("X")
-                                .on_press((on_close)(index))
-                                .style(move |theme, status| {
-                                    style::button::transparent(theme, status, true)
-                                })
-                                .padding(padding::right(6).left(6).top(2).bottom(2))
-                        ]
-                        .align_y(Center)
+                        row![text(toast.title.as_str()), space::horizontal(), close_btn]
+                            .align_y(Center)
                     )
                     .style(match toast.status {
                         Status::Primary => primary,
@@ -144,6 +177,7 @@ where
             content: content.into(),
             alignment,
             toasts,
+            persistent,
             timeout_secs: DEFAULT_TIMEOUT,
             on_close: Box::new(on_close),
         }
@@ -315,6 +349,7 @@ impl<Message> Widget<Message, Theme, Renderer> for Manager<'_, Message> {
                 bounds: layout.bounds(),
                 alignment: self.alignment,
                 toasts: &mut self.toasts,
+                persistent: &self.persistent,
                 state: toasts_state,
                 instants,
                 on_close: &self.on_close,
@@ -333,6 +368,7 @@ struct Overlay<'a, 'b, Message> {
     bounds: Rectangle,
     alignment: Alignment,
     toasts: &'b mut [Element<'a, Message>],
+    persistent: &'b [bool],
     state: &'b mut [Tree],
     instants: &'b mut [Option<Instant>],
     on_close: &'b dyn Fn(usize) -> Message,
@@ -373,6 +409,9 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Overlay<'_, '_, Mes
                 .enumerate()
                 .for_each(|(index, maybe_instant)| {
                     if let Some(instant) = maybe_instant.as_mut() {
+                        if self.persistent.get(index).copied().unwrap_or(false) {
+                            return;
+                        }
                         let remaining =
                             time::seconds(self.timeout_secs).saturating_sub(instant.elapsed());
 
@@ -534,4 +573,33 @@ fn warning(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
 
     styled(palette.warning.weak)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_toast_persistent_and_closable() {
+        let toast = Toast::error("Server unavailable")
+            .with_title("Hyperliquid Footprint")
+            .persistent()
+            .closable(true);
+
+        assert_eq!(toast.title, "Hyperliquid Footprint");
+        assert_eq!(toast.body, "Server unavailable");
+        assert_eq!(toast.status, Status::Danger);
+        assert!(toast.persistent);
+        assert!(toast.closable);
+
+        let warn_toast = Toast::warn("Partial intraday")
+            .with_title("Bybit Footprint")
+            .persistent()
+            .closable(true);
+
+        assert_eq!(warn_toast.title, "Bybit Footprint");
+        assert_eq!(warn_toast.status, Status::Warning);
+        assert!(warn_toast.persistent);
+        assert!(warn_toast.closable);
+    }
 }

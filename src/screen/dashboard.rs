@@ -253,7 +253,14 @@ impl Dashboard {
                 Some(id) => {
                     if let Some(state) = self.get_mut_pane_state_by_uuid(main_window.id, id) {
                         state.status = pane::Status::Ready;
-                        state.notifications.push(Toast::error(err.to_string()));
+                        let err_str = err.to_string();
+                        let is_footprint_archive_err = err_str.contains("Hyperliquid")
+                            || err_str.contains("historical archive");
+                        if is_footprint_archive_err {
+                            state.sync_footprint_exchange_notice();
+                        } else if !state.notifications.iter().any(|t| t.body == err_str) {
+                            state.notifications.push(Toast::error(err_str));
+                        }
                         if let pane::Content::Kline {
                             chart: Some(chart), ..
                         } = &mut state.content
@@ -1118,6 +1125,7 @@ impl Dashboard {
                         state.status = pane::Status::Ready;
                     }
                 }
+                state.sync_footprint_exchange_notice();
             });
     }
 
@@ -1534,6 +1542,7 @@ fn request_fetch(
             });
 
             if let Some((ticker_info, pane_id, stream)) = trade_info {
+                state.sync_footprint_exchange_notice();
                 let exchange_folder = match ticker_info.exchange() {
                     Exchange::BinanceSpot | Exchange::BinanceLinear | Exchange::BinanceInverse => {
                         "binance"
@@ -1900,7 +1909,14 @@ pub fn fetch_trades_batched(
             {
                 Ok((mut batch, next_trade_t)) => {
                     let batch_len = batch.len();
-                    if batch_len == 0 {
+                    let today_midnight = chrono::Utc::now()
+                        .date_naive()
+                        .and_hms_opt(0, 0, 0)
+                        .unwrap()
+                        .and_utc()
+                        .timestamp_millis() as u64;
+                    if batch_len == 0 && latest_trade_t >= today_midnight {
+                        reached_end = true;
                         break;
                     }
                     let had_trades_beyond_to_time = batch.iter().any(|t| t.time >= to_time);

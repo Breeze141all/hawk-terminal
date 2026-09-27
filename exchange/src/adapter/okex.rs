@@ -35,7 +35,7 @@ use tokio::sync::Mutex;
 
 use crate::trades::cache::{
     USE_BINARY_CACHE, load_intraday_trades_from_cache, load_raw_trades_from_cache,
-    save_intraday_trades_to_cache, save_raw_trades_to_cache, slice_cached_trades,
+    save_raw_trades_to_cache, slice_cached_trades,
 };
 
 const WS_DOMAIN: &str = "ws.okx.com";
@@ -234,7 +234,7 @@ pub fn connect_market_stream(
         let mut orderbook = LocalDepthCache::default();
 
         let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
-        let contract_size = ticker_info.contract_size.map(f32::from);
+        let contract_size = ticker_info.effective_contract_size();
 
         loop {
             match &mut state {
@@ -418,7 +418,7 @@ pub fn connect_kline_stream(
                                         None => continue,
                                     };
 
-                                let contract_size = ticker_info.contract_size.map(f32::from);
+                                let contract_size = ticker_info.effective_contract_size();
 
                                 if let Some(data) = v.get("data").and_then(|d| d.as_array()) {
                                     for row in data {
@@ -737,7 +737,7 @@ pub async fn fetch_klines(
     let ticker = ticker_info.ticker;
 
     let (symbol_str, market) = ticker.to_full_symbol_and_type();
-    let contract_size = ticker_info.contract_size.map(f32::from);
+    let contract_size = ticker_info.effective_contract_size();
 
     let bar = timeframe_to_okx_bar(timeframe).ok_or_else(|| {
         AdapterError::InvalidRequest(format!("Unsupported timeframe: {timeframe}"))
@@ -868,98 +868,11 @@ pub async fn fetch_historical_oi(
     Ok(open_interest)
 }
 
-#[derive(serde::Deserialize, Debug)]
-#[allow(dead_code)]
-struct OkxRestTradeItem {
-    #[serde(rename = "tradeId")]
-    pub trade_id: String,
-    pub px: String,
-    pub sz: String,
-    pub side: String,
-    pub ts: String,
-}
-
-#[derive(serde::Deserialize, Debug)]
-#[allow(dead_code)]
-struct OkxRestTradeResponse {
-    pub data: Vec<OkxRestTradeItem>,
-}
-
 pub async fn fetch_intraday_trades(
-    ticker_info: TickerInfo,
-    from: u64,
+    _ticker_info: TickerInfo,
+    _from: u64,
 ) -> Result<Vec<Trade>, AdapterError> {
-    let ticker = ticker_info.ticker;
-    let (symbol_str, _) = ticker.to_full_symbol_and_type();
-    let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
-
-    let mut all_trades = Vec::new();
-    let mut cursor: Option<String> = None;
-
-    // Fetch up to 10 pages (1000 trades max) backwards to prevent blocking Tokio with rate limits
-    for _ in 0..10 {
-        let mut url = format!(
-            "https://www.okx.com/api/v5/market/history-trades?instId={}&limit=100",
-            symbol_str
-        );
-        if let Some(ref c) = cursor {
-            url.push_str(&format!("&after={c}"));
-        }
-
-        let resp: OkxRestTradeResponse =
-            limiter::http_parse_with_limiter(&url, &OKEX_LIMITER, 1, None, None).await?;
-
-        if resp.data.is_empty() {
-            break;
-        }
-
-        let last_trade_id = resp.data.last().map(|t| t.trade_id.clone());
-        let mut reached_from = false;
-
-        for item in resp.data {
-            let time = match item.ts.parse::<u64>() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if time < from {
-                reached_from = true;
-            }
-
-            let price_f32 = match item.px.parse::<f32>() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            let mut qty = match item.sz.parse::<f32>() {
-                Ok(q) => q,
-                Err(_) => continue,
-            };
-
-            if size_in_quote_ccy {
-                qty = (qty * price_f32).round();
-            }
-
-            let is_sell = item.side.eq_ignore_ascii_case("sell") || item.side == "2";
-            let price = Price::from_f32(price_f32).round_to_min_tick(ticker_info.min_ticksize);
-
-            all_trades.push(Trade {
-                time,
-                is_sell,
-                price,
-                qty,
-            });
-        }
-
-        if reached_from || last_trade_id.is_none() {
-            break;
-        }
-        cursor = last_trade_id;
-    }
-
-    all_trades.retain(|t| t.time >= from);
-    all_trades.sort_by_key(|t| t.time);
-    all_trades.dedup_by(|a, b| a.time == b.time && a.price == b.price && a.qty == b.qty);
-    Ok(all_trades)
+    Ok(Vec::new())
 }
 
 pub async fn get_hist_trades(
@@ -981,12 +894,21 @@ pub async fn get_hist_trades(
     let (symbol_str, _) = ticker.to_full_symbol_and_type();
 
     let date_str = date.format("%Y%m%d");
-    let file_name = format!("{symbol_str}-trades-{date_str}.zip");
+    let date_iso = date.format("%Y-%m-%d");
+    let file_name = format!("{symbol_str}-trades-{date_iso}.zip");
     let url =
         format!("https://static.okx.com/cdn/okex/traderecords/trades/daily/{date_str}/{file_name}");
 
     log::info!("Downloading OKX historical trades from {url}");
-    let resp = reqwest::get(&url).await.map_err(AdapterError::FetchError)?;
+    let resp = HTTP_CLIENT
+        .get(&url)
+        .send()
+        .await
+        .map_err(AdapterError::FetchError)?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        log::warn!("OKX historical trades not found for {date} at {url}");
+        return Ok(Vec::new());
+    }
     if !resp.status().is_success() {
         return Err(AdapterError::InvalidRequest(format!(
             "Failed to fetch OKX trades from {url}: status {}",
@@ -997,6 +919,8 @@ pub async fn get_hist_trades(
     let body = resp.bytes().await.map_err(AdapterError::FetchError)?;
     let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
     let min_ticksize = ticker_info.min_ticksize;
+    let contract_size = ticker_info.effective_contract_size();
+    let (_, market_type) = ticker_info.ticker.to_full_symbol_and_type();
 
     let trades = tokio::task::spawn_blocking(move || -> Result<Vec<Trade>, AdapterError> {
         let cursor = std::io::Cursor::new(body);
@@ -1024,7 +948,9 @@ pub async fn get_hist_trades(
             let time_col = headers
                 .iter()
                 .position(|h| {
-                    h.eq_ignore_ascii_case("ts")
+                    h.eq_ignore_ascii_case("created_time")
+                        || h.eq_ignore_ascii_case("c_time")
+                        || h.eq_ignore_ascii_case("ts")
                         || h.eq_ignore_ascii_case("time")
                         || h.eq_ignore_ascii_case("timestamp")
                 })
@@ -1081,14 +1007,18 @@ pub async fn get_hist_trades(
                     None => continue,
                 };
 
-                let mut qty = match record.get(size_col).and_then(|q| q.parse::<f32>().ok()) {
+                let raw_qty = match record.get(size_col).and_then(|q| q.parse::<f32>().ok()) {
                     Some(q) => q,
                     None => continue,
                 };
 
-                if size_in_quote_ccy {
-                    qty = (qty * price_f32).round();
-                }
+                let qty = calc_qty(
+                    raw_qty,
+                    price_f32,
+                    size_in_quote_ccy,
+                    contract_size,
+                    market_type,
+                );
 
                 let price = Price::from_f32(price_f32).round_to_min_tick(min_ticksize);
 
@@ -1134,60 +1064,16 @@ async fn fetch_trades_from_intraday_cache_or_rest(
         let t_last = cached.last().unwrap().time;
 
         if from_time < t_first {
-            let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
-            if !new_trades.is_empty() {
-                let next_from = new_trades
-                    .last()
-                    .map(|t| t.time.saturating_add(1))
-                    .unwrap_or(t_first);
-                let _ = save_intraday_trades_to_cache(
-                    data_path,
-                    &ticker_info,
-                    target_date,
-                    &new_trades,
-                );
-                return Ok((new_trades, next_from));
-            } else {
-                return Ok(slice_cached_trades(&cached, 0, 60_000, 1000));
-            }
+            return Ok((Vec::new(), t_first));
         }
 
         if from_time <= t_last {
             let start_idx = cached.partition_point(|t| t.time < from_time);
-            let in_gap = start_idx < cached.len()
-                && cached[start_idx].time.saturating_sub(from_time) > 60_000;
-
-            if in_gap {
-                let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
-                if !new_trades.is_empty() {
-                    let next_from = new_trades
-                        .last()
-                        .map(|t| t.time.saturating_add(1))
-                        .unwrap_or_else(|| cached[start_idx].time);
-                    let _ = save_intraday_trades_to_cache(
-                        data_path,
-                        &ticker_info,
-                        target_date,
-                        &new_trades,
-                    );
-                    return Ok((new_trades, next_from));
-                }
-            }
-
             return Ok(slice_cached_trades(&cached, start_idx, 60_000, 1000));
         }
     }
 
-    let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
-    let next_from = new_trades
-        .last()
-        .map(|t| t.time.saturating_add(1))
-        .unwrap_or(day_end_fallback);
-
-    if !new_trades.is_empty() {
-        let _ = save_intraday_trades_to_cache(data_path, &ticker_info, target_date, &new_trades);
-    }
-    Ok((new_trades, next_from))
+    Ok((Vec::new(), day_end_fallback))
 }
 
 pub async fn fetch_trades(
@@ -1198,13 +1084,21 @@ pub async fn fetch_trades(
     let today_date = chrono::Utc::now().date_naive();
     let today_midnight = today_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
 
+    let next_day_start = today_date
+        .succ_opt()
+        .unwrap_or(today_date)
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp_millis() as u64;
+
     if from_time as i64 >= today_midnight.timestamp_millis() {
         return fetch_trades_from_intraday_cache_or_rest(
             ticker_info,
             from_time,
             today_date,
             &data_path,
-            from_time.saturating_add(60_000),
+            next_day_start,
         )
         .await;
     }
@@ -1223,7 +1117,7 @@ pub async fn fetch_trades(
 
     let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
     let max_days: i64 = if symbol.to_uppercase().starts_with("BTC") {
-        90
+        130
     } else {
         30
     };
@@ -1255,7 +1149,7 @@ pub async fn fetch_trades(
         Ok(trades) => Ok((trades, next_day_start)),
         Err(e) => {
             log::warn!(
-                "OKX historical trades fetch failed for {}: {}, falling back to intraday fetch if recent",
+                "OKX historical trades fetch failed for {}: {}, falling back to intraday cache if recent",
                 from_date,
                 e
             );

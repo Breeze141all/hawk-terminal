@@ -27,7 +27,9 @@ use data::{
 };
 use exchange::{
     Kline, OpenInterest, StreamPairKind, TickMultiplier, TickerInfo, Timeframe,
-    adapter::{MarketKind, PersistStreamKind, ResolvedStream, StreamKind, StreamTicksize},
+    adapter::{
+        Exchange, MarketKind, PersistStreamKind, ResolvedStream, StreamKind, StreamTicksize,
+    },
     fetcher::FetchRequests,
 };
 use iced::{
@@ -125,6 +127,10 @@ pub enum Event {
     TpoKindChanged(data::chart::KlineChartKind),
     /// Footprint bottom volume toggle
     FootprintShowBottomVolumeToggled(bool),
+    /// Footprint aggregate toggle
+    FootprintAggregateToggled(bool),
+    /// Footprint aggregate exchange toggle
+    FootprintAggregateExchangeToggled(Exchange, bool),
     /// Select drawing tool
     SelectDrawingTool(data::chart::drawing::DrawingTool),
     /// Drawing toolbar dragged to new position
@@ -170,11 +176,97 @@ pub struct State {
     pub drawing_toolbar_pos: Option<iced::Point>,
     pub selected_drawing_toolbar_pos: Option<iced::Point>,
     pub selected_drawing_show_settings: bool,
+    pub footprint_notice_dismissed: Option<Exchange>,
 }
 
 impl State {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn sync_footprint_exchange_notice(&mut self) {
+        let is_footprint = match &self.content {
+            Content::Kline { kind, .. } => {
+                matches!(kind, data::chart::KlineChartKind::Footprint { .. })
+            }
+            _ => false,
+        };
+
+        if !is_footprint {
+            self.notifications
+                .retain(|t| !t.title.contains("Footprint"));
+            return;
+        }
+
+        let exchange = match self.stream_pair() {
+            Some(ti) => ti.exchange(),
+            None => return,
+        };
+
+        if let Some(dismissed_ex) = self.footprint_notice_dismissed
+            && dismissed_ex != exchange
+        {
+            self.footprint_notice_dismissed = None;
+        }
+
+        match exchange {
+            Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => {
+                self.notifications.retain(|t| {
+                    t.title == "Hyperliquid Footprint" || !t.title.contains("Footprint")
+                });
+                if self.footprint_notice_dismissed != Some(exchange)
+                    && !self
+                        .notifications
+                        .iter()
+                        .any(|t| t.title == "Hyperliquid Footprint")
+                {
+                    self.notifications.push(
+                        Toast::error("Дані з інших днів не надходитимуть через відсутність сервера (Hyperliquid не надає публічних архівів угод).")
+                            .with_title("Hyperliquid Footprint")
+                            .persistent()
+                            .closable(true),
+                    );
+                }
+            }
+            Exchange::BybitLinear | Exchange::BybitInverse | Exchange::BybitSpot => {
+                self.notifications
+                    .retain(|t| t.title == "Bybit Footprint" || !t.title.contains("Footprint"));
+                if self.footprint_notice_dismissed != Some(exchange)
+                    && !self
+                        .notifications
+                        .iter()
+                        .any(|t| t.title == "Bybit Footprint")
+                {
+                    self.notifications.push(
+                        Toast::warn("Точні дані за сьогодні завантажуються частково (Bybit обмежує історію до 1000 угод; потрібен сервер).")
+                            .with_title("Bybit Footprint")
+                            .persistent()
+                            .closable(true),
+                    );
+                }
+            }
+            Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => {
+                self.notifications
+                    .retain(|t| t.title == "OKX Footprint" || !t.title.contains("Footprint"));
+                if self.footprint_notice_dismissed != Some(exchange)
+                    && !self
+                        .notifications
+                        .iter()
+                        .any(|t| t.title == "OKX Footprint")
+                {
+                    self.notifications.push(
+                        Toast::warn("Дані за минулі дні завантажуються з архівів, але поточний день має обмеження REST API без сервера.")
+                            .with_title("OKX Footprint")
+                            .persistent()
+                            .closable(true),
+                    );
+                }
+            }
+            Exchange::BinanceLinear | Exchange::BinanceInverse | Exchange::BinanceSpot => {
+                self.notifications
+                    .retain(|t| !t.title.contains("Footprint"));
+            }
+        }
     }
 
     pub fn from_config(
@@ -216,6 +308,76 @@ impl State {
             0 => None,
             1 => Some(StreamPairKind::SingleSource(unique[0])),
             _ => Some(StreamPairKind::MultiSource(unique)),
+        }
+    }
+
+    pub fn build_footprint_streams(
+        base_ticker: TickerInfo,
+        kind: &data::chart::KlineChartKind,
+        settings: &Settings,
+        tf: Option<Timeframe>,
+    ) -> Vec<StreamKind> {
+        let mut streams = vec![];
+        if let Some(tf) = tf {
+            streams.push(StreamKind::Kline {
+                ticker_info: base_ticker,
+                timeframe: tf,
+            });
+        }
+
+        if let data::chart::KlineChartKind::Footprint {
+            aggregate: true,
+            aggregate_exchanges,
+            ..
+        } = kind
+        {
+            let base_asset = extract_base_symbol(&base_ticker.ticker);
+            for &ex in aggregate_exchanges {
+                let ex_ti = if ex == base_ticker.exchange() {
+                    base_ticker
+                } else {
+                    ticker_info_for_exchange(&base_asset, ex, Some(&base_ticker))
+                };
+                let depth_aggr = if ex.is_depth_client_aggr() {
+                    StreamTicksize::Client
+                } else {
+                    StreamTicksize::ServerSide(settings.tick_multiply.unwrap_or(TickMultiplier(1)))
+                };
+                streams.push(StreamKind::DepthAndTrades {
+                    ticker_info: ex_ti,
+                    depth_aggr,
+                    push_freq: exchange::PushFrequency::ServerDefault,
+                });
+            }
+        } else {
+            let depth_aggr = if base_ticker.exchange().is_depth_client_aggr() {
+                StreamTicksize::Client
+            } else {
+                StreamTicksize::ServerSide(settings.tick_multiply.unwrap_or(TickMultiplier(1)))
+            };
+            streams.push(StreamKind::DepthAndTrades {
+                ticker_info: base_ticker,
+                depth_aggr,
+                push_freq: exchange::PushFrequency::ServerDefault,
+            });
+        }
+
+        streams
+    }
+
+    pub fn sync_footprint_streams(&mut self) {
+        if let Content::Kline { chart, kind, .. } = &self.content
+            && let Some(base_ticker) = self.stream_pair()
+        {
+            let tf = match self.settings.selected_basis {
+                Some(Basis::Time(tf)) => Some(tf),
+                None => Some(Timeframe::M5),
+                _ => None,
+            };
+            let chart_kind = chart.as_ref().map_or(kind, |c| &c.kind);
+            let streams =
+                Self::build_footprint_streams(base_ticker, chart_kind, &self.settings, tf);
+            self.streams = ResolvedStream::Ready(streams);
         }
     }
 
@@ -277,16 +439,20 @@ impl State {
                         self.id,
                     );
 
-                    let streams = by_basis_default(
-                        derived_plan.basis,
-                        Timeframe::M5,
-                        |tf| {
-                            vec![
-                                depth_stream(&derived_plan),
-                                kline_stream(derived_plan.ticker_info, tf),
-                            ]
-                        },
-                        || vec![depth_stream(&derived_plan)],
+                    let tf = match derived_plan.basis {
+                        Some(Basis::Time(t)) => Some(t),
+                        None => Some(Timeframe::M5),
+                        _ => None,
+                    };
+                    let chart_kind = match &content {
+                        Content::Kline { kind, .. } => kind,
+                        _ => unreachable!(),
+                    };
+                    let streams = Self::build_footprint_streams(
+                        derived_plan.ticker_info,
+                        chart_kind,
+                        &self.settings,
+                        tf,
                     );
 
                     (content, streams)
@@ -425,8 +591,14 @@ impl State {
             }
         };
 
+        if let Some(base_ticker) = tickers.first()
+            && self.footprint_notice_dismissed != Some(base_ticker.exchange())
+        {
+            self.footprint_notice_dismissed = None;
+        }
         self.content = content;
         self.streams = ResolvedStream::Ready(streams.clone());
+        self.sync_footprint_exchange_notice();
 
         streams
     }
@@ -1369,7 +1541,12 @@ impl State {
             }
             Event::DeleteNotification(idx) => {
                 if idx < self.notifications.len() {
-                    self.notifications.remove(idx);
+                    let removed = self.notifications.remove(idx);
+                    if removed.title.contains("Footprint")
+                        && let Some(ti) = self.stream_pair()
+                    {
+                        self.footprint_notice_dismissed = Some(ti.exchange());
+                    }
                 }
             }
             Event::ReorderIndicator(e) => {
@@ -1384,6 +1561,7 @@ impl State {
                     c.set_cluster_kind(kind);
                     *cur = c.kind.clone();
                 }
+                self.sync_footprint_exchange_notice();
             }
             Event::ClusterScalingSelected(scaling) => {
                 if let Content::Kline { chart, kind, .. } = &mut self.content
@@ -1410,6 +1588,40 @@ impl State {
                     c.set_footprint_show_bottom_volume(show);
                     *kind = c.kind.clone();
                 }
+            }
+            Event::FootprintAggregateToggled(agg) => {
+                if let Content::Kline { chart, kind, .. } = &mut self.content {
+                    if let Some(c) = chart {
+                        c.set_footprint_aggregate(agg);
+                        *kind = c.kind.clone();
+                    } else if let data::chart::KlineChartKind::Footprint { aggregate, .. } = kind {
+                        *aggregate = agg;
+                    }
+                }
+                self.sync_footprint_streams();
+                return Some(Effect::RefreshStreams);
+            }
+            Event::FootprintAggregateExchangeToggled(ex, enabled) => {
+                if let Content::Kline { chart, kind, .. } = &mut self.content {
+                    if let Some(c) = chart {
+                        c.set_footprint_aggregate_exchange(ex, enabled);
+                        *kind = c.kind.clone();
+                    } else if let data::chart::KlineChartKind::Footprint {
+                        aggregate_exchanges,
+                        ..
+                    } = kind
+                    {
+                        if enabled {
+                            if !aggregate_exchanges.contains(&ex) {
+                                aggregate_exchanges.push(ex);
+                            }
+                        } else {
+                            aggregate_exchanges.retain(|&e| e != ex);
+                        }
+                    }
+                }
+                self.sync_footprint_streams();
+                return Some(Effect::RefreshStreams);
             }
             Event::StudyConfigurator(study_msg) => match study_msg {
                 modal::pane::settings::study::StudyMessage::Footprint(m) => {
@@ -1522,34 +1734,22 @@ impl State {
                                         if let Some(base_ticker) = base_ticker {
                                             match new_basis {
                                                 Basis::Time(tf) => {
-                                                    let kline_stream = StreamKind::Kline {
-                                                        ticker_info: base_ticker,
-                                                        timeframe: tf,
-                                                    };
-                                                    let mut streams = vec![kline_stream];
-
-                                                    if matches!(
+                                                    let streams = if matches!(
                                                         c.kind,
                                                         data::chart::KlineChartKind::Footprint { .. }
                                                     ) {
-                                                        let depth_aggr = if base_ticker
-                                                            .exchange()
-                                                            .is_depth_client_aggr()
-                                                        {
-                                                            StreamTicksize::Client
-                                                        } else {
-                                                            StreamTicksize::ServerSide(
-                                                                self.settings
-                                                                    .tick_multiply
-                                                                    .unwrap_or(TickMultiplier(1)),
-                                                            )
-                                                        };
-                                                        streams.push(StreamKind::DepthAndTrades {
+                                                        Self::build_footprint_streams(
+                                                            base_ticker,
+                                                            &c.kind,
+                                                            &self.settings,
+                                                            Some(tf),
+                                                        )
+                                                    } else {
+                                                        vec![StreamKind::Kline {
                                                             ticker_info: base_ticker,
-                                                            depth_aggr,
-                                                            push_freq: exchange::PushFrequency::ServerDefault,
-                                                        });
-                                                    }
+                                                            timeframe: tf,
+                                                        }]
+                                                    };
 
                                                     self.streams = ResolvedStream::Ready(streams);
                                                     let action = c.set_basis(new_basis);
@@ -1564,26 +1764,37 @@ impl State {
                                                     }
                                                 }
                                                 Basis::Tick(_) => {
-                                                    let depth_aggr = if base_ticker
-                                                        .exchange()
-                                                        .is_depth_client_aggr()
-                                                    {
-                                                        StreamTicksize::Client
-                                                    } else {
-                                                        StreamTicksize::ServerSide(
-                                                            self.settings
-                                                                .tick_multiply
-                                                                .unwrap_or(TickMultiplier(1)),
+                                                    let streams = if matches!(
+                                                        c.kind,
+                                                        data::chart::KlineChartKind::Footprint { .. }
+                                                    ) {
+                                                        Self::build_footprint_streams(
+                                                            base_ticker,
+                                                            &c.kind,
+                                                            &self.settings,
+                                                            None,
                                                         )
-                                                    };
-
-                                                    self.streams = ResolvedStream::Ready(vec![
-                                                        StreamKind::DepthAndTrades {
+                                                    } else {
+                                                        let depth_aggr = if base_ticker
+                                                            .exchange()
+                                                            .is_depth_client_aggr()
+                                                        {
+                                                            StreamTicksize::Client
+                                                        } else {
+                                                            StreamTicksize::ServerSide(
+                                                                self.settings
+                                                                    .tick_multiply
+                                                                    .unwrap_or(TickMultiplier(1)),
+                                                            )
+                                                        };
+                                                        vec![StreamKind::DepthAndTrades {
                                                             ticker_info: base_ticker,
                                                             depth_aggr,
                                                             push_freq: exchange::PushFrequency::ServerDefault,
-                                                        },
-                                                    ]);
+                                                        }]
+                                                    };
+
+                                                    self.streams = ResolvedStream::Ready(streams);
                                                     c.set_basis(new_basis);
                                                     effect = Some(Effect::RefreshStreams);
                                                 }
@@ -2554,7 +2765,30 @@ impl State {
     }
 
     pub fn matches_trades(&self, stream: &StreamKind) -> bool {
-        self.streams.matches_trades(stream)
+        if self.streams.matches_trades(stream) {
+            return true;
+        }
+
+        if let Content::Kline { kind, chart, .. } = &self.content {
+            let active_kind = chart.as_ref().map_or(kind, |c| &c.kind);
+            if let data::chart::KlineChartKind::Footprint {
+                aggregate: true,
+                aggregate_exchanges,
+                ..
+            } = active_kind
+            {
+                let stream_ti = stream.ticker_info();
+                if aggregate_exchanges.contains(&stream_ti.exchange())
+                    && let Some(base_ti) = self.stream_pair()
+                {
+                    let base_sym = extract_base_symbol(&base_ti.ticker);
+                    let stream_sym = extract_base_symbol(&stream_ti.ticker);
+                    return base_sym == stream_sym;
+                }
+            }
+        }
+
+        false
     }
 
     fn show_modal_with_focus(&mut self, requested_modal: Modal) -> Option<Effect> {
@@ -2686,6 +2920,7 @@ impl Default for State {
             drawing_toolbar_pos: None,
             selected_drawing_toolbar_pos: None,
             selected_drawing_show_settings: false,
+            footprint_notice_dismissed: None,
         }
     }
 }
@@ -2809,6 +3044,8 @@ impl Content {
                         scaling: data::chart::kline::ClusterScaling::default(),
                         studies: vec![],
                         show_bottom_volume: false,
+                        aggregate: false,
+                        aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
                     }),
             ),
             ContentKind::CandlestickChart => (Timeframe::M15, data::chart::KlineChartKind::Candles),
@@ -2961,6 +3198,8 @@ impl Content {
                     scaling: data::chart::kline::ClusterScaling::default(),
                     studies: vec![],
                     show_bottom_volume: false,
+                    aggregate: false,
+                    aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
                 },
                 layout: ViewConfig {
                     splits: vec![],
@@ -3268,5 +3507,352 @@ fn by_basis_default<T>(
     match basis.unwrap_or(Basis::Time(default_tf)) {
         Basis::Time(tf) => on_time(tf),
         Basis::Tick(_) => on_tick(),
+    }
+}
+
+pub fn extract_base_symbol(ticker: &exchange::Ticker) -> String {
+    let raw = ticker.to_full_symbol_and_type().0.to_uppercase();
+    let sym = ticker.display_symbol_and_type().0.to_uppercase();
+
+    if ticker.exchange == Exchange::HyperliquidLinear {
+        return raw;
+    }
+    if let Some(prefix) = raw.strip_suffix("-USDT-SWAP") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = raw.strip_suffix("-USDC-SWAP") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = raw.strip_suffix("-USDT") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = raw.strip_suffix("-USDC") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = raw.strip_suffix("USDT") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = raw.strip_suffix("USDC") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = sym.strip_suffix("USDT") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = sym.strip_suffix("USDC") {
+        return prefix.to_string();
+    }
+    raw
+}
+
+pub fn ticker_info_for_exchange(
+    base_asset: &str,
+    ex: Exchange,
+    reference: Option<&TickerInfo>,
+) -> TickerInfo {
+    match ex {
+        Exchange::BinanceLinear => {
+            let sym = format!("{base_asset}USDT");
+            let ticker = exchange::Ticker::new(&sym, ex);
+            let min_tick = reference.map_or(0.1, |r| r.min_ticksize.into());
+            TickerInfo::new(ticker, min_tick, 0.001, None)
+        }
+        Exchange::BybitLinear => {
+            let sym = format!("{base_asset}USDT");
+            let ticker = exchange::Ticker::new(&sym, ex);
+            let min_tick = reference.map_or(0.1, |r| r.min_ticksize.into());
+            TickerInfo::new(ticker, min_tick, 0.001, None)
+        }
+        Exchange::OkexLinear => {
+            let sym = format!("{base_asset}-USDT-SWAP");
+            let ticker = exchange::Ticker::new(&sym, ex);
+            let min_tick = reference.map_or(0.1, |r| r.min_ticksize.into());
+            let contract_size = TickerInfo::default_contract_size(&ticker);
+            TickerInfo::new(ticker, min_tick, 1.0, contract_size)
+        }
+        Exchange::HyperliquidLinear => {
+            let ticker = exchange::Ticker::new(base_asset, ex);
+            let min_tick = reference.map_or(1.0, |r| r.min_ticksize.into());
+            TickerInfo::new(ticker, min_tick, 0.0001, None)
+        }
+        _ => {
+            let ticker = exchange::Ticker::new(base_asset, ex);
+            TickerInfo::new(ticker, 0.1, 0.001, None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::Ticker;
+
+    fn mock_ticker_info(symbol: &str, exchange: Exchange) -> TickerInfo {
+        TickerInfo::new(Ticker::new(symbol, exchange), 0.1, 0.001, None)
+    }
+
+    #[test]
+    fn test_sync_footprint_exchange_notice_hyperliquid() {
+        let mut state = State::default();
+        let ti = mock_ticker_info("BTC", Exchange::HyperliquidLinear);
+        state.streams = ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+            ticker_info: ti,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }]);
+        state.content = Content::Kline {
+            chart: None,
+            indicators: vec![],
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            },
+            layout: Default::default(),
+        };
+
+        state.sync_footprint_exchange_notice();
+        assert_eq!(state.notifications.len(), 1);
+        let notice = &state.notifications[0];
+        assert_eq!(notice.title, "Hyperliquid Footprint");
+        assert!(notice.persistent);
+        assert!(notice.closable);
+
+        // Deleting notification sets footprint_notice_dismissed
+        state.update(Event::DeleteNotification(0));
+        assert!(state.notifications.is_empty());
+        assert_eq!(
+            state.footprint_notice_dismissed,
+            Some(Exchange::HyperliquidLinear)
+        );
+
+        // Syncing again does not re-add dismissed notification
+        state.sync_footprint_exchange_notice();
+        assert!(state.notifications.is_empty());
+    }
+
+    #[test]
+    fn test_sync_footprint_exchange_notice_bybit() {
+        let mut state = State::default();
+        let ti = mock_ticker_info("BTCUSDT", Exchange::BybitLinear);
+        state.streams = ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+            ticker_info: ti,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }]);
+        state.content = Content::Kline {
+            chart: None,
+            indicators: vec![],
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            },
+            layout: Default::default(),
+        };
+
+        state.sync_footprint_exchange_notice();
+        assert_eq!(state.notifications.len(), 1);
+        let notice = &state.notifications[0];
+        assert_eq!(notice.title, "Bybit Footprint");
+        assert!(notice.persistent);
+        assert!(notice.closable);
+    }
+
+    #[test]
+    fn test_sync_footprint_exchange_notice_okx() {
+        let mut state = State::default();
+        let ti = mock_ticker_info("BTC-USDT", Exchange::OkexLinear);
+        state.streams = ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+            ticker_info: ti,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }]);
+        state.content = Content::Kline {
+            chart: None,
+            indicators: vec![],
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            },
+            layout: Default::default(),
+        };
+
+        state.sync_footprint_exchange_notice();
+        assert_eq!(state.notifications.len(), 1);
+        let notice = &state.notifications[0];
+        assert_eq!(notice.title, "OKX Footprint");
+        assert!(notice.persistent);
+        assert!(notice.closable);
+    }
+
+    #[test]
+    fn test_sync_footprint_exchange_notice_binance_none() {
+        let mut state = State::default();
+        let ti = mock_ticker_info("btcusdt", Exchange::BinanceLinear);
+        state.streams = ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+            ticker_info: ti,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }]);
+        state.content = Content::Kline {
+            chart: None,
+            indicators: vec![],
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            },
+            layout: Default::default(),
+        };
+
+        state.sync_footprint_exchange_notice();
+        assert!(state.notifications.is_empty());
+    }
+
+    #[test]
+    fn test_extract_base_symbol() {
+        assert_eq!(
+            extract_base_symbol(&exchange::Ticker::new("btcusdt", Exchange::BinanceLinear)),
+            "BTC"
+        );
+        assert_eq!(
+            extract_base_symbol(&exchange::Ticker::new("BTCUSDT", Exchange::BybitLinear)),
+            "BTC"
+        );
+        assert_eq!(
+            extract_base_symbol(&exchange::Ticker::new(
+                "BTC-USDT-SWAP",
+                Exchange::OkexLinear
+            )),
+            "BTC"
+        );
+        assert_eq!(
+            extract_base_symbol(&exchange::Ticker::new("BTC-USDT", Exchange::OkexLinear)),
+            "BTC"
+        );
+        assert_eq!(
+            extract_base_symbol(&exchange::Ticker::new("BTC", Exchange::HyperliquidLinear)),
+            "BTC"
+        );
+    }
+
+    #[test]
+    fn test_build_footprint_streams_aggregate() {
+        let base_ti = mock_ticker_info("btcusdt", Exchange::BinanceLinear);
+        let settings = Settings::default();
+        let kind_single = data::chart::KlineChartKind::Footprint {
+            clusters: Default::default(),
+            scaling: Default::default(),
+            studies: vec![],
+            show_bottom_volume: false,
+            aggregate: false,
+            aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+        };
+
+        let streams_single =
+            State::build_footprint_streams(base_ti, &kind_single, &settings, Some(Timeframe::M5));
+        // 1 Kline stream + 1 DepthAndTrades
+        assert_eq!(streams_single.len(), 2);
+
+        let kind_agg = data::chart::KlineChartKind::Footprint {
+            clusters: Default::default(),
+            scaling: Default::default(),
+            studies: vec![],
+            show_bottom_volume: false,
+            aggregate: true,
+            aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+        };
+
+        let streams_agg =
+            State::build_footprint_streams(base_ti, &kind_agg, &settings, Some(Timeframe::M5));
+        // 1 Kline stream + 4 DepthAndTrades (Binance, Bybit, OKX, Hyperliquid)
+        assert_eq!(streams_agg.len(), 5);
+        let depth_exchanges: Vec<_> = streams_agg[1..]
+            .iter()
+            .map(|s| s.ticker_info().exchange())
+            .collect();
+        assert_eq!(
+            depth_exchanges,
+            vec![
+                Exchange::BinanceLinear,
+                Exchange::BybitLinear,
+                Exchange::OkexLinear,
+                Exchange::HyperliquidLinear,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_matches_trades_aggregate() {
+        let mut state = State::default();
+        let base_ti = mock_ticker_info("btcusdt", Exchange::BinanceLinear);
+        state.streams = ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+            ticker_info: base_ti,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        }]);
+        state.content = Content::Kline {
+            chart: None,
+            indicators: vec![],
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: true,
+                aggregate_exchanges: vec![
+                    Exchange::BinanceLinear,
+                    Exchange::BybitLinear,
+                    Exchange::OkexLinear,
+                    Exchange::HyperliquidLinear,
+                ],
+            },
+            layout: Default::default(),
+        };
+
+        // Incoming trades stream from Bybit
+        let bybit_stream = StreamKind::DepthAndTrades {
+            ticker_info: mock_ticker_info("BTCUSDT", Exchange::BybitLinear),
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        };
+        assert!(state.matches_trades(&bybit_stream));
+
+        // Incoming trades stream from OKX
+        let okx_stream = StreamKind::DepthAndTrades {
+            ticker_info: mock_ticker_info("BTC-USDT-SWAP", Exchange::OkexLinear),
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        };
+        assert!(state.matches_trades(&okx_stream));
+
+        // Incoming trades stream from Hyperliquid
+        let hl_stream = StreamKind::DepthAndTrades {
+            ticker_info: mock_ticker_info("BTC", Exchange::HyperliquidLinear),
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        };
+        assert!(state.matches_trades(&hl_stream));
+
+        // Incoming trades stream for ETH should NOT match
+        let eth_stream = StreamKind::DepthAndTrades {
+            ticker_info: mock_ticker_info("ETHUSDT", Exchange::BybitLinear),
+            depth_aggr: StreamTicksize::Client,
+            push_freq: exchange::PushFrequency::ServerDefault,
+        };
+        assert!(!state.matches_trades(&eth_stream));
     }
 }

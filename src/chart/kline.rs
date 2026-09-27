@@ -23,7 +23,7 @@ use data::chart::{
 use data::util::{abbr_large_numbers, count_decimals};
 use exchange::util::{Price, PriceStep};
 use exchange::{
-    Kline, OpenInterest as OIData, TickerInfo, Trade,
+    Exchange, Kline, OpenInterest as OIData, TickerInfo, Trade,
     fetcher::{FetchRange, RequestHandler},
 };
 
@@ -723,6 +723,7 @@ impl KlineChart {
 
         // priority 2, trades fetch (Footprint only)
         if matches!(self.kind, KlineChartKind::Footprint { .. }) {
+            let is_aggregate = self.is_aggregate_footprint();
             let mut trade_fetch_range = None;
             let mut needs_invalidation = false;
 
@@ -760,10 +761,16 @@ impl KlineChart {
                     let mut loaded_any = false;
                     let today = chrono::Utc::now().date_naive();
 
+                    let cache_symbol = if is_aggregate {
+                        format!("{symbol}-AGG")
+                    } else {
+                        symbol.clone()
+                    };
+
                     while cur_d <= end_d && cur_d <= today {
                         let cache_path = data::chart::kline::footprint_cache_path(
                             &base_data_path,
-                            &symbol,
+                            &cache_symbol,
                             interval,
                             step,
                             cur_d,
@@ -1788,6 +1795,91 @@ impl KlineChart {
         self.invalidate(None);
     }
 
+    pub fn is_aggregate_footprint(&self) -> bool {
+        match &self.kind {
+            KlineChartKind::Footprint { aggregate, .. } => *aggregate,
+            _ => false,
+        }
+    }
+
+    pub fn reload_footprint_after_aggregate_change(&mut self) {
+        self.raw_trades.clear();
+        self.ensure_today_trades_loaded();
+        self.tpo_cache.borrow_mut().clear();
+
+        match self.data_source {
+            PlotData::TimeBased(ref mut timeseries) => {
+                for dp in timeseries.datapoints.values_mut() {
+                    dp.clear_trades();
+                    dp.trades_fetched = false;
+                }
+                if !self.raw_trades.is_empty() {
+                    timeseries.insert_trades_existing_buckets(&self.raw_trades);
+                }
+            }
+            PlotData::TickBased(ref mut tick_aggr) => {
+                let interval = tick_aggr.interval;
+                let step = self.chart.tick_size;
+                *tick_aggr = TickAggr::new(interval, step, &self.raw_trades);
+            }
+        }
+
+        self.reset_request_handler();
+        self.invalidate(Some(std::time::Instant::now()));
+    }
+
+    pub fn set_footprint_aggregate(&mut self, aggregate: bool) {
+        let changed = if let KlineChartKind::Footprint {
+            aggregate: ref mut agg,
+            ..
+        } = self.kind
+        {
+            if *agg != aggregate {
+                *agg = aggregate;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if changed {
+            self.reload_footprint_after_aggregate_change();
+        } else {
+            self.invalidate(None);
+        }
+    }
+
+    pub fn set_footprint_aggregate_exchange(&mut self, ex: Exchange, enabled: bool) {
+        let changed = if let KlineChartKind::Footprint {
+            ref mut aggregate_exchanges,
+            ..
+        } = self.kind
+        {
+            if enabled {
+                if !aggregate_exchanges.contains(&ex) {
+                    aggregate_exchanges.push(ex);
+                    true
+                } else {
+                    false
+                }
+            } else {
+                let prev_len = aggregate_exchanges.len();
+                aggregate_exchanges.retain(|&e| e != ex);
+                prev_len != aggregate_exchanges.len()
+            }
+        } else {
+            false
+        };
+
+        if changed {
+            self.reload_footprint_after_aggregate_change();
+        } else {
+            self.invalidate(None);
+        }
+    }
+
     pub fn set_tpo_kind(&mut self, new_kind: KlineChartKind) {
         if matches!(new_kind, KlineChartKind::Tpo { .. }) {
             self.kind = new_kind;
@@ -2076,9 +2168,14 @@ impl KlineChart {
                     });
 
                 if is_day_complete {
+                    let cache_symbol = if self.is_aggregate_footprint() {
+                        format!("{symbol}-AGG")
+                    } else {
+                        symbol.clone()
+                    };
                     let cache_path = data::chart::kline::footprint_cache_path(
                         &base_data_path,
-                        &symbol,
+                        &cache_symbol,
                         interval,
                         step,
                         date,
@@ -3628,6 +3725,7 @@ impl canvas::Program<Message> for KlineChart {
                     scaling,
                     studies,
                     show_bottom_volume,
+                    ..
                 } => {
                     let (highest, lowest) = chart.price_range(&region);
 
@@ -8339,6 +8437,8 @@ mod tests {
                 scaling: data::chart::kline::ClusterScaling::VisibleRange,
                 studies: Vec::new(),
                 show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
             },
             None,
         );
@@ -8409,6 +8509,8 @@ mod tests {
                 scaling: data::chart::kline::ClusterScaling::VisibleRange,
                 studies: Vec::new(),
                 show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
             },
             None,
         );
@@ -8479,6 +8581,8 @@ mod tests {
                 scaling: data::chart::kline::ClusterScaling::VisibleRange,
                 studies: Vec::new(),
                 show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
             },
             None,
         );
@@ -8531,6 +8635,8 @@ mod tests {
                 scaling: data::chart::kline::ClusterScaling::VisibleRange,
                 studies: Vec::new(),
                 show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
             },
             None,
         );
@@ -10520,5 +10626,68 @@ mod tests {
                 "Inner dark center must not be swallowed by stroke"
             );
         }
+    }
+
+    #[test]
+    fn test_set_footprint_aggregate_auto_reload() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let view_cfg = ViewConfig::default();
+        let mut chart = KlineChart::new(
+            view_cfg,
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::VolumeProfile,
+                scaling: data::chart::kline::ClusterScaling::VisibleRange,
+                studies: Vec::new(),
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            },
+            None,
+        );
+
+        let trade = Trade {
+            time: 300_100,
+            price: Price::from_f32(100.0),
+            qty: 5.0,
+            is_sell: false,
+        };
+        chart.insert_trades_buffer(&[trade]);
+
+        let has_trade = |c: &KlineChart| -> bool {
+            if let PlotData::TimeBased(ref ts) = c.data_source {
+                ts.datapoints.values().any(|dp| !dp.footprint.is_empty())
+            } else {
+                false
+            }
+        };
+
+        assert!(has_trade(&chart));
+
+        // Toggling aggregate resets the in-memory footprint bins automatically
+        chart.set_footprint_aggregate(true);
+        assert!(!has_trade(&chart));
+        assert!(chart.is_aggregate_footprint());
+
+        // Insert new aggregated trades
+        let trade2 = Trade {
+            time: 300_200,
+            price: Price::from_f32(100.0),
+            qty: 12.0,
+            is_sell: false,
+        };
+        chart.insert_trades_buffer(&[trade2]);
+        assert!(has_trade(&chart));
+
+        // Toggling back to false resets again automatically
+        chart.set_footprint_aggregate(false);
+        assert!(!has_trade(&chart));
+        assert!(!chart.is_aggregate_footprint());
     }
 }

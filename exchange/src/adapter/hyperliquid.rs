@@ -1429,7 +1429,7 @@ pub async fn fetch_trades(
     // For Hyperliquid, try binary cache, fallback to recentTrades within 48h
     match get_hist_trades(ticker_info, from_date, data_path.clone()).await {
         Ok(trades) => Ok((trades, next_day_start)),
-        Err(e) => {
+        Err(_e) => {
             if is_recent {
                 fetch_trades_from_intraday_cache_or_rest(
                     ticker_info,
@@ -1440,7 +1440,12 @@ pub async fn fetch_trades(
                 )
                 .await
             } else {
-                Err(e)
+                log::debug!(
+                    "Hyperliquid historical archive for {} on {} is not available publicly; skipping",
+                    ticker_info.ticker,
+                    from_date
+                );
+                Ok((Vec::new(), next_day_start))
             }
         }
     }

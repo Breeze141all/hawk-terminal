@@ -1,5 +1,5 @@
 use exchange::{
-    Kline, Timeframe, Trade,
+    Exchange, Kline, Timeframe, Trade,
     util::{Price, PriceStep},
 };
 use rustc_hash::FxHashMap;
@@ -387,6 +387,15 @@ impl ViewMode {
     }
 }
 
+pub fn default_aggregate_exchanges() -> Vec<Exchange> {
+    vec![
+        Exchange::BinanceLinear,
+        Exchange::BybitLinear,
+        Exchange::OkexLinear,
+        Exchange::HyperliquidLinear,
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 pub enum KlineChartKind {
     #[default]
@@ -398,6 +407,10 @@ pub enum KlineChartKind {
         studies: Vec<FootprintStudy>,
         #[serde(default)]
         show_bottom_volume: bool,
+        #[serde(default)]
+        aggregate: bool,
+        #[serde(default = "default_aggregate_exchanges")]
+        aggregate_exchanges: Vec<Exchange>,
     },
     Tpo {
         #[serde(default = "default_true")]
@@ -1396,7 +1409,7 @@ pub fn footprint_cache_path(
     let symbol_upper = symbol.to_uppercase();
     let timeframe_str = timeframe.to_string();
     let step_units = step.units;
-    let file_name = format!("{symbol_upper}-fp-{}.bin", date.format("%Y-%m-%d"));
+    let file_name = format!("{symbol_upper}-fp-{}.fst", date.format("%Y-%m-%d"));
     base_data_path
         .join("footprint")
         .join(&symbol_upper)
@@ -1406,10 +1419,17 @@ pub fn footprint_cache_path(
 }
 
 pub fn load_daily_footprint(path: &Path) -> Option<Vec<(u64, KlineDataPoint)>> {
-    if !path.exists() {
-        return None;
-    }
-    match std::fs::read(path) {
+    let target_path = if path.exists() {
+        path.to_path_buf()
+    } else {
+        let bin_path = path.with_extension("bin");
+        if bin_path.exists() {
+            bin_path
+        } else {
+            return None;
+        }
+    };
+    match std::fs::read(&target_path) {
         Ok(bytes) => match decode_footprint_datapoints(&bytes) {
             Ok(dps) => {
                 let has_empty_volume_candles = dps.iter().any(|(_, dp)| {
@@ -1418,21 +1438,25 @@ pub fn load_daily_footprint(path: &Path) -> Option<Vec<(u64, KlineDataPoint)>> {
                 if has_empty_volume_candles {
                     log::warn!(
                         "Footprint cache {:?} has missing candle clusters, removing incomplete cache",
-                        path
+                        target_path
                     );
-                    let _ = std::fs::remove_file(path);
+                    let _ = std::fs::remove_file(&target_path);
                     return None;
                 }
                 Some(dps)
             }
             Err(e) => {
-                log::warn!("Corrupted footprint cache {:?}: {}, removing", path, e);
-                let _ = std::fs::remove_file(path);
+                log::warn!(
+                    "Corrupted footprint cache {:?}: {}, removing",
+                    target_path,
+                    e
+                );
+                let _ = std::fs::remove_file(&target_path);
                 None
             }
         },
         Err(e) => {
-            log::warn!("Failed to read footprint cache {:?}: {}", path, e);
+            log::warn!("Failed to read footprint cache {:?}: {}", target_path, e);
             None
         }
     }
@@ -1565,6 +1589,8 @@ mod tests {
                 color: HighlightColor::Amber,
             }],
             show_bottom_volume: false,
+            aggregate: false,
+            aggregate_exchanges: default_aggregate_exchanges(),
         };
 
         assert_eq!(footprint.min_cell_width(), 2.0);

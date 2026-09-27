@@ -20,7 +20,8 @@ use data::chart::{
 use data::layout::pane::VisualConfig;
 use data::panel::ladder;
 use data::panel::timeandsales::{StackedBar, StackedBarRatio};
-use iced::widget::{checkbox, rule, space};
+use exchange::Exchange;
+use iced::widget::{checkbox, rule, space, toggler};
 use iced::{
     Alignment, Element, Length,
     widget::{
@@ -1343,6 +1344,8 @@ pub fn kline_cfg_view<'a>(
             scaling,
             studies,
             show_bottom_volume,
+            aggregate,
+            aggregate_exchanges,
         } => {
             let cluster_picklist =
                 pick_list(ClusterKind::ALL, Some(clusters), move |new_cluster_kind| {
@@ -1380,6 +1383,35 @@ pub fn kline_cfg_view<'a>(
                 }
             };
 
+            let is_agg = *aggregate;
+            let agg_toggler =
+                toggler(is_agg)
+                    .label("Aggregate All Exchanges")
+                    .on_toggle(move |val| {
+                        Message::PaneEvent(pane, Event::FootprintAggregateToggled(val))
+                    });
+
+            let mut agg_col = column![agg_toggler].spacing(8);
+
+            if is_agg {
+                let mut ex_col = column![].spacing(6);
+                for (ex, label) in [
+                    (Exchange::BinanceLinear, "Binance Linear"),
+                    (Exchange::BybitLinear, "Bybit Linear"),
+                    (Exchange::OkexLinear, "OKX Linear"),
+                    (Exchange::HyperliquidLinear, "Hyperliquid Linear"),
+                ] {
+                    let checked = aggregate_exchanges.contains(&ex);
+                    let cb = checkbox(checked).label(label).on_toggle(move |val| {
+                        Message::PaneEvent(pane, Event::FootprintAggregateExchangeToggled(ex, val))
+                    });
+                    ex_col = ex_col.push(cb);
+                }
+                agg_col = agg_col.push(container(ex_col).padding(iced::padding::left(16)));
+            }
+
+            let aggregation_section = column![text("Aggregation").size(14), agg_col,].spacing(8);
+
             let study_cfg = study_config.view(studies, basis).map(move |msg| {
                 Message::PaneEvent(
                     pane,
@@ -1408,6 +1440,7 @@ pub fn kline_cfg_view<'a>(
             let mut col = split_column![
                 column![text("Cluster type").size(14), cluster_picklist].spacing(8),
                 column![text("Cluster scaling").size(14), scaling].spacing(8),
+                aggregation_section,
                 column![text("Studies").size(14), study_cfg].spacing(8),
                 column![
                     text("Panels & Overlays").size(14),

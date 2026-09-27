@@ -1066,11 +1066,24 @@ pub async fn get_hist_trades(
         MarketKind::LinearPerps | MarketKind::InversePerps => "trading",
     };
     let date_str = date.format("%Y-%m-%d");
-    let file_name = format!("{symbol_upper}_{date_str}.csv.gz");
+    let file_name = match market_type {
+        MarketKind::Spot => format!("{symbol_upper}_{date_str}.csv.gz"),
+        MarketKind::LinearPerps | MarketKind::InversePerps => {
+            format!("{symbol_upper}{date_str}.csv.gz")
+        }
+    };
     let url = format!("https://public.bybit.com/{category}/{symbol_upper}/{file_name}");
 
     log::info!("Downloading Bybit historical trades from {url}");
-    let resp = reqwest::get(&url).await.map_err(AdapterError::FetchError)?;
+    let resp = limiter::HTTP_CLIENT
+        .get(&url)
+        .send()
+        .await
+        .map_err(AdapterError::FetchError)?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        log::warn!("Bybit historical trades not found for {date} at {url}");
+        return Ok(Vec::new());
+    }
     if !resp.status().is_success() {
         return Err(AdapterError::InvalidRequest(format!(
             "Failed to fetch Bybit trades from {url}: status {}",
