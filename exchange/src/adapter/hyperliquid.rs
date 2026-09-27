@@ -31,8 +31,8 @@ use std::{
 use tokio::sync::Mutex;
 
 use crate::trades::cache::{
-    USE_BINARY_CACHE, find_gap_index, load_intraday_trades_from_cache, load_raw_trades_from_cache,
-    save_intraday_trades_to_cache, save_raw_trades_to_cache,
+    USE_BINARY_CACHE, load_intraday_trades_from_cache, load_raw_trades_from_cache,
+    save_intraday_trades_to_cache, save_raw_trades_to_cache, slice_cached_trades,
 };
 
 const API_DOMAIN: &str = "https://api.hyperliquid.xyz";
@@ -1334,10 +1334,7 @@ async fn fetch_trades_from_intraday_cache_or_rest(
                 );
                 return Ok((new_trades, next_from));
             } else {
-                let end_idx = find_gap_index(&cached, 0, 60_000).unwrap_or(cached.len() - 1);
-                let trades = cached[0..=end_idx].to_vec();
-                let next_from = cached[end_idx].time.saturating_add(1);
-                return Ok((trades, next_from));
+                return Ok(slice_cached_trades(&cached, 0, 60_000, 1000));
             }
         }
 
@@ -1360,24 +1357,10 @@ async fn fetch_trades_from_intraday_cache_or_rest(
                         &new_trades,
                     );
                     return Ok((new_trades, next_from));
-                } else {
-                    let end_idx =
-                        find_gap_index(&cached, start_idx, 60_000).unwrap_or(cached.len() - 1);
-                    let trades = cached[start_idx..=end_idx].to_vec();
-                    let next_from = cached[end_idx].time.saturating_add(1);
-                    return Ok((trades, next_from));
                 }
             }
 
-            if let Some(end_idx) = find_gap_index(&cached, start_idx, 60_000) {
-                let trades = cached[start_idx..=end_idx].to_vec();
-                let next_from = cached[end_idx].time.saturating_add(1);
-                return Ok((trades, next_from));
-            }
-
-            let trades = cached[start_idx..].to_vec();
-            let next_from = t_last.saturating_add(1);
-            return Ok((trades, next_from));
+            return Ok(slice_cached_trades(&cached, start_idx, 60_000, 1000));
         }
     }
 

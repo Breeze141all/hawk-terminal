@@ -205,6 +205,17 @@ impl HistoricalDepth {
 
         match price_level.last_mut() {
             Some(last_run) if last_run.is_bid == is_bid => {
+                // Intra-bucket update: if update is within the current time bucket, update qty in-place
+                // without creating 0-duration dead runs
+                if time <= last_run.start_time {
+                    last_run.qty = qty;
+                    let new_until = time + aggr_time;
+                    if new_until > last_run.until_time {
+                        last_run.until_time = new_until;
+                    }
+                    return;
+                }
+
                 if time > last_run.until_time + GRACE_PERIOD_MS {
                     price_level.push(OrderRun::new(time, aggr_time, qty, is_bid));
                     return;
@@ -230,6 +241,15 @@ impl HistoricalDepth {
                 }
             }
             Some(last_run) => {
+                if time <= last_run.start_time {
+                    last_run.is_bid = is_bid;
+                    last_run.qty = qty;
+                    let new_until = time + aggr_time;
+                    if new_until > last_run.until_time {
+                        last_run.until_time = new_until;
+                    }
+                    return;
+                }
                 if last_run.until_time > time {
                     last_run.until_time = time;
                 }
@@ -250,8 +270,11 @@ impl HistoricalDepth {
     ) -> impl Iterator<Item = (&Price, &Vec<OrderRun>)> {
         let (lo, hi) = (lowest.min(highest), lowest.max(highest));
         self.price_levels.range(lo..=hi).filter(move |(_, runs)| {
-            runs.iter()
-                .any(|run| run.until_time >= earliest && run.start_time <= latest)
+            if runs.is_empty() {
+                return false;
+            }
+            let first_idx = runs.partition_point(|r| r.until_time < earliest);
+            first_idx < runs.len() && runs[first_idx].start_time <= latest
         })
     }
 
@@ -273,7 +296,10 @@ impl HistoricalDepth {
 
     pub fn cleanup_old_price_levels(&mut self, oldest_time: u64) {
         self.price_levels.iter_mut().for_each(|(_, runs)| {
-            runs.retain(|run| run.until_time >= oldest_time);
+            let first_idx = runs.partition_point(|run| run.until_time < oldest_time);
+            if first_idx > 0 {
+                runs.drain(..first_idx);
+            }
         });
 
         self.price_levels.retain(|_, runs| !runs.is_empty());
@@ -305,10 +331,11 @@ impl HistoricalDepth {
         {
             let mut current_accumulator_opt: Option<CoalescingRun> = None;
 
-            // Use for loop with continue instead of filter().collect() to avoid allocation
-            for run_ref in runs_at_price_level.iter() {
-                if !(run_ref.until_time >= earliest && run_ref.start_time <= latest) {
-                    continue;
+            let first_idx = runs_at_price_level.partition_point(|r| r.until_time < earliest);
+
+            for run_ref in &runs_at_price_level[first_idx..] {
+                if run_ref.start_time > latest {
+                    break;
                 }
                 let order_size = market_type.qty_in_quote_value(
                     run_ref.qty(),
@@ -415,7 +442,12 @@ impl HistoricalDepth {
                 query_lowest,
             )
             .flat_map(|(price_level, runs_at_price)| {
-                runs_at_price.iter().map(move |run| (*price_level, *run))
+                let first_idx =
+                    runs_at_price.partition_point(|r| r.until_time < query_earliest_time);
+                runs_at_price[first_idx..]
+                    .iter()
+                    .take_while(move |run| run.start_time <= query_latest_time)
+                    .map(move |run| (*price_level, *run))
             })
             .collect()
         };
@@ -461,25 +493,18 @@ impl HistoricalDepth {
 
         self.iter_time_filtered(earliest, latest, highest, lowest)
             .for_each(|(price, runs)| {
-                runs.iter()
-                    .filter_map(|run| {
-                        let visible_run = run.with_range(earliest, latest)?;
+                let first_idx = runs.partition_point(|r| r.until_time < earliest);
+                for run in &runs[first_idx..] {
+                    if run.start_time > latest {
+                        break;
+                    }
+                    let order_size =
+                        market_type.qty_in_quote_value(run.qty(), *price, size_in_quote_ccy);
 
-                        let order_size = market_type.qty_in_quote_value(
-                            visible_run.qty(),
-                            *price,
-                            size_in_quote_ccy,
-                        );
-
-                        if order_size > order_size_filter {
-                            Some(visible_run)
-                        } else {
-                            None
-                        }
-                    })
-                    .for_each(|run| {
+                    if order_size > order_size_filter {
                         max_depth_qty = max_depth_qty.max(run.qty());
-                    });
+                    }
+                }
             });
 
         max_depth_qty
@@ -651,5 +676,52 @@ mod tests {
         let depth = HistoricalDepth::new(0.01, PriceStep { units: 100 }, basis);
         // Falls back to 1m interval = 60,000 ms
         assert_eq!(depth.aggr_time, 60_000);
+    }
+
+    #[test]
+    fn test_update_price_level_intra_bucket_no_zero_duration_runs() {
+        let basis = Basis::Time(exchange::Timeframe::MS1000);
+        let mut depth = HistoricalDepth::new(0.03, PriceStep { units: 100 }, basis);
+        let price = Price { units: 50000 };
+
+        // Send multiple updates within the same 1-second bucket (time = 1000)
+        depth.update_price_level(1000, price, 10.0, true);
+        depth.update_price_level(1000, price, 20.0, true);
+        depth.update_price_level(1000, price, 15.0, true);
+
+        let runs = depth.price_levels.get(&price).unwrap();
+        // Should only have 1 run, not 3 runs
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].qty(), 15.0);
+        assert_eq!(runs[0].start_time, 1000);
+        assert_eq!(runs[0].until_time, 2000);
+        assert!(runs[0].until_time > runs[0].start_time);
+    }
+
+    #[test]
+    fn test_partition_point_filtering_correctness() {
+        let basis = Basis::Time(exchange::Timeframe::MS1000);
+        let mut depth = HistoricalDepth::new(0.03, PriceStep { units: 100 }, basis);
+        let price = Price { units: 50000 };
+
+        // Create 3 runs in distinct buckets
+        depth.update_price_level(1000, price, 10.0, true);
+        depth.update_price_level(2000, price, 50.0, true);
+        depth.update_price_level(3000, price, 80.0, true);
+
+        // Query only bucket [2000, 2500]
+        let filtered: Vec<_> = depth.iter_time_filtered(2000, 2500, price, price).collect();
+        assert_eq!(filtered.len(), 1);
+
+        let runs = depth.coalesced_runs(
+            2000,
+            2500,
+            price,
+            price,
+            exchange::adapter::MarketKind::LinearPerps,
+            0.0,
+            CoalesceKind::Average(0.15),
+        );
+        assert!(!runs.is_empty());
     }
 }

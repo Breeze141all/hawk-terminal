@@ -89,6 +89,7 @@ pub struct Settings {
     pub tick_multiply: Option<exchange::TickMultiplier>,
     pub visual_config: Option<VisualConfig>,
     pub selected_basis: Option<Basis>,
+    pub pane_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

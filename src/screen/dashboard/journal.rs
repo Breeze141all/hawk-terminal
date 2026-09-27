@@ -24,6 +24,8 @@ pub enum Message {
     InputExchange(String),
     InputSide(TradeSide),
     InputEntryPrice(String),
+    InputStopPrice(String),
+    InputTargetPrice(String),
     InputExitPrice(String),
     InputSize(String),
     InputFee(String),
@@ -65,12 +67,16 @@ pub struct Journal {
     pub input_exchange: String,
     pub input_side: TradeSide,
     pub input_entry_price: String,
+    pub input_stop_price: String,
+    pub input_target_price: String,
     pub input_exit_price: String,
     pub input_size: String,
     pub input_fee: String,
     pub input_tag: String,
     pub input_notes: String,
     pub input_images: Vec<String>,
+    pub input_drawing_id: Option<Uuid>,
+    pub last_used_size: Option<f64>,
 
     // Quick close modal/prompt
     pub closing_id: Option<Uuid>,
@@ -97,12 +103,16 @@ impl Journal {
             input_exchange: "Binance".to_string(),
             input_side: TradeSide::Long,
             input_entry_price: String::new(),
+            input_stop_price: String::new(),
+            input_target_price: String::new(),
             input_exit_price: String::new(),
             input_size: String::new(),
             input_fee: "0".to_string(),
             input_tag: String::new(),
             input_notes: String::new(),
             input_images: Vec::new(),
+            input_drawing_id: None,
+            last_used_size: None,
 
             closing_id: None,
             closing_exit_price: String::new(),
@@ -124,11 +134,46 @@ impl Journal {
         self.input_exchange = autofill.exchange;
         self.input_side = autofill.side;
         self.input_entry_price = format_trade_price(autofill.entry_price);
-        self.input_exit_price = format_trade_price(autofill.target_price);
+        self.input_stop_price = format_trade_price(autofill.stop_price);
+        self.input_target_price = format_trade_price(autofill.target_price);
+        self.input_exit_price = autofill
+            .exit_price
+            .map(format_trade_price)
+            .unwrap_or_default();
+        self.input_drawing_id = autofill.drawing_id;
         self.input_notes = autofill.notes;
-        self.input_size.clear();
+        if self.input_size.trim().is_empty() {
+            self.input_size = self
+                .last_used_size
+                .map(|s| {
+                    let formatted = format!("{:.4}", s);
+                    formatted
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string()
+                })
+                .unwrap_or_else(|| "1".to_string());
+        }
         if self.input_fee.is_empty() {
             self.input_fee = "0".to_string();
+        }
+    }
+
+    pub fn form_planned_rr(&self) -> Option<f64> {
+        let entry = self.input_entry_price.trim().parse::<f64>().ok()?;
+        let stop = self.input_stop_price.trim().parse::<f64>().ok()?;
+        let target = self.input_target_price.trim().parse::<f64>().ok()?;
+        if entry <= 0.0 || stop <= 0.0 || target <= 0.0 {
+            return None;
+        }
+        let (risk, reward) = match self.input_side {
+            TradeSide::Long => (entry - stop, target - entry),
+            TradeSide::Short => (stop - entry, entry - target),
+        };
+        if risk > 0.0 && reward > 0.0 {
+            Some(reward / risk)
+        } else {
+            None
         }
     }
 
@@ -157,6 +202,12 @@ impl Journal {
             Message::InputEntryPrice(price) => {
                 self.input_entry_price = price;
             }
+            Message::InputStopPrice(price) => {
+                self.input_stop_price = price;
+            }
+            Message::InputTargetPrice(price) => {
+                self.input_target_price = price;
+            }
             Message::InputExitPrice(price) => {
                 self.input_exit_price = price;
             }
@@ -181,6 +232,30 @@ impl Journal {
                     }
                 };
 
+                let stop_price = if self.input_stop_price.trim().is_empty() {
+                    None
+                } else {
+                    match self.input_stop_price.trim().parse::<f64>() {
+                        Ok(p) if p > 0.0 => Some(p),
+                        _ => {
+                            self.error_message = Some("Invalid stop loss price".to_string());
+                            return None;
+                        }
+                    }
+                };
+
+                let target_price = if self.input_target_price.trim().is_empty() {
+                    None
+                } else {
+                    match self.input_target_price.trim().parse::<f64>() {
+                        Ok(p) if p > 0.0 => Some(p),
+                        _ => {
+                            self.error_message = Some("Invalid take profit price".to_string());
+                            return None;
+                        }
+                    }
+                };
+
                 let size = match self.input_size.trim().parse::<f64>() {
                     Ok(s) if s > 0.0 => s,
                     _ => {
@@ -188,6 +263,7 @@ impl Journal {
                         return None;
                     }
                 };
+                self.last_used_size = Some(size);
 
                 let fee = self.input_fee.trim().parse::<f64>().unwrap_or(0.0);
                 let ticker = self.input_ticker.trim().to_uppercase();
@@ -213,6 +289,9 @@ impl Journal {
                     self.input_notes.trim().to_string(),
                 );
 
+                entry.stop_price = stop_price;
+                entry.target_price = target_price;
+                entry.drawing_id = self.input_drawing_id.take();
                 entry.images = std::mem::take(&mut self.input_images);
 
                 if !self.input_exit_price.trim().is_empty()
@@ -231,12 +310,15 @@ impl Journal {
                 self.show_add_form = false;
                 self.input_ticker.clear();
                 self.input_entry_price.clear();
+                self.input_stop_price.clear();
+                self.input_target_price.clear();
                 self.input_exit_price.clear();
                 self.input_size.clear();
                 self.input_fee = "0".to_string();
                 self.input_tag.clear();
                 self.input_notes.clear();
                 self.input_images.clear();
+                self.input_drawing_id = None;
                 self.error_message = None;
             }
             Message::CancelForm => {
@@ -244,6 +326,7 @@ impl Journal {
                 for img in self.input_images.drain(..) {
                     data::delete_journal_image_files(&img);
                 }
+                self.input_drawing_id = None;
                 self.error_message = None;
             }
             Message::DeleteTrade(id) => {
@@ -643,6 +726,28 @@ impl Journal {
         .padding(6)
         .style(style::journal_stat_box);
 
+        let rr_str = if self.stats.avg_realized_rr > 0.0 {
+            format!("1:{:.2}", self.stats.avg_realized_rr)
+        } else if self.stats.avg_planned_rr > 0.0 {
+            format!("1:{:.2}p", self.stats.avg_planned_rr)
+        } else {
+            "-".to_string()
+        };
+        let rr_box = container(
+            column![
+                text("Avg R:R").size(10),
+                text(rr_str).size(13).font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Default::default()
+                }),
+            ]
+            .spacing(2)
+            .align_x(Alignment::Center),
+        )
+        .width(Length::FillPortion(1))
+        .padding(6)
+        .style(style::journal_stat_box);
+
         let count_box = container(
             column![
                 text("Closed/Tot").size(10),
@@ -658,7 +763,7 @@ impl Journal {
         .padding(6)
         .style(style::journal_stat_box);
 
-        row![pnl_box, winrate_box, count_box]
+        row![pnl_box, winrate_box, rr_box, count_box]
             .spacing(4)
             .width(Length::Fill)
             .into()
@@ -740,6 +845,18 @@ impl Journal {
             .padding([4.0, 6.0])
             .size(12);
 
+        let stop_input = text_input("Stop Loss (SL)", &self.input_stop_price)
+            .on_input(Message::InputStopPrice)
+            .on_submit(Message::SubmitTrade)
+            .padding([4.0, 6.0])
+            .size(12);
+
+        let target_input = text_input("Take Profit (TP)", &self.input_target_price)
+            .on_input(Message::InputTargetPrice)
+            .on_submit(Message::SubmitTrade)
+            .padding([4.0, 6.0])
+            .size(12);
+
         let exit_input = text_input("Exit Price (optional)", &self.input_exit_price)
             .on_input(Message::InputExitPrice)
             .on_submit(Message::SubmitTrade)
@@ -770,6 +887,23 @@ impl Journal {
             .on_submit(Message::SubmitTrade)
             .padding([4.0, 6.0])
             .size(12);
+
+        let plan_rr_elem: Element<'_, Message> = if let Some(rr) = self.form_planned_rr() {
+            container(
+                text(format!("R:R 1:{:.2}", rr))
+                    .size(11)
+                    .color(iced::Color::from_rgb8(34, 197, 94))
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..Default::default()
+                    }),
+            )
+            .padding([1.0, 4.0])
+            .style(style::journal_stat_box)
+            .into()
+        } else {
+            space::horizontal().into()
+        };
 
         let mut image_section = column![].spacing(4);
         let paste_btn = button(
@@ -867,13 +1001,19 @@ impl Journal {
 
         container(
             column![
-                text("New Trade Entry").size(12).font(iced::Font {
-                    weight: iced::font::Weight::Bold,
-                    ..Default::default()
-                }),
+                row![
+                    text("New Trade Entry").size(12).font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..Default::default()
+                    }),
+                    space::horizontal(),
+                    plan_rr_elem,
+                ]
+                .align_y(Alignment::Center),
                 side_row,
                 row![ticker_input, exchange_input].spacing(4),
                 row![entry_input, size_input].spacing(4),
+                row![stop_input, target_input].spacing(4),
                 row![exit_input, fee_input].spacing(4),
                 tag_input,
                 notes_input,
@@ -1034,10 +1174,37 @@ impl Journal {
         ]
         .spacing(6);
 
+        let mut sl_tp_row = row![].spacing(6).align_y(Alignment::Center);
+        if let Some(sl) = entry.stop_price {
+            sl_tp_row = sl_tp_row.push(
+                text(format!("SL: {:.2}", sl))
+                    .size(10)
+                    .color(iced::Color::from_rgb8(239, 68, 68)),
+            );
+        }
+        if let Some(tp) = entry.target_price {
+            sl_tp_row = sl_tp_row.push(
+                text(format!("TP: {:.2}", tp))
+                    .size(10)
+                    .color(iced::Color::from_rgb8(34, 197, 94)),
+            );
+        }
+        if let Some(rr) = entry.planned_rr() {
+            sl_tp_row = sl_tp_row.push(
+                text(format!("(1:{:.2})", rr))
+                    .size(10)
+                    .color(iced::Color::from_rgb8(156, 163, 175)),
+            );
+        }
+
         let pnl_row = if let Some(pnl) = entry.pnl {
             let pct = entry.pnl_percent.unwrap_or(0.0);
             let sign = if pnl > 0.0 { "+" } else { "" };
-            let pnl_str = format!("{}${:.2} ({}{:.2}%)", sign, pnl, sign, pct);
+            let rr_part = match entry.realized_rr() {
+                Some(r) => format!(" [{:+.2}R]", r),
+                None => String::new(),
+            };
+            let pnl_str = format!("{}${:.2} ({}{:.2}%){}", sign, pnl, sign, pct, rr_part);
 
             row![
                 text("PnL:").size(11),
@@ -1067,7 +1234,11 @@ impl Journal {
             .align_y(Alignment::Center)
         };
 
-        let mut card_col = column![header_row, price_row, pnl_row].spacing(4);
+        let mut card_col = column![header_row, price_row];
+        if entry.stop_price.is_some() || entry.target_price.is_some() {
+            card_col = card_col.push(sl_tp_row);
+        }
+        card_col = card_col.push(pnl_row).spacing(4);
 
         if let Some(tag) = &entry.setup_tag {
             let tag_badge = container(text(tag).size(9))
@@ -1393,10 +1564,42 @@ impl Journal {
         .padding(12)
         .style(style::journal_stat_box);
 
+        let rr_val = if self.stats.avg_realized_rr > 0.0 {
+            format!("1:{:.2}", self.stats.avg_realized_rr)
+        } else if self.stats.avg_planned_rr > 0.0 {
+            format!("1:{:.2}", self.stats.avg_planned_rr)
+        } else {
+            "N/A".to_string()
+        };
+        let rr_sub = format!(
+            "Plan: 1:{:.2} | Real: 1:{:.2}",
+            self.stats.avg_planned_rr, self.stats.avg_realized_rr
+        );
+        let card_rr = container(
+            column![
+                text("AVG RISK / REWARD")
+                    .size(10)
+                    .color(iced::Color::from_rgb8(156, 163, 175)),
+                text(rr_val).size(20).font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Default::default()
+                }),
+                text(rr_sub)
+                    .size(10)
+                    .color(iced::Color::from_rgb8(140, 140, 140)),
+            ]
+            .spacing(4)
+            .align_x(Alignment::Start),
+        )
+        .width(Length::FillPortion(1))
+        .padding(12)
+        .style(style::journal_stat_box);
+
         row![
             card_pnl,
             card_winrate,
             card_pf,
+            card_rr,
             card_trades,
             card_fees,
             card_payoff
@@ -1633,6 +1836,18 @@ impl Journal {
             .padding([5.0, 8.0])
             .size(12);
 
+        let stop_input = text_input("Stop Loss (SL)", &self.input_stop_price)
+            .on_input(Message::InputStopPrice)
+            .on_submit(Message::SubmitTrade)
+            .padding([5.0, 8.0])
+            .size(12);
+
+        let target_input = text_input("Take Profit (TP)", &self.input_target_price)
+            .on_input(Message::InputTargetPrice)
+            .on_submit(Message::SubmitTrade)
+            .padding([5.0, 8.0])
+            .size(12);
+
         let exit_input = text_input("Exit Price (optional)", &self.input_exit_price)
             .on_input(Message::InputExitPrice)
             .on_submit(Message::SubmitTrade)
@@ -1663,6 +1878,23 @@ impl Journal {
             .on_submit(Message::SubmitTrade)
             .padding([5.0, 8.0])
             .size(12);
+
+        let planned_rr_indicator: Element<'_, Message> = if let Some(rr) = self.form_planned_rr() {
+            container(
+                text(format!("Planned R:R: 1:{:.2}", rr))
+                    .size(12)
+                    .color(iced::Color::from_rgb8(34, 197, 94))
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Bold,
+                        ..Default::default()
+                    }),
+            )
+            .padding([2.0, 8.0])
+            .style(style::journal_stat_box)
+            .into()
+        } else {
+            space::horizontal().into()
+        };
 
         let mut image_section = column![].spacing(6);
         let paste_btn = button(
@@ -1764,6 +1996,7 @@ impl Journal {
                     ..Default::default()
                 }),
                 space::horizontal(),
+                planned_rr_indicator,
                 side_selector,
             ]
             .align_y(Alignment::Center),
@@ -1775,6 +2008,12 @@ impl Journal {
                     .spacing(4)
                     .width(Length::FillPortion(1)),
                 column![text("Entry Price").size(11), entry_input]
+                    .spacing(4)
+                    .width(Length::FillPortion(1)),
+                column![text("Stop Loss").size(11), stop_input]
+                    .spacing(4)
+                    .width(Length::FillPortion(1)),
+                column![text("Take Profit").size(11), target_input]
                     .spacing(4)
                     .width(Length::FillPortion(1)),
                 column![text("Exit Price").size(11), exit_input]
@@ -1813,55 +2052,67 @@ impl Journal {
         let header = row![
             text("STATUS")
                 .size(10)
-                .width(70)
+                .width(65)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("SIDE")
                 .size(10)
-                .width(60)
+                .width(55)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("TICKER")
                 .size(10)
-                .width(90)
+                .width(85)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("EXCHANGE")
                 .size(10)
-                .width(85)
+                .width(80)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("ENTRY")
                 .size(10)
-                .width(90)
+                .width(80)
+                .color(iced::Color::from_rgb8(150, 150, 150)),
+            text("SL")
+                .size(10)
+                .width(75)
+                .color(iced::Color::from_rgb8(150, 150, 150)),
+            text("TP")
+                .size(10)
+                .width(75)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("EXIT")
                 .size(10)
-                .width(90)
+                .width(80)
+                .color(iced::Color::from_rgb8(150, 150, 150)),
+            text("R:R")
+                .size(10)
+                .width(70)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("SIZE")
                 .size(10)
-                .width(80)
+                .width(75)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("FEE")
                 .size(10)
-                .width(65)
+                .width(60)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("NET PNL")
                 .size(10)
-                .width(95)
+                .width(90)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("PNL %")
                 .size(10)
-                .width(80)
+                .width(75)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("STRATEGY")
                 .size(10)
-                .width(110)
+                .width(100)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("DATE OPENED")
                 .size(10)
-                .width(130)
+                .width(125)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("CHART")
                 .size(10)
-                .width(75)
+                .width(70)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("NOTES")
                 .size(10)
@@ -1869,7 +2120,7 @@ impl Journal {
                 .color(iced::Color::from_rgb8(150, 150, 150)),
             text("ACTIONS")
                 .size(10)
-                .width(130)
+                .width(120)
                 .align_x(Alignment::End)
                 .color(iced::Color::from_rgb8(150, 150, 150)),
         ]
@@ -2076,32 +2327,71 @@ impl Journal {
                 .align_y(Alignment::Center)
         };
 
+        let sl_str = match entry.stop_price {
+            Some(p) => format!("{:.2}", p),
+            None => "-".to_string(),
+        };
+        let tp_str = match entry.target_price {
+            Some(p) => format!("{:.2}", p),
+            None => "-".to_string(),
+        };
+        let (rr_str, rr_color) = if let Some(r) = entry.realized_rr() {
+            let col = if r > 0.0 {
+                iced::Color::from_rgb8(34, 197, 94)
+            } else if r < 0.0 {
+                iced::Color::from_rgb8(239, 68, 68)
+            } else {
+                iced::Color::from_rgb8(156, 163, 175)
+            };
+            (format!("{:+.2}R", r), col)
+        } else if let Some(rr) = entry.planned_rr() {
+            (
+                format!("1:{:.2}", rr),
+                iced::Color::from_rgb8(156, 163, 175),
+            )
+        } else {
+            ("-".to_string(), iced::Color::from_rgb8(120, 120, 120))
+        };
+
         let row_content = row![
-            container(status_badge).width(70),
-            container(side_badge).width(60),
-            container(ticker_btn).width(90),
-            container(text(&entry.exchange).size(11)).width(85),
-            container(text(format!("{:.2}", entry.entry_price)).size(11)).width(90),
-            container(text(exit_str).size(11)).width(90),
-            container(text(format!("{:.4}", entry.size)).size(11)).width(80),
-            container(text(format!("${:.2}", entry.fee)).size(11)).width(65),
-            container(pnl_elem).width(95),
-            container(pct_elem).width(80),
-            container(strategy_elem).width(110),
+            container(status_badge).width(65),
+            container(side_badge).width(55),
+            container(ticker_btn).width(85),
+            container(text(&entry.exchange).size(11)).width(80),
+            container(text(format!("{:.2}", entry.entry_price)).size(11)).width(80),
+            container(
+                text(sl_str)
+                    .size(11)
+                    .color(iced::Color::from_rgb8(239, 68, 68))
+            )
+            .width(75),
+            container(
+                text(tp_str)
+                    .size(11)
+                    .color(iced::Color::from_rgb8(34, 197, 94))
+            )
+            .width(75),
+            container(text(exit_str).size(11)).width(80),
+            container(text(rr_str).size(11).color(rr_color)).width(70),
+            container(text(format!("{:.4}", entry.size)).size(11)).width(75),
+            container(text(format!("${:.2}", entry.fee)).size(11)).width(60),
+            container(pnl_elem).width(90),
+            container(pct_elem).width(75),
+            container(strategy_elem).width(100),
             container(
                 text(date_str)
                     .size(11)
                     .color(iced::Color::from_rgb8(130, 130, 130))
             )
-            .width(130),
-            container(chart_elem).width(75),
+            .width(125),
+            container(chart_elem).width(70),
             container(
                 text(&entry.notes)
                     .size(11)
                     .color(iced::Color::from_rgb8(160, 160, 160))
             )
             .width(Length::Fill),
-            container(actions_elem).width(130).align_x(Alignment::End),
+            container(actions_elem).width(120).align_x(Alignment::End),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -2137,12 +2427,13 @@ mod tests {
     }
 
     #[test]
-    fn test_journal_autofill_trade() {
+    fn test_journal_autofill_trade_open_and_submit() {
         let mut journal = Journal::new();
         assert!(!journal.is_shown);
         assert!(!journal.show_add_form);
 
-        let autofill = PositionAutofill::new(
+        let drawing_id = Uuid::new_v4();
+        let autofill = PositionAutofill::with_outcome(
             "BTCUSDT".to_string(),
             "Binance".to_string(),
             TradeSide::Long,
@@ -2150,6 +2441,10 @@ mod tests {
             64000.0,
             68000.0,
             1700000000000,
+            None,
+            None,
+            false,
+            Some(drawing_id),
         );
 
         journal.autofill_trade(autofill);
@@ -2160,11 +2455,68 @@ mod tests {
         assert_eq!(journal.input_exchange, "Binance");
         assert_eq!(journal.input_side, TradeSide::Long);
         assert_eq!(journal.input_entry_price, "65000");
-        assert_eq!(journal.input_exit_price, "68000");
-        assert!(journal.input_notes.contains("SL: 64000.00"));
-        assert!(journal.input_notes.contains("TP: 68000.00"));
-        assert!(journal.input_notes.contains("R:R: 1:3.00"));
-        assert_eq!(journal.input_fee, "0");
-        assert!(journal.input_size.is_empty());
+        assert_eq!(journal.input_stop_price, "64000");
+        assert_eq!(journal.input_target_price, "68000");
+        assert_eq!(journal.input_exit_price, ""); // Open trade -> exit price is blank
+        assert_eq!(journal.input_size, "1"); // Defaults to "1"
+        assert_eq!(journal.input_drawing_id, Some(drawing_id));
+        assert_eq!(journal.form_planned_rr(), Some(3.0));
+
+        // Submit the trade
+        journal.update(Message::SubmitTrade);
+
+        assert_eq!(journal.error_message, None);
+        assert!(!journal.show_add_form);
+        assert_eq!(journal.last_used_size, Some(1.0));
+        assert_eq!(journal.input_drawing_id, None);
+
+        let created = &journal.entries[0];
+        assert_eq!(created.ticker, "BTCUSDT");
+        assert_eq!(created.status, TradeStatus::Open);
+        assert_eq!(created.exit_price, None);
+        assert_eq!(created.stop_price, Some(64000.0));
+        assert_eq!(created.target_price, Some(68000.0));
+        assert_eq!(created.drawing_id, Some(drawing_id));
+        assert_eq!(created.planned_rr(), Some(3.0));
+        assert_eq!(created.realized_rr(), None);
+    }
+
+    #[test]
+    fn test_journal_autofill_trade_closed() {
+        let mut journal = Journal::new();
+        journal.last_used_size = Some(2.5);
+
+        let drawing_id = Uuid::new_v4();
+        let autofill = PositionAutofill::with_outcome(
+            "ETHUSDT".to_string(),
+            "Binance".to_string(),
+            TradeSide::Short,
+            3000.0,
+            3100.0,
+            2700.0,
+            1700000000000,
+            Some(1700010000000),
+            Some(2700.0),
+            true,
+            Some(drawing_id),
+        );
+
+        journal.autofill_trade(autofill);
+
+        assert_eq!(journal.input_exit_price, "2700");
+        assert_eq!(journal.input_stop_price, "3100");
+        assert_eq!(journal.input_target_price, "2700");
+        assert_eq!(journal.input_size, "2.5"); // uses last_used_size
+        assert_eq!(journal.form_planned_rr(), Some(3.0));
+
+        journal.update(Message::SubmitTrade);
+
+        let created = &journal.entries[0];
+        assert_eq!(created.status, TradeStatus::Closed);
+        assert_eq!(created.exit_price, Some(2700.0));
+        assert_eq!(created.stop_price, Some(3100.0));
+        assert_eq!(created.target_price, Some(2700.0));
+        assert_eq!(created.planned_rr(), Some(3.0));
+        assert_eq!(created.realized_rr(), Some(3.0));
     }
 }

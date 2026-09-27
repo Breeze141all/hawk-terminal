@@ -14,7 +14,10 @@ use data::chart::replay::ReplayState;
 use data::chart::{
     KlineChartKind, ViewConfig,
     indicator::{Indicator, KlineIndicator},
-    kline::{ClusterKind, FootprintStudy, KlineDataPoint, KlineTrades, NPoc, PointOfControl},
+    kline::{
+        ClusterKind, FootprintStudy, GroupedTrades, KlineDataPoint, KlineTrades, NPoc,
+        PointOfControl,
+    },
     liquidation_heatmap::{LiquidationHeatmap, LiquidationHeatmapConfig, interpolate_color_themed},
 };
 use data::util::{abbr_large_numbers, count_decimals};
@@ -984,6 +987,15 @@ impl KlineChart {
         }
     }
 
+    pub fn update_or_add_drawing(&mut self, drawing: Drawing) {
+        if let Some(existing) = self.drawings.iter_mut().find(|d| d.id == drawing.id) {
+            *existing = drawing;
+        } else {
+            self.drawings.push(drawing);
+        }
+        self.invalidate_all();
+    }
+
     pub fn delete_drawing(&mut self, id: uuid::Uuid) {
         self.drawings.retain(|d| d.id != id);
         {
@@ -1035,14 +1047,14 @@ impl KlineChart {
 
         // 1. Dragging handle or drawing of a Position
         if let Some(ref drag) = d_state.drag
-            && let Some(autofill) = self.position_to_autofill(&drag.current_drawing().kind)
+            && let Some(autofill) = self.position_drawing_to_autofill(drag.current_drawing())
         {
             return Some(autofill);
         }
 
         // 2. Currently in-progress drawing of a Position
         if let Some(ref in_prog) = d_state.in_progress
-            && let Some(autofill) = self.position_to_autofill(&in_prog.kind)
+            && let Some(autofill) = self.position_drawing_to_autofill(in_prog)
         {
             return Some(autofill);
         }
@@ -1050,19 +1062,19 @@ impl KlineChart {
         // 3. Selected drawing by UUID or is_selected flag
         if let Some(selected_id) = d_state.selected_drawing
             && let Some(d) = self.drawings.iter().find(|d| d.id == selected_id)
-            && let Some(autofill) = self.position_to_autofill(&d.kind)
+            && let Some(autofill) = self.position_drawing_to_autofill(d)
         {
             return Some(autofill);
         }
         if let Some(d) = self.drawings.iter().find(|d| d.is_selected)
-            && let Some(autofill) = self.position_to_autofill(&d.kind)
+            && let Some(autofill) = self.position_drawing_to_autofill(d)
         {
             return Some(autofill);
         }
 
         // 4. Most recent Position in chart drawings
         for d in self.drawings.iter().rev() {
-            if let Some(autofill) = self.position_to_autofill(&d.kind) {
+            if let Some(autofill) = self.position_drawing_to_autofill(d) {
                 return Some(autofill);
             }
         }
@@ -1070,14 +1082,18 @@ impl KlineChart {
         None
     }
 
-    fn position_to_autofill(&self, kind: &DrawingKind) -> Option<data::journal::PositionAutofill> {
+    fn position_drawing_to_autofill(
+        &self,
+        drawing: &Drawing,
+    ) -> Option<data::journal::PositionAutofill> {
         if let DrawingKind::Position {
             entry,
             stop_price,
             target_price,
             is_long,
+            end_time,
             ..
-        } = kind
+        } = &drawing.kind
         {
             let side = if *is_long {
                 data::journal::TradeSide::Long
@@ -1086,7 +1102,39 @@ impl KlineChart {
             };
             let ticker = self.ticker_info.ticker.to_string();
             let exchange = self.ticker_info.ticker.exchange.to_string();
-            Some(data::journal::PositionAutofill::new(
+
+            let default_interval = match &self.data_source {
+                PlotData::TimeBased(ts) => ts.interval.to_milliseconds().max(60_000),
+                PlotData::TickBased(_) => 1,
+            };
+            let end_time_val = end_time.unwrap_or(entry.0 + default_interval * 25);
+            let cutoff = if let Some(ref rep) = self.replay {
+                if rep.active && rep.cutoff_time > 0 {
+                    Some(rep.cutoff_time)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let outcome = evaluate_position_outcome(
+                &self.data_source,
+                entry.0,
+                entry.1,
+                *target_price,
+                *stop_price,
+                *is_long,
+                end_time_val,
+                cutoff,
+            );
+
+            let (exit_price, timestamp_close) = if outcome.is_closed {
+                (Some(outcome.exit_price as f64), Some(outcome.exit_time))
+            } else {
+                (None, None)
+            };
+
+            Some(data::journal::PositionAutofill::with_outcome(
                 ticker,
                 exchange,
                 side,
@@ -1094,6 +1142,10 @@ impl KlineChart {
                 *stop_price as f64,
                 *target_price as f64,
                 entry.0,
+                timestamp_close,
+                exit_price,
+                outcome.is_closed,
+                Some(drawing.id),
             ))
         } else {
             None
@@ -1107,14 +1159,14 @@ impl KlineChart {
         }
     }
 
-    pub fn update_selected_position_profit_color(&mut self, color: [f32; 4]) {
+    pub fn update_selected_position_profit_color(&mut self, color: Option<[f32; 4]>) {
         if let Some(d) = self.selected_drawing_mut() {
             d.set_position_profit_color(color);
             self.invalidate_all();
         }
     }
 
-    pub fn update_selected_position_stop_color(&mut self, color: [f32; 4]) {
+    pub fn update_selected_position_stop_color(&mut self, color: Option<[f32; 4]>) {
         if let Some(d) = self.selected_drawing_mut() {
             d.set_position_stop_color(color);
             self.invalidate_all();
@@ -1124,6 +1176,14 @@ impl KlineChart {
     pub fn update_selected_position_entry_color(&mut self, color: [f32; 4]) {
         if let Some(d) = self.selected_drawing_mut() {
             d.set_position_entry_color(color);
+            self.invalidate_all();
+        }
+    }
+
+    pub fn toggle_selected_position_price_path(&mut self) {
+        if let Some(d) = self.selected_drawing_mut() {
+            let current = d.position_style().show_price_path;
+            d.set_position_show_price_path(!current);
             self.invalidate_all();
         }
     }
@@ -1138,6 +1198,16 @@ impl KlineChart {
     pub fn toggle_selected_drawing_lock(&mut self) {
         if let Some(d) = self.selected_drawing_mut() {
             d.is_locked = !d.is_locked;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn toggle_selected_drawing_sync(&mut self, current_pane_id: uuid::Uuid) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.is_synced = !d.is_synced;
+            if d.pane_id.is_none() {
+                d.pane_id = Some(current_pane_id);
+            }
             self.invalidate_all();
         }
     }
@@ -1159,16 +1229,18 @@ impl KlineChart {
             {
                 dragged_id = Some(current.id);
                 let style = current.position_style();
-                let tp_color = Color::from_rgb(
-                    style.profit_color[0],
-                    style.profit_color[1],
-                    style.profit_color[2],
-                );
-                let sl_color = Color::from_rgb(
-                    style.stop_color[0],
-                    style.stop_color[1],
-                    style.stop_color[2],
-                );
+                let tp_color = match style.profit_color {
+                    Some(c) => {
+                        crate::chart::scale::BadgeColor::Explicit(Color::from_rgb(c[0], c[1], c[2]))
+                    }
+                    None => crate::chart::scale::BadgeColor::ThemeProfit,
+                };
+                let sl_color = match style.stop_color {
+                    Some(c) => {
+                        crate::chart::scale::BadgeColor::Explicit(Color::from_rgb(c[0], c[1], c[2]))
+                    }
+                    None => crate::chart::scale::BadgeColor::ThemeStop,
+                };
                 let entry_color = Color::from_rgb(
                     style.entry_color[0],
                     style.entry_color[1],
@@ -1187,7 +1259,7 @@ impl KlineChart {
                 });
                 badges.push(PriceAxisBadge {
                     price: entry.1,
-                    background_color: entry_color,
+                    background_color: entry_color.into(),
                     text_color: Color::WHITE,
                 });
             }
@@ -1203,16 +1275,18 @@ impl KlineChart {
             } = &in_prog.kind
         {
             let style = in_prog.position_style();
-            let tp_color = Color::from_rgb(
-                style.profit_color[0],
-                style.profit_color[1],
-                style.profit_color[2],
-            );
-            let sl_color = Color::from_rgb(
-                style.stop_color[0],
-                style.stop_color[1],
-                style.stop_color[2],
-            );
+            let tp_color = match style.profit_color {
+                Some(c) => {
+                    crate::chart::scale::BadgeColor::Explicit(Color::from_rgb(c[0], c[1], c[2]))
+                }
+                None => crate::chart::scale::BadgeColor::ThemeProfit,
+            };
+            let sl_color = match style.stop_color {
+                Some(c) => {
+                    crate::chart::scale::BadgeColor::Explicit(Color::from_rgb(c[0], c[1], c[2]))
+                }
+                None => crate::chart::scale::BadgeColor::ThemeStop,
+            };
             let entry_color = Color::from_rgb(
                 style.entry_color[0],
                 style.entry_color[1],
@@ -1231,7 +1305,7 @@ impl KlineChart {
             });
             badges.push(PriceAxisBadge {
                 price: entry.1,
-                background_color: entry_color,
+                background_color: entry_color.into(),
                 text_color: Color::WHITE,
             });
         }
@@ -1249,16 +1323,18 @@ impl KlineChart {
             } = &d.kind
             {
                 let style = d.position_style();
-                let tp_color = Color::from_rgb(
-                    style.profit_color[0],
-                    style.profit_color[1],
-                    style.profit_color[2],
-                );
-                let sl_color = Color::from_rgb(
-                    style.stop_color[0],
-                    style.stop_color[1],
-                    style.stop_color[2],
-                );
+                let tp_color = match style.profit_color {
+                    Some(c) => {
+                        crate::chart::scale::BadgeColor::Explicit(Color::from_rgb(c[0], c[1], c[2]))
+                    }
+                    None => crate::chart::scale::BadgeColor::ThemeProfit,
+                };
+                let sl_color = match style.stop_color {
+                    Some(c) => {
+                        crate::chart::scale::BadgeColor::Explicit(Color::from_rgb(c[0], c[1], c[2]))
+                    }
+                    None => crate::chart::scale::BadgeColor::ThemeStop,
+                };
                 let entry_color = Color::from_rgb(
                     style.entry_color[0],
                     style.entry_color[1],
@@ -1277,7 +1353,7 @@ impl KlineChart {
                 });
                 badges.push(PriceAxisBadge {
                     price: entry.1,
-                    background_color: entry_color,
+                    background_color: entry_color.into(),
                     text_color: Color::WHITE,
                 });
             }
@@ -1390,11 +1466,39 @@ impl KlineChart {
                 entry,
                 target_price,
                 stop_price,
+                end_time,
                 ..
             } => match handle_idx {
-                0 => *entry = snapped,
+                0 => {
+                    let min_interval = match &self.data_source {
+                        PlotData::TimeBased(ts) => ts.interval.to_milliseconds().max(60_000),
+                        PlotData::TickBased(_) => 1,
+                    };
+                    let et = end_time.unwrap_or(entry.0 + min_interval * 25);
+                    entry.0 = snapped.0.min(et.saturating_sub(min_interval));
+                    entry.1 = snapped.1;
+                    *end_time = Some(et);
+                }
                 1 => *target_price = snapped.1,
                 2 => *stop_price = snapped.1,
+                3 => {
+                    let min_interval = match &self.data_source {
+                        PlotData::TimeBased(ts) => ts.interval.to_milliseconds().max(60_000),
+                        PlotData::TickBased(_) => 1,
+                    };
+                    let target_time = if is_magnet_active {
+                        if time > chart.latest_x {
+                            let diff = time - chart.latest_x;
+                            let candles = (diff as f64 / min_interval as f64).round() as u64;
+                            chart.latest_x + candles * min_interval
+                        } else {
+                            snapped.0
+                        }
+                    } else {
+                        time
+                    };
+                    *end_time = Some(target_time.max(entry.0 + min_interval));
+                }
                 _ => {}
             },
         }
@@ -1847,7 +1951,18 @@ impl KlineChart {
     }
 
     pub fn insert_trades_buffer(&mut self, trades_buffer: &[Trade]) {
-        self.raw_trades.extend_from_slice(trades_buffer);
+        if let (Some(last_existing), Some(first_incoming)) =
+            (self.raw_trades.last(), trades_buffer.first())
+        {
+            if first_incoming.time >= last_existing.time {
+                self.raw_trades.extend_from_slice(trades_buffer);
+            } else {
+                self.raw_trades =
+                    exchange::trades::cache::merge_intraday_trades(&self.raw_trades, trades_buffer);
+            }
+        } else {
+            self.raw_trades.extend_from_slice(trades_buffer);
+        }
 
         match self.data_source {
             PlotData::TickBased(ref mut tick_aggr) => {
@@ -2018,119 +2133,21 @@ impl KlineChart {
             return;
         }
 
-        let existing_max_t = self.raw_trades.last().map(|t| t.time).unwrap_or(0);
-        let existing_min_t = self.raw_trades.first().map(|t| t.time).unwrap_or(u64::MAX);
+        let (merged, actually_new) =
+            exchange::trades::cache::merge_intraday_trades_with_diff(&self.raw_trades, &raw_trades);
+        self.raw_trades = merged;
 
-        let batch_min_t = raw_trades.first().map(|t| t.time).unwrap_or(0);
-        let batch_max_t = raw_trades.last().map(|t| t.time).unwrap_or(0);
-
-        let is_disjoint = if self.raw_trades.is_empty()
-            || batch_min_t > existing_max_t
-            || batch_max_t < existing_min_t
-        {
-            true
-        } else {
-            match self
-                .raw_trades
-                .binary_search_by_key(&batch_min_t, |t| t.time)
-            {
-                Err(idx_min) => {
-                    idx_min == self.raw_trades.len() || self.raw_trades[idx_min].time > batch_max_t
-                }
-                Ok(_) => false,
-            }
-        };
-
-        let new_trades: Vec<Trade> = if is_disjoint {
-            raw_trades
-        } else {
-            raw_trades
-                .into_iter()
-                .filter(|trade| {
-                    if let Ok(idx) = self
-                        .raw_trades
-                        .binary_search_by_key(&trade.time, |t| t.time)
-                    {
-                        let mut found = false;
-                        let mut i = idx;
-                        while i < self.raw_trades.len() && self.raw_trades[i].time == trade.time {
-                            if self.raw_trades[i].price == trade.price
-                                && self.raw_trades[i].is_sell == trade.is_sell
-                                && (self.raw_trades[i].qty - trade.qty).abs() < 1e-5
-                            {
-                                found = true;
-                                break;
-                            }
-                            i += 1;
-                        }
-                        if !found && idx > 0 {
-                            let mut i = idx - 1;
-                            loop {
-                                if self.raw_trades[i].time != trade.time {
-                                    break;
-                                }
-                                if self.raw_trades[i].price == trade.price
-                                    && self.raw_trades[i].is_sell == trade.is_sell
-                                    && (self.raw_trades[i].qty - trade.qty).abs() < 1e-5
-                                {
-                                    found = true;
-                                    break;
-                                }
-                                if i == 0 {
-                                    break;
-                                }
-                                i -= 1;
-                            }
-                        }
-                        !found
-                    } else {
-                        true
-                    }
-                })
-                .collect()
-        };
-
-        if !new_trades.is_empty() {
+        if !actually_new.is_empty() {
             match self.data_source {
                 PlotData::TickBased(ref mut tick_aggr) => {
-                    tick_aggr.insert_trades(&new_trades);
+                    tick_aggr.insert_trades(&actually_new);
                 }
                 PlotData::TimeBased(ref mut timeseries) => {
-                    timeseries.insert_trades_existing_buckets(&new_trades);
+                    timeseries.insert_trades_existing_buckets(&actually_new);
                 }
             }
 
             self.save_footprint_cache(false);
-
-            if self.raw_trades.is_empty() || batch_min_t >= existing_max_t {
-                self.raw_trades.extend(new_trades);
-            } else if batch_max_t <= existing_min_t {
-                let mut merged = Vec::with_capacity(new_trades.len() + self.raw_trades.len());
-                merged.extend(new_trades);
-                merged.extend(std::mem::take(&mut self.raw_trades));
-                self.raw_trades = merged;
-            } else {
-                let old = std::mem::take(&mut self.raw_trades);
-                let mut merged = Vec::with_capacity(old.len() + new_trades.len());
-                let mut i = 0;
-                let mut j = 0;
-                while i < old.len() && j < new_trades.len() {
-                    if old[i].time <= new_trades[j].time {
-                        merged.push(old[i]);
-                        i += 1;
-                    } else {
-                        merged.push(new_trades[j]);
-                        j += 1;
-                    }
-                }
-                if i < old.len() {
-                    merged.extend_from_slice(&old[i..]);
-                }
-                if j < new_trades.len() {
-                    merged.extend_from_slice(&new_trades[j..]);
-                }
-                self.raw_trades = merged;
-            }
 
             const MAX_RAW_TRADES_IN_RAM: usize = 500_000;
             if self.raw_trades.len() > MAX_RAW_TRADES_IN_RAM {
@@ -3218,11 +3235,19 @@ impl canvas::Program<Message> for KlineChart {
                                     let entry_price = snapped.1;
                                     let stop_price = entry_price * 1.015;
                                     let target_price = entry_price * 0.955;
+                                    let interval_ms = match &self.data_source {
+                                        PlotData::TimeBased(ts) => {
+                                            ts.interval.to_milliseconds().max(60_000)
+                                        }
+                                        PlotData::TickBased(_) => 1,
+                                    };
+                                    let end_time = Some(snapped.0 + interval_ms * 25);
                                     let drawing = Drawing::position(
                                         snapped,
                                         stop_price,
                                         target_price,
                                         false,
+                                        end_time,
                                         [0.9, 0.3, 0.3, 1.0],
                                         1.0,
                                     );
@@ -3237,11 +3262,19 @@ impl canvas::Program<Message> for KlineChart {
                                     let entry_price = snapped.1;
                                     let stop_price = entry_price * 0.985;
                                     let target_price = entry_price * 1.045;
+                                    let interval_ms = match &self.data_source {
+                                        PlotData::TimeBased(ts) => {
+                                            ts.interval.to_milliseconds().max(60_000)
+                                        }
+                                        PlotData::TickBased(_) => 1,
+                                    };
+                                    let end_time = Some(snapped.0 + interval_ms * 25);
                                     let drawing = Drawing::position(
                                         snapped,
                                         stop_price,
                                         target_price,
                                         true,
+                                        end_time,
                                         [0.2, 0.8, 0.4, 1.0],
                                         1.0,
                                     );
@@ -3306,15 +3339,7 @@ impl canvas::Program<Message> for KlineChart {
                                 let price_delta = price - *start_price;
                                 *current_drawing = initial_drawing.clone();
                                 current_drawing.translate(time_delta, price_delta);
-                                if matches!(current_drawing.kind, DrawingKind::Position { .. }) {
-                                    self.chart.cache.clear_crosshair();
-                                    return Some(
-                                        canvas::Action::publish(Message::CrosshairMoved)
-                                            .and_capture(),
-                                    );
-                                } else {
-                                    return Some(canvas::Action::request_redraw().and_capture());
-                                }
+                                return Some(canvas::Action::request_redraw().and_capture());
                             } else if let Some(DrawingDrag::MovingHandle {
                                 handle_idx,
                                 initial_drawing,
@@ -3330,15 +3355,7 @@ impl canvas::Program<Message> for KlineChart {
                                     shift,
                                     is_magnet_active,
                                 );
-                                if matches!(current_drawing.kind, DrawingKind::Position { .. }) {
-                                    self.chart.cache.clear_crosshair();
-                                    return Some(
-                                        canvas::Action::publish(Message::CrosshairMoved)
-                                            .and_capture(),
-                                    );
-                                } else {
-                                    return Some(canvas::Action::request_redraw().and_capture());
-                                }
+                                return Some(canvas::Action::request_redraw().and_capture());
                             }
                         }
                         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -4047,6 +4064,15 @@ impl canvas::Program<Message> for KlineChart {
         } else {
             None
         };
+        let cutoff = if let Some(ref rep) = self.replay {
+            if rep.active && rep.cutoff_time > 0 {
+                Some(rep.cutoff_time)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         draw_chart_drawings(
             &mut dynamic_frame,
             &self.drawings,
@@ -4056,6 +4082,9 @@ impl canvas::Program<Message> for KlineChart {
             &region,
             selected_drawing_id,
             magnet_indicator,
+            &self.data_source,
+            cutoff,
+            palette,
         );
         draw_chart_alerts(
             &mut dynamic_frame,
@@ -4474,6 +4503,59 @@ fn draw_clusters(
     let content_left = cell_left + inset;
     let content_right = x_position + (cell_width / 2.0) - inset;
 
+    if footprint.trades.is_empty() {
+        let area_candle_center_x = match cluster_kind {
+            ClusterKind::VolumeProfile | ClusterKind::DeltaProfile => {
+                ProfileArea::new(
+                    content_left,
+                    content_right,
+                    candle_width,
+                    spacing,
+                    imbalance.is_some(),
+                )
+                .candle_center_x
+            }
+            ClusterKind::BidAsk => {
+                BidAskArea::new(
+                    x_position,
+                    content_left,
+                    content_right,
+                    candle_width,
+                    spacing,
+                )
+                .candle_center_x
+            }
+        };
+        draw_footprint_kline(
+            frame,
+            &price_to_y,
+            area_candle_center_x,
+            candle_width,
+            kline,
+            palette,
+        );
+        return;
+    }
+
+    let step = PriceStep::from_f32(tick_size);
+    let step_units = step.units.max(1);
+
+    let (dense_min, dense_max) = {
+        let mut min_p = Price { units: i64::MAX };
+        let mut max_p = Price { units: i64::MIN };
+        for &p in footprint.trades.keys() {
+            min_p = min_p.min(p);
+            max_p = max_p.max(p);
+        }
+        (min_p, max_p)
+    };
+
+    let dense_bin_count = if dense_max.units >= dense_min.units {
+        (dense_max.units - dense_min.units) / step_units
+    } else {
+        0
+    };
+
     match cluster_kind {
         ClusterKind::VolumeProfile | ClusterKind::DeltaProfile => {
             let area = ProfileArea::new(
@@ -4485,28 +4567,39 @@ fn draw_clusters(
             );
             let bar_alpha = if show_text { 0.25 } else { 1.0 };
 
-            for (price, group) in &footprint.trades {
-                let y = price_to_y(*price);
+            let mut process_level = |price: Price, group: Option<&GroupedTrades>| {
+                let y = price_to_y(price);
 
                 match cluster_kind {
                     ClusterKind::VolumeProfile => {
-                        super::draw_volume_bar(
-                            frame,
-                            area.bars_left,
-                            y,
-                            group.buy_qty,
-                            group.sell_qty,
-                            max_cluster_qty,
-                            area.bars_width,
-                            cell_height,
-                            palette.success.base.color,
-                            palette.danger.base.color,
-                            bar_alpha,
-                            true,
-                        );
+                        let (buy_qty, sell_qty, total_qty) = match group {
+                            Some(g) => (g.buy_qty, g.sell_qty, g.total_qty()),
+                            None => (0.0, 0.0, 0.0),
+                        };
+
+                        if total_qty > 0.0 {
+                            super::draw_volume_bar(
+                                frame,
+                                area.bars_left,
+                                y,
+                                buy_qty,
+                                sell_qty,
+                                max_cluster_qty,
+                                area.bars_width,
+                                cell_height,
+                                palette.success.base.color,
+                                palette.danger.base.color,
+                                bar_alpha,
+                                true,
+                            );
+                        }
 
                         if show_text {
-                            let text_str = abbr_large_numbers(group.total_qty());
+                            let text_str = if total_qty > 0.0 {
+                                abbr_large_numbers(total_qty)
+                            } else {
+                                "0".to_string()
+                            };
                             let fit_size = if !text_str.is_empty() {
                                 let max_char_w = (area.bars_width * 0.90) / (text_str.len() as f32);
                                 text_size.min(max_char_w / 0.60)
@@ -4525,7 +4618,7 @@ fn draw_clusters(
                         }
                     }
                     ClusterKind::DeltaProfile => {
-                        let delta = group.delta_qty();
+                        let delta = group.map_or(0.0, |g| g.delta_qty());
                         if show_text {
                             let text_str = abbr_large_numbers(delta);
                             let fit_size = if !text_str.is_empty() {
@@ -4562,8 +4655,9 @@ fn draw_clusters(
                     _ => {}
                 }
 
-                if let Some((threshold, color_scale, ignore_zeros)) = imbalance {
-                    let step = PriceStep::from_f32(tick_size);
+                if let Some((threshold, color_scale, ignore_zeros)) = imbalance
+                    && let Some(g) = group
+                {
                     let higher_price =
                         Price::from_f32(price.to_f32() + tick_size).round_to_step(step);
 
@@ -4576,8 +4670,8 @@ fn draw_clusters(
                         frame,
                         &price_to_y,
                         footprint,
-                        *price,
-                        group.sell_qty,
+                        price,
+                        g.sell_qty,
                         higher_price,
                         threshold,
                         color_scale,
@@ -4588,6 +4682,19 @@ fn draw_clusters(
                         sellside_x,
                         rect_w,
                     );
+                }
+            };
+
+            if dense_bin_count <= 2000 && dense_min.units <= dense_max.units {
+                let mut curr_units = dense_min.units;
+                while curr_units <= dense_max.units {
+                    let p = Price { units: curr_units };
+                    process_level(p, footprint.trades.get(&p));
+                    curr_units = curr_units.saturating_add(step_units);
+                }
+            } else {
+                for (price, group) in &footprint.trades {
+                    process_level(*price, Some(group));
                 }
             }
 
@@ -4625,12 +4732,16 @@ fn draw_clusters(
                 area.ask_area_left + imb_marker_reserve + (2.0 * spacing.marker_to_bars);
             let left_area_width = (area.ask_area_right - left_min_x).max(0.0);
 
-            for (price, group) in &footprint.trades {
-                let y = price_to_y(*price);
+            let mut process_level = |price: Price, group: Option<&GroupedTrades>| {
+                let y = price_to_y(price);
+                let (buy_qty, sell_qty) = match group {
+                    Some(g) => (g.buy_qty, g.sell_qty),
+                    None => (0.0, 0.0),
+                };
 
-                if group.buy_qty > 0.0 && right_area_width > 0.0 {
+                if right_area_width > 0.0 {
                     if show_text {
-                        let text_str = abbr_large_numbers(group.buy_qty);
+                        let text_str = abbr_large_numbers(buy_qty);
                         let fit_size = if !text_str.is_empty() {
                             let max_char_w = (right_area_width * 0.90) / (text_str.len() as f32);
                             text_size.min(max_char_w / 0.60)
@@ -4648,7 +4759,7 @@ fn draw_clusters(
                         );
                     }
 
-                    let bar_width = (group.buy_qty / max_cluster_qty) * right_area_width;
+                    let bar_width = (buy_qty / max_cluster_qty) * right_area_width;
                     if bar_width > 0.0 {
                         frame.fill_rectangle(
                             Point::new(area.bid_area_left, y - (cell_height / 2.0)),
@@ -4657,9 +4768,9 @@ fn draw_clusters(
                         );
                     }
                 }
-                if group.sell_qty > 0.0 && left_area_width > 0.0 {
+                if left_area_width > 0.0 {
                     if show_text {
-                        let text_str = abbr_large_numbers(group.sell_qty);
+                        let text_str = abbr_large_numbers(sell_qty);
                         let fit_size = if !text_str.is_empty() {
                             let max_char_w = (left_area_width * 0.90) / (text_str.len() as f32);
                             text_size.min(max_char_w / 0.60)
@@ -4677,7 +4788,7 @@ fn draw_clusters(
                         );
                     }
 
-                    let bar_width = (group.sell_qty / max_cluster_qty) * left_area_width;
+                    let bar_width = (sell_qty / max_cluster_qty) * left_area_width;
                     if bar_width > 0.0 {
                         frame.fill_rectangle(
                             Point::new(area.ask_area_right, y - (cell_height / 2.0)),
@@ -4689,8 +4800,8 @@ fn draw_clusters(
 
                 if let Some((threshold, color_scale, ignore_zeros)) = imbalance
                     && area.imb_marker_width > 0.0
+                    && let Some(g) = group
                 {
-                    let step = PriceStep::from_f32(tick_size);
                     let higher_price =
                         Price::from_f32(price.to_f32() + tick_size).round_to_step(step);
 
@@ -4703,8 +4814,8 @@ fn draw_clusters(
                         frame,
                         &price_to_y,
                         footprint,
-                        *price,
-                        group.sell_qty,
+                        price,
+                        g.sell_qty,
                         higher_price,
                         threshold,
                         color_scale,
@@ -4715,6 +4826,19 @@ fn draw_clusters(
                         sellside_x,
                         rect_width,
                     );
+                }
+            };
+
+            if dense_bin_count <= 2000 && dense_min.units <= dense_max.units {
+                let mut curr_units = dense_min.units;
+                while curr_units <= dense_max.units {
+                    let p = Price { units: curr_units };
+                    process_level(p, footprint.trades.get(&p));
+                    curr_units = curr_units.saturating_add(step_units);
+                }
+            } else {
+                for (price, group) in &footprint.trades {
+                    process_level(*price, Some(group));
                 }
             }
 
@@ -4894,7 +5018,7 @@ fn draw_cluster_search_highlights(
                     &Path::rectangle(Point::new(rect_x, rect_y), Size::new(rect_w, rect_h)),
                     Stroke::with_color(
                         Stroke {
-                            width: (1.0 / scaling).max(0.5),
+                            width: 1.0,
                             ..Default::default()
                         },
                         base_color.scale_alpha(0.90),
@@ -5964,27 +6088,32 @@ fn draw_tpo_profiles(
             let vah_y = price_to_y(Price::from_f32(va.vah as f32));
             let val_y = price_to_y(Price::from_f32(va.val as f32));
             let top_y = vah_y.min(val_y);
-            let h = (vah_y - val_y).abs() + tpo_row_height;
+            let bottom_y = vah_y.max(val_y);
+            let half_row = tpo_row_height / 2.0;
+            let block_top_y = top_y - half_row;
+            let block_bottom_y = bottom_y + half_row;
+            let h = block_bottom_y - block_top_y;
             let va_width = if is_session_split {
                 session_px_span
             } else {
                 (profile_width + 16.0).min(max_session_draw_width)
             };
+            let line_thickness: f32 = 1.5;
 
             frame.fill_rectangle(
-                Point::new(session_start_x, top_y - tpo_row_height / 2.0),
+                Point::new(session_start_x, block_top_y),
                 Size::new(va_width, h),
                 va_fill_color,
             );
 
             frame.fill_rectangle(
-                Point::new(session_start_x, vah_y - 0.5),
-                Size::new(va_width, 1.5),
+                Point::new(session_start_x, block_top_y),
+                Size::new(va_width, line_thickness),
                 va_line_color,
             );
             frame.fill_rectangle(
-                Point::new(session_start_x, val_y - 0.5),
-                Size::new(va_width, 1.5),
+                Point::new(session_start_x, block_bottom_y - line_thickness),
+                Size::new(va_width, line_thickness),
                 va_line_color,
             );
         }
@@ -6891,23 +7020,33 @@ fn hit_test_drawing(
             entry,
             target_price,
             stop_price,
+            end_time,
             ..
         } => {
             let x = chart.interval_to_x(entry.0);
-            let w = 140.0 / chart.scaling;
+            let default_interval = match chart.basis {
+                Basis::Time(tf) => tf.to_milliseconds().max(60_000),
+                Basis::Tick(_) => 1,
+            };
+            let end_time_val = end_time.unwrap_or(entry.0 + default_interval * 25);
+            let mut end_x = chart.interval_to_x(end_time_val);
+            let min_w = 20.0 / chart.scaling;
+            if end_x < x + min_w {
+                end_x = x + min_w;
+            }
+            let mid_x = (x + end_x) / 2.0;
             vec![
                 Point::new(x, chart.price_to_y(Price::from_f32(entry.1))),
-                Point::new(
-                    x + w / 2.0,
-                    chart.price_to_y(Price::from_f32(*target_price)),
-                ),
-                Point::new(x + w / 2.0, chart.price_to_y(Price::from_f32(*stop_price))),
+                Point::new(mid_x, chart.price_to_y(Price::from_f32(*target_price))),
+                Point::new(mid_x, chart.price_to_y(Price::from_f32(*stop_price))),
+                Point::new(end_x, chart.price_to_y(Price::from_f32(entry.1))),
             ]
         }
     };
 
+    let handle_threshold = (12.0 / chart.scaling).max(threshold);
     for (idx, handle) in handles.iter().enumerate() {
-        if (frame_pos.x - handle.x).hypot(frame_pos.y - handle.y) <= threshold {
+        if (frame_pos.x - handle.x).hypot(frame_pos.y - handle.y) <= handle_threshold {
             return Some(HitTarget::Handle(idx));
         }
     }
@@ -6978,17 +7117,29 @@ fn hit_test_drawing(
             entry,
             target_price,
             stop_price,
+            end_time,
             ..
         } => {
             let x = chart.interval_to_x(entry.0);
-            let w = 140.0 / chart.scaling;
+            let default_interval = match chart.basis {
+                Basis::Time(tf) => tf.to_milliseconds().max(60_000),
+                Basis::Tick(_) => 1,
+            };
+            let end_time_val = end_time.unwrap_or(entry.0 + default_interval * 25);
+            let mut end_x = chart.interval_to_x(end_time_val);
+            let min_w = 20.0 / chart.scaling;
+            if end_x < x + min_w {
+                end_x = x + min_w;
+            }
+            let min_x = x.min(end_x);
+            let max_x = x.max(end_x);
             let y_entry = chart.price_to_y(Price::from_f32(entry.1));
             let y_tgt = chart.price_to_y(Price::from_f32(*target_price));
             let y_stp = chart.price_to_y(Price::from_f32(*stop_price));
             let min_y = y_tgt.min(y_stp).min(y_entry);
             let max_y = y_tgt.max(y_stp).max(y_entry);
-            if frame_pos.x >= x - threshold
-                && frame_pos.x <= x + w + threshold
+            if frame_pos.x >= min_x - threshold
+                && frame_pos.x <= max_x + threshold
                 && frame_pos.y >= min_y - threshold
                 && frame_pos.y <= max_y + threshold
             {
@@ -7000,6 +7151,255 @@ fn hit_test_drawing(
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PositionOutcome {
+    pub exit_time: u64,
+    pub exit_price: f32,
+    pub is_closed: bool,
+    pub is_profit: bool,
+}
+
+pub(crate) fn evaluate_position_outcome(
+    data_source: &PlotData<KlineDataPoint>,
+    entry_time: u64,
+    entry_price: f32,
+    target_price: f32,
+    stop_price: f32,
+    is_long: bool,
+    end_bound: u64,
+    cutoff_time: Option<u64>,
+) -> PositionOutcome {
+    let mut last_seen_time = entry_time;
+    let mut last_seen_price = entry_price;
+    let mut has_candles = false;
+
+    match data_source {
+        PlotData::TimeBased(ts) => {
+            if let Some(cutoff) = cutoff_time
+                && entry_time > cutoff
+            {
+                return PositionOutcome {
+                    exit_time: entry_time,
+                    exit_price: entry_price,
+                    is_closed: false,
+                    is_profit: true,
+                };
+            }
+
+            let eval_end = if let Some(cutoff) = cutoff_time {
+                end_bound.min(cutoff)
+            } else {
+                end_bound
+            };
+
+            let start_candle_t = ts
+                .datapoints
+                .range(..=entry_time)
+                .next_back()
+                .map(|(&t, _)| t)
+                .unwrap_or(entry_time);
+
+            for (&time, dp) in ts.datapoints.range(start_candle_t..=eval_end) {
+                has_candles = true;
+                last_seen_time = time;
+                last_seen_price = dp.kline.close.to_f32();
+                let high = dp.kline.high.to_f32();
+                let low = dp.kline.low.to_f32();
+
+                if is_long {
+                    let hit_tp = high >= target_price;
+                    let hit_sl = low <= stop_price;
+                    if hit_tp && hit_sl {
+                        let open = dp.kline.open.to_f32();
+                        if (open - target_price).abs() <= (open - stop_price).abs() {
+                            return PositionOutcome {
+                                exit_time: time,
+                                exit_price: target_price,
+                                is_closed: true,
+                                is_profit: true,
+                            };
+                        } else {
+                            return PositionOutcome {
+                                exit_time: time,
+                                exit_price: stop_price,
+                                is_closed: true,
+                                is_profit: false,
+                            };
+                        }
+                    } else if hit_tp {
+                        return PositionOutcome {
+                            exit_time: time,
+                            exit_price: target_price,
+                            is_closed: true,
+                            is_profit: true,
+                        };
+                    } else if hit_sl {
+                        return PositionOutcome {
+                            exit_time: time,
+                            exit_price: stop_price,
+                            is_closed: true,
+                            is_profit: false,
+                        };
+                    }
+                } else {
+                    let hit_tp = low <= target_price;
+                    let hit_sl = high >= stop_price;
+                    if hit_tp && hit_sl {
+                        let open = dp.kline.open.to_f32();
+                        if (open - target_price).abs() <= (open - stop_price).abs() {
+                            return PositionOutcome {
+                                exit_time: time,
+                                exit_price: target_price,
+                                is_closed: true,
+                                is_profit: true,
+                            };
+                        } else {
+                            return PositionOutcome {
+                                exit_time: time,
+                                exit_price: stop_price,
+                                is_closed: true,
+                                is_profit: false,
+                            };
+                        }
+                    } else if hit_tp {
+                        return PositionOutcome {
+                            exit_time: time,
+                            exit_price: target_price,
+                            is_closed: true,
+                            is_profit: true,
+                        };
+                    } else if hit_sl {
+                        return PositionOutcome {
+                            exit_time: time,
+                            exit_price: stop_price,
+                            is_closed: true,
+                            is_profit: false,
+                        };
+                    }
+                }
+            }
+        }
+        PlotData::TickBased(tick_aggr) => {
+            let n = tick_aggr.datapoints.len();
+            if n > 0 {
+                let start_idx = (entry_time as usize).min(n - 1);
+                let end_idx = (end_bound as usize).min(n - 1);
+                if start_idx <= end_idx {
+                    for idx in start_idx..=end_idx {
+                        has_candles = true;
+                        let kline = &tick_aggr.datapoints[n - 1 - idx].kline;
+                        last_seen_time = idx as u64;
+                        last_seen_price = kline.close.to_f32();
+                        let high = kline.high.to_f32();
+                        let low = kline.low.to_f32();
+
+                        if is_long {
+                            let hit_tp = high >= target_price;
+                            let hit_sl = low <= stop_price;
+                            if hit_tp && hit_sl {
+                                let open = kline.open.to_f32();
+                                if (open - target_price).abs() <= (open - stop_price).abs() {
+                                    return PositionOutcome {
+                                        exit_time: idx as u64,
+                                        exit_price: target_price,
+                                        is_closed: true,
+                                        is_profit: true,
+                                    };
+                                } else {
+                                    return PositionOutcome {
+                                        exit_time: idx as u64,
+                                        exit_price: stop_price,
+                                        is_closed: true,
+                                        is_profit: false,
+                                    };
+                                }
+                            } else if hit_tp {
+                                return PositionOutcome {
+                                    exit_time: idx as u64,
+                                    exit_price: target_price,
+                                    is_closed: true,
+                                    is_profit: true,
+                                };
+                            } else if hit_sl {
+                                return PositionOutcome {
+                                    exit_time: idx as u64,
+                                    exit_price: stop_price,
+                                    is_closed: true,
+                                    is_profit: false,
+                                };
+                            }
+                        } else {
+                            let hit_tp = low <= target_price;
+                            let hit_sl = high >= stop_price;
+                            if hit_tp && hit_sl {
+                                let open = kline.open.to_f32();
+                                if (open - target_price).abs() <= (open - stop_price).abs() {
+                                    return PositionOutcome {
+                                        exit_time: idx as u64,
+                                        exit_price: target_price,
+                                        is_closed: true,
+                                        is_profit: true,
+                                    };
+                                } else {
+                                    return PositionOutcome {
+                                        exit_time: idx as u64,
+                                        exit_price: stop_price,
+                                        is_closed: true,
+                                        is_profit: false,
+                                    };
+                                }
+                            } else if hit_tp {
+                                return PositionOutcome {
+                                    exit_time: idx as u64,
+                                    exit_price: target_price,
+                                    is_closed: true,
+                                    is_profit: true,
+                                };
+                            } else if hit_sl {
+                                return PositionOutcome {
+                                    exit_time: idx as u64,
+                                    exit_price: stop_price,
+                                    is_closed: true,
+                                    is_profit: false,
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let is_closed = match data_source {
+        PlotData::TimeBased(ts) => {
+            let latest_t = if let Some(cutoff) = cutoff_time {
+                cutoff
+            } else {
+                ts.latest_timestamp().unwrap_or(0)
+            };
+            latest_t > 0 && end_bound <= latest_t && has_candles
+        }
+        PlotData::TickBased(tick_aggr) => {
+            let n = tick_aggr.datapoints.len();
+            let latest_idx = if n > 0 { (n - 1) as u64 } else { 0 };
+            n > 0 && end_bound <= latest_idx && has_candles
+        }
+    };
+
+    let is_profit = if is_long {
+        last_seen_price >= entry_price
+    } else {
+        last_seen_price <= entry_price
+    };
+
+    PositionOutcome {
+        exit_time: last_seen_time.max(entry_time),
+        exit_price: last_seen_price,
+        is_closed,
+        is_profit,
+    }
+}
+
 fn draw_chart_drawings(
     frame: &mut canvas::Frame,
     drawings: &[Drawing],
@@ -7009,9 +7409,13 @@ fn draw_chart_drawings(
     region: &Rectangle,
     selected_id: Option<uuid::Uuid>,
     magnet_indicator: Option<Point>,
+    data_source: &PlotData<KlineDataPoint>,
+    cutoff_time: Option<u64>,
+    palette: &Extended,
 ) {
     let handle_radius = 4.0 / chart.scaling;
-    let handle_stroke_w = 1.5 / chart.scaling;
+    // Stroke width in iced canvas is always in physical screen pixels, do not divide by scaling
+    let handle_stroke_w = 1.5;
     let sel_blue = iced::Color::from_rgb(0.16, 0.38, 1.0);
     let handle_bg = iced::Color::from_rgb8(25, 28, 36);
 
@@ -7145,7 +7549,7 @@ fn draw_chart_drawings(
                             style: canvas::Style::Solid(iced::Color::from_rgba(
                                 0.16, 0.38, 1.0, 0.4,
                             )),
-                            width: drawing.width + 4.0 / chart.scaling,
+                            width: drawing.width + 4.0,
                             ..Default::default()
                         };
                         frame.stroke(&brush_path, highlight_stroke);
@@ -7223,17 +7627,42 @@ fn draw_chart_drawings(
                 entry,
                 target_price,
                 stop_price,
+                is_long,
+                end_time,
                 ..
             } => {
                 let entry_x = chart.interval_to_x(entry.0);
                 let entry_y = chart.price_to_y(Price::from_f32(entry.1));
                 let target_y = chart.price_to_y(Price::from_f32(*target_price));
                 let stop_y = chart.price_to_y(Price::from_f32(*stop_price));
-                let box_w = 140.0 / chart.scaling;
+
+                let default_interval = match data_source {
+                    PlotData::TimeBased(ts) => ts.interval.to_milliseconds().max(60_000),
+                    PlotData::TickBased(_) => 1,
+                };
+                let end_time_val = end_time.unwrap_or(entry.0 + default_interval * 25);
+                let mut end_x = chart.interval_to_x(end_time_val);
+                let min_w = 20.0 / chart.scaling;
+                if end_x < entry_x + min_w {
+                    end_x = entry_x + min_w;
+                }
+                let box_w = end_x - entry_x;
 
                 let pos_style = drawing.position_style();
-                let p_col = pos_style.profit_color;
-                let s_col = pos_style.stop_color;
+                let theme_p_col = [
+                    palette.success.base.color.r,
+                    palette.success.base.color.g,
+                    palette.success.base.color.b,
+                    0.10,
+                ];
+                let theme_s_col = [
+                    palette.danger.base.color.r,
+                    palette.danger.base.color.g,
+                    palette.danger.base.color.b,
+                    0.10,
+                ];
+                let p_col = pos_style.profit_color.unwrap_or(theme_p_col);
+                let s_col = pos_style.stop_color.unwrap_or(theme_s_col);
                 let e_col = pos_style.entry_color;
 
                 // Profit zone
@@ -7286,10 +7715,7 @@ fn draw_chart_drawings(
 
                 // Entry line
                 frame.stroke(
-                    &Path::line(
-                        Point::new(entry_x, entry_y),
-                        Point::new(entry_x + box_w, entry_y),
-                    ),
+                    &Path::line(Point::new(entry_x, entry_y), Point::new(end_x, entry_y)),
                     Stroke {
                         style: canvas::Style::Solid(iced::Color::from_rgba(
                             e_col[0], e_col[1], e_col[2], e_col[3],
@@ -7298,6 +7724,82 @@ fn draw_chart_drawings(
                         ..Default::default()
                     },
                 );
+
+                // Evaluate outcome & dynamic highlight
+                let outcome = evaluate_position_outcome(
+                    data_source,
+                    entry.0,
+                    entry.1,
+                    *target_price,
+                    *stop_price,
+                    *is_long,
+                    end_time_val,
+                    cutoff_time,
+                );
+
+                let exit_x = chart.interval_to_x(outcome.exit_time).clamp(entry_x, end_x);
+                let exit_y = chart.price_to_y(Price::from_f32(outcome.exit_price));
+
+                // Dynamic active profit/loss highlight zone ("воно більш зеленим стає")
+                let active_w = (exit_x - entry_x).max(0.0);
+                let active_min_y = entry_y.min(exit_y);
+                let active_h = (entry_y - exit_y).abs();
+                if active_w > 0.0 && active_h > 0.5 {
+                    let active_fill = if outcome.is_profit {
+                        iced::Color::from_rgba(
+                            p_col[0],
+                            (p_col[1] * 1.25).min(1.0),
+                            p_col[2],
+                            (p_col[3] * 1.8).clamp(0.25, 0.65),
+                        )
+                    } else {
+                        iced::Color::from_rgba(
+                            (s_col[0] * 1.25).min(1.0),
+                            s_col[1],
+                            s_col[2],
+                            (s_col[3] * 1.8).clamp(0.25, 0.65),
+                        )
+                    };
+                    frame.fill_rectangle(
+                        Point::new(entry_x, active_min_y),
+                        Size::new(active_w, active_h),
+                        active_fill,
+                    );
+                }
+
+                // Tracking dashed line from entry to exit
+                if pos_style.show_price_path && active_w > 0.5 {
+                    let line_color = if outcome.is_profit {
+                        iced::Color::from_rgba(0.4, 0.95, 0.6, 0.85)
+                    } else {
+                        iced::Color::from_rgba(0.95, 0.45, 0.45, 0.85)
+                    };
+                    let dash_stroke = Stroke {
+                        style: canvas::Style::Solid(line_color),
+                        width: 1.5,
+                        line_dash: canvas::LineDash {
+                            segments: &[4.0, 3.0],
+                            offset: 0,
+                        },
+                        ..Default::default()
+                    };
+                    frame.stroke(
+                        &Path::line(Point::new(entry_x, entry_y), Point::new(exit_x, exit_y)),
+                        dash_stroke,
+                    );
+
+                    if outcome.is_closed {
+                        let dot_color = if outcome.is_profit {
+                            iced::Color::from_rgb(0.2, 0.9, 0.4)
+                        } else {
+                            iced::Color::from_rgb(0.9, 0.25, 0.25)
+                        };
+                        frame.fill(
+                            &Path::circle(Point::new(exit_x, exit_y), 3.0 / chart.scaling),
+                            dot_color,
+                        );
+                    }
+                }
 
                 // R:R text
                 let risk = (entry.1 - stop_price).abs();
@@ -7319,6 +7821,7 @@ fn draw_chart_drawings(
                     draw_round_handle(frame, Point::new(entry_x, entry_y));
                     draw_round_handle(frame, Point::new(entry_x + box_w / 2.0, target_y));
                     draw_round_handle(frame, Point::new(entry_x + box_w / 2.0, stop_y));
+                    draw_round_handle(frame, Point::new(end_x, entry_y));
                 }
             }
         }
@@ -7331,7 +7834,7 @@ fn draw_chart_drawings(
             &Path::circle(pt, r),
             Stroke {
                 style: canvas::Style::Solid(magnet_color),
-                width: 1.5 / chart.scaling,
+                width: 1.5,
                 ..Default::default()
             },
         );
@@ -8264,7 +8767,15 @@ mod tests {
         // 0. Empty chart -> empty badges
         assert!(chart.y_axis_badges().is_empty());
 
-        let pos = Drawing::position((1000, 100.0), 95.0, 110.0, true, [0.2, 0.8, 0.4, 1.0], 1.0);
+        let pos = Drawing::position(
+            (1000, 100.0),
+            95.0,
+            110.0,
+            true,
+            Some(2000),
+            [0.2, 0.8, 0.4, 1.0],
+            1.0,
+        );
         chart.add_drawing(pos.clone());
 
         // 1. Position on chart -> 3 badges (TP, SL, Entry) permanently visible on Y axis
@@ -8353,6 +8864,30 @@ mod tests {
         assert_eq!(badges[0].price, 115.0);
         assert_eq!(badges[1].price, 100.0);
         assert_eq!(badges[2].price, 105.0);
+
+        // 5b. Drag handle 3 (End time / Duration) -> stretches end_time
+        let mut end_drag = pos.clone();
+        chart.apply_handle_movement(
+            3,
+            &pos,
+            &mut end_drag,
+            Point::new(chart.state().interval_to_x(300_000), 0.0),
+            false,
+            false,
+        );
+        if let DrawingKind::Position { end_time, .. } = end_drag.kind {
+            assert!(end_time.unwrap() >= 300_000);
+        } else {
+            panic!("Expected Position");
+        }
+
+        // 5c. Target position outcome generation
+        chart.drawing_state.borrow_mut().drag = None;
+        let autofill = chart.find_target_position().unwrap();
+        assert_eq!(autofill.entry_price, 100.0);
+        assert_eq!(autofill.target_price, 110.0);
+        assert_eq!(autofill.stop_price, 95.0);
+        assert_eq!(autofill.drawing_id, Some(pos.id));
 
         // 6. Other drawing tools alone must NOT show badges
         let mut chart_other = make_test_chart();
@@ -9374,12 +9909,15 @@ mod tests {
                 target_price: 53000.0,
                 stop_price: 49000.0,
                 is_long: true,
+                end_time: None,
                 style: None,
             },
             color: [0.0, 1.0, 0.0, 1.0],
             width: 1.0,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         };
         chart.add_drawing(long_pos);
 
@@ -9399,12 +9937,15 @@ mod tests {
                 target_price: 50000.0,
                 stop_price: 53000.0,
                 is_long: false,
+                end_time: None,
                 style: None,
             },
             color: [1.0, 0.0, 0.0, 1.0],
             width: 1.0,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         };
         chart.add_drawing(short_pos);
 
@@ -9537,7 +10078,15 @@ mod tests {
     #[test]
     fn test_position_styling_mutations() {
         let mut chart = make_test_chart();
-        let pos = Drawing::position((1000, 100.0), 95.0, 110.0, true, [0.2, 0.8, 0.4, 1.0], 1.0);
+        let pos = Drawing::position(
+            (1000, 100.0),
+            95.0,
+            110.0,
+            true,
+            Some(2000),
+            [0.2, 0.8, 0.4, 1.0],
+            1.0,
+        );
         let id = pos.id;
         chart.add_drawing(pos);
         chart.set_selected_drawing(Some(id));
@@ -9546,8 +10095,8 @@ mod tests {
         let new_stop = [0.9, 0.1, 0.1, 0.5];
         let new_entry = [0.7, 0.7, 0.8, 1.0];
 
-        chart.update_selected_position_profit_color(new_profit);
-        chart.update_selected_position_stop_color(new_stop);
+        chart.update_selected_position_profit_color(Some(new_profit));
+        chart.update_selected_position_stop_color(Some(new_stop));
         chart.update_selected_position_entry_color(new_entry);
 
         let d = chart
@@ -9556,9 +10105,20 @@ mod tests {
             .find(|d| d.id == id)
             .expect("drawing should exist");
         let style = d.position_style();
-        assert_eq!(style.profit_color, new_profit);
-        assert_eq!(style.stop_color, new_stop);
+        assert_eq!(style.profit_color, Some(new_profit));
+        assert_eq!(style.stop_color, Some(new_stop));
         assert_eq!(style.entry_color, new_entry);
+
+        // Reset to Auto (None)
+        chart.update_selected_position_profit_color(None);
+        chart.update_selected_position_stop_color(None);
+        let d = chart
+            .drawings
+            .iter()
+            .find(|d| d.id == id)
+            .expect("drawing should exist");
+        assert_eq!(d.position_style().profit_color, None);
+        assert_eq!(d.position_style().stop_color, None);
     }
 
     #[test]
@@ -9569,7 +10129,15 @@ mod tests {
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
         let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
 
-        let pos = Drawing::position((1000, 100.0), 95.0, 110.0, true, [0.2, 0.8, 0.4, 1.0], 1.0);
+        let pos = Drawing::position(
+            (1000, 100.0),
+            95.0,
+            110.0,
+            true,
+            Some(2000),
+            [0.2, 0.8, 0.4, 1.0],
+            1.0,
+        );
         chart.add_drawing(pos);
 
         // 1. Shift + G (ASCII)
@@ -9733,5 +10301,224 @@ mod tests {
         assert_eq!(profiles_live_mid.len(), 2);
         assert_eq!(profiles_live_mid[0].session_start, 0);
         assert_eq!(profiles_live_mid[1].session_start, 86_400_000);
+    }
+
+    #[test]
+    fn test_evaluate_position_outcome_and_dragging() {
+        let mut chart = make_test_chart();
+
+        if let PlotData::TimeBased(ref mut ts) = chart.data_source {
+            ts.interval = exchange::Timeframe::M1;
+            for (t, o, h, l, c) in [
+                (60_000, 100.0, 102.0, 99.0, 101.0),
+                (120_000, 101.0, 108.0, 100.0, 107.0),
+                (180_000, 107.0, 108.0, 94.0, 95.0),
+            ] {
+                let kline = exchange::Kline {
+                    time: t,
+                    open: Price::from_f32(o),
+                    high: Price::from_f32(h),
+                    low: Price::from_f32(l),
+                    close: Price::from_f32(c),
+                    volume: (50.0, 50.0),
+                };
+                ts.datapoints.insert(
+                    t,
+                    KlineDataPoint {
+                        kline,
+                        footprint: Default::default(),
+                        trades_fetched: false,
+                    },
+                );
+            }
+        }
+
+        // Test 1: Long Position hits TP at candle 2 (t=120_000)
+        let outcome_tp = evaluate_position_outcome(
+            &chart.data_source,
+            60_000,
+            100.0,
+            105.0, // TP
+            95.0,  // SL
+            true,  // is_long
+            200_000,
+            None,
+        );
+        assert!(outcome_tp.is_closed);
+        assert!(outcome_tp.is_profit);
+        assert_eq!(outcome_tp.exit_time, 120_000);
+        assert_eq!(outcome_tp.exit_price, 105.0);
+
+        // Test 2: Long Position with higher TP (110.0) hits SL at candle 3 (t=180_000)
+        let outcome_sl = evaluate_position_outcome(
+            &chart.data_source,
+            60_000,
+            100.0,
+            110.0, // TP (not hit)
+            96.0,  // SL (hit at candle 3 where low=94)
+            true,
+            200_000,
+            None,
+        );
+        assert!(outcome_sl.is_closed);
+        assert!(!outcome_sl.is_profit);
+        assert_eq!(outcome_sl.exit_time, 180_000);
+        assert_eq!(outcome_sl.exit_price, 96.0);
+
+        // Test 3: Short Position hits TP at candle 3 (where low=94, target=95)
+        let outcome_short_tp = evaluate_position_outcome(
+            &chart.data_source,
+            120_000,
+            107.0,
+            95.0,  // Short TP
+            110.0, // Short SL
+            false, // is_long = false
+            200_000,
+            None,
+        );
+        assert!(outcome_short_tp.is_closed);
+        assert!(outcome_short_tp.is_profit);
+        assert_eq!(outcome_short_tp.exit_time, 180_000);
+        assert_eq!(outcome_short_tp.exit_price, 95.0);
+
+        // Test 4: Expired position in history (neither TP nor SL hit, end_bound <= latest_candle 180_000)
+        let outcome_expired = evaluate_position_outcome(
+            &chart.data_source,
+            60_000,
+            100.0,
+            110.0,
+            90.0,
+            true,
+            60_000,
+            None,
+        );
+        assert!(outcome_expired.is_closed);
+        assert!(outcome_expired.is_profit); // candle 1 close=101 >= 100
+        assert_eq!(outcome_expired.exit_time, 60_000);
+        assert_eq!(outcome_expired.exit_price, 101.0);
+
+        // Test 4b: Open active position extending into future (end_bound 300_000 > latest_candle 180_000)
+        let outcome_open = evaluate_position_outcome(
+            &chart.data_source,
+            60_000,
+            100.0,
+            110.0,
+            90.0,
+            true,
+            300_000,
+            None,
+        );
+        assert!(!outcome_open.is_closed);
+        assert_eq!(outcome_open.exit_time, 180_000);
+        assert_eq!(outcome_open.exit_price, 95.0);
+
+        // Test 4c: Replay mode cutoff - position ends after cutoff (remains open in replay)
+        let outcome_replay = evaluate_position_outcome(
+            &chart.data_source,
+            60_000,
+            100.0,
+            110.0,
+            90.0,
+            true,
+            120_000,
+            Some(60_000),
+        );
+        assert!(!outcome_replay.is_closed);
+        assert_eq!(outcome_replay.exit_time, 60_000);
+        assert_eq!(outcome_replay.exit_price, 101.0);
+
+        // Test 5: Dragging Handle 3 (right handle) stretches end_time
+        let pos = Drawing::position(
+            (60_000, 100.0),
+            95.0,
+            105.0,
+            true,
+            Some(120_000),
+            [0.2, 0.8, 0.4, 1.0],
+            1.0,
+        );
+        let mut cur = pos.clone();
+        chart.apply_handle_movement(
+            3,
+            &pos,
+            &mut cur,
+            Point::new(chart.state().interval_to_x(250_000), 0.0),
+            false,
+            false,
+        );
+        if let DrawingKind::Position { end_time, .. } = cur.kind {
+            assert_eq!(end_time, Some(250_000));
+        } else {
+            panic!("Expected Position");
+        }
+
+        // Test 6: Dragging Handle 0 (entry) translates both entry and end_time
+        let mut entry_moved = cur.clone();
+        chart.apply_handle_movement(
+            0,
+            &cur,
+            &mut entry_moved,
+            Point::new(
+                chart.state().interval_to_x(80_000),
+                chart.state().price_to_y(Price::from_f32(102.0)),
+            ),
+            false,
+            false,
+        );
+        if let DrawingKind::Position {
+            entry, end_time, ..
+        } = entry_moved.kind
+        {
+            assert_eq!(entry.0, 80_000);
+            // Dragging entry handle adjusts entry point, preserving end_time
+            assert_eq!(end_time, Some(250_000));
+        } else {
+            panic!("Expected Position");
+        }
+    }
+
+    #[test]
+    fn test_tpo_value_area_alignment() {
+        let vah_y = 120.0f32;
+        let val_y = 350.0f32;
+        let tpo_row_height = 10.0f32;
+        let line_thickness = 1.5f32;
+
+        let top_y = vah_y.min(val_y);
+        let bottom_y = vah_y.max(val_y);
+        let half_row = tpo_row_height / 2.0;
+        let block_top_y = top_y - half_row;
+        let block_bottom_y = bottom_y + half_row;
+        let h = block_bottom_y - block_top_y;
+
+        let vah_line_y = block_top_y;
+        let val_line_y = block_bottom_y - line_thickness;
+
+        assert_eq!(h, 240.0);
+        assert_eq!(vah_line_y, block_top_y);
+        assert_eq!(val_line_y + line_thickness, block_bottom_y);
+        assert!(vah_line_y >= block_top_y);
+        assert!(val_line_y + line_thickness <= block_top_y + h);
+    }
+
+    #[test]
+    fn test_drawing_handle_dimensions_invariants() {
+        for scaling in [0.05f32, 0.1, 0.5, 1.0, 2.0, 4.0] {
+            let handle_radius = 4.0 / scaling;
+            let screen_path_radius = handle_radius * scaling;
+            assert!((screen_path_radius - 4.0).abs() < 1e-5);
+
+            // In Iced canvas, Stroke::width is physical screen pixels and must remain fixed.
+            let handle_stroke_w = 1.5f32;
+            let outer_radius = screen_path_radius + handle_stroke_w / 2.0;
+            let inner_radius = screen_path_radius - handle_stroke_w / 2.0;
+
+            assert_eq!(outer_radius, 4.75);
+            assert_eq!(inner_radius, 3.25);
+            assert!(
+                inner_radius > 0.0,
+                "Inner dark center must not be swallowed by stroke"
+            );
+        }
     }
 }

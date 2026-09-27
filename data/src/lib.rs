@@ -22,7 +22,9 @@ pub use config::sidebar::{self, Sidebar};
 pub use config::state::{
     DEFAULT_HAWK_STATE_JSON, Layouts, State, default_hawk_layout, default_state,
 };
-pub use config::theme::Theme;
+pub use config::theme::{
+    Theme, breez_theme, deeptrades_theme, default_theme, flowsurface_legacy_theme,
+};
 pub use config::timezone::UserTimezone;
 pub use journal::{
     JOURNAL_IMAGES_DIR, JournalEntry, JournalMode, JournalStats, PositionAutofill, TradeSide,
@@ -44,6 +46,50 @@ pub fn exports_path(file_name: Option<&str>) -> PathBuf {
     } else {
         base
     }
+}
+
+pub fn user_downloads_dir() -> PathBuf {
+    dirs_next::download_dir()
+        .or_else(|| dirs_next::home_dir().map(|h| h.join("Downloads")))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub fn save_layout_to_downloads(json: &str, layout_name: &str) -> std::io::Result<PathBuf> {
+    let downloads = user_downloads_dir();
+    if !downloads.exists() {
+        let _ = std::fs::create_dir_all(&downloads);
+    }
+
+    let safe_name: String = layout_name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect();
+    let safe_name = safe_name.trim();
+    let base_name = if safe_name.is_empty() {
+        "layout"
+    } else {
+        safe_name
+    };
+
+    let mut file_path = downloads.join(format!("hawk_layout_{base_name}.json"));
+    if file_path.exists() {
+        let mut counter = 1;
+        loop {
+            let candidate = downloads.join(format!("hawk_layout_{base_name} ({counter}).json"));
+            if !candidate.exists() {
+                file_path = candidate;
+                break;
+            }
+            counter += 1;
+        }
+    }
+
+    let mut file = File::create(&file_path)?;
+    file.write_all(json.as_bytes())?;
+    Ok(file_path)
 }
 
 pub fn save_export_file(json: &str, file_name: &str) -> std::io::Result<PathBuf> {
@@ -356,5 +402,22 @@ mod tests {
         assert!(eth_recent_bin.exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_save_layout_to_downloads() {
+        let dummy_json = r#"{"test": true}"#;
+        let layout_name = "Test/Special:Layout*";
+        let saved =
+            save_layout_to_downloads(dummy_json, layout_name).expect("Must save to downloads");
+        assert!(saved.exists());
+        let file_name = saved.file_name().unwrap().to_string_lossy();
+        assert!(file_name.starts_with("hawk_layout_Test_Special_Layout_"));
+        assert!(file_name.ends_with(".json"));
+
+        let content = std::fs::read_to_string(&saved).unwrap();
+        assert_eq!(content, dummy_json);
+
+        let _ = std::fs::remove_file(saved);
     }
 }

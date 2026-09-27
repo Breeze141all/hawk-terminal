@@ -76,6 +76,20 @@ pub fn flowsurface_legacy_theme() -> Custom {
     )
 }
 
+pub fn breez_theme() -> Custom {
+    Custom::new(
+        "Breez".to_string(),
+        Palette {
+            background: Color::from_rgb8(22, 27, 30),
+            text: Color::from_rgb8(209, 217, 225),
+            primary: Color::from_rgb8(123, 147, 170),
+            success: Color::from_rgb8(188, 197, 209),
+            danger: Color::from_rgb8(58, 74, 90),
+            warning: Color::from_rgb8(234, 179, 74),
+        },
+    )
+}
+
 impl Serialize for Theme {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -94,6 +108,10 @@ impl Serialize for Theme {
                 },
                 "Flowsurface Classic" => SerTheme {
                     name: "flowsurface_classic".to_string(),
+                    palette: None,
+                },
+                "Breez" => SerTheme {
+                    name: "breez".to_string(),
                     palette: None,
                 },
                 _ => SerTheme {
@@ -160,6 +178,7 @@ fn parse_builtin_theme_name(s: &str) -> Option<iced_core::Theme> {
         "hawk" | "flowsurface" => Some(Theme::default().0),
         "deeptrades" => Some(iced_core::Theme::Custom(deeptrades_theme().into())),
         "flowsurface_classic" => Some(iced_core::Theme::Custom(flowsurface_legacy_theme().into())),
+        "breez" | "Breez" => Some(iced_core::Theme::Custom(breez_theme().into())),
         _ => None,
     }
 }
@@ -421,6 +440,29 @@ mod tests {
             _ => String::new(),
         };
         assert_eq!(name_legacy, "Flowsurface Classic");
+
+        let t_breez: Theme = serde_json::from_str(r#"{"name": "breez"}"#).unwrap();
+        let name_breez = match t_breez.0 {
+            iced_core::Theme::Custom(ref c) => c.to_string(),
+            _ => String::new(),
+        };
+        assert_eq!(name_breez, "Breez");
+        let pal_breez = t_breez.0.palette();
+        assert_eq!(pal_breez.background, Color::from_rgb8(22, 27, 30));
+        assert_eq!(pal_breez.text, Color::from_rgb8(209, 217, 225));
+        assert_eq!(pal_breez.primary, Color::from_rgb8(123, 147, 170));
+        assert_eq!(pal_breez.success, Color::from_rgb8(188, 197, 209));
+        assert_eq!(pal_breez.danger, Color::from_rgb8(58, 74, 90));
+        assert_eq!(pal_breez.warning, Color::from_rgb8(234, 179, 74));
+
+        let t_breez_str: Theme = serde_json::from_str(r#""breez""#).unwrap();
+        assert_eq!(
+            t_breez_str.0.palette().background,
+            Color::from_rgb8(22, 27, 30)
+        );
+
+        let ser_breez = serde_json::to_string(&t_breez).unwrap();
+        assert_eq!(ser_breez, r#"{"name":"breez"}"#);
 
         let ser = serde_json::to_string(&t_hawk).unwrap();
         assert_eq!(ser, r#"{"name":"hawk"}"#);

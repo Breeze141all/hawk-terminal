@@ -21,6 +21,7 @@ pub fn copy_text_to_clipboard(text: &str) -> Result<(), String> {
     clipboard.set_text(text).map_err(|e| e.to_string())
 }
 
+#[allow(dead_code)]
 pub fn read_text_from_clipboard() -> Result<String, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     clipboard.get_text().map_err(|e| e.to_string())

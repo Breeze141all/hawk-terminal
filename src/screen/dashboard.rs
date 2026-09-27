@@ -478,6 +478,53 @@ impl Dashboard {
                             pane::Effect::AutofillJournal(autofill) => {
                                 return (Task::none(), Some(Event::AutofillJournal(autofill)));
                             }
+                            pane::Effect::SyncDrawing {
+                                symbol,
+                                drawing,
+                                originating_pane_id,
+                            } => {
+                                self.sync_drawing_to_panes(
+                                    main_window.id,
+                                    &symbol,
+                                    &drawing,
+                                    originating_pane_id,
+                                );
+                                Task::none()
+                            }
+                            pane::Effect::UnsyncDrawing {
+                                symbol,
+                                drawing_id,
+                                originating_pane_id,
+                            } => {
+                                self.unsync_drawing_from_other_panes(
+                                    main_window.id,
+                                    &symbol,
+                                    drawing_id,
+                                    originating_pane_id,
+                                );
+                                Task::none()
+                            }
+                            pane::Effect::DeleteSyncedDrawing { symbol, drawing_id } => {
+                                self.delete_synced_drawing_from_panes(
+                                    main_window.id,
+                                    &symbol,
+                                    drawing_id,
+                                );
+                                Task::none()
+                            }
+                            pane::Effect::ClearSyncedDrawings {
+                                symbol,
+                                drawing_ids,
+                            } => {
+                                for drawing_id in drawing_ids {
+                                    self.delete_synced_drawing_from_panes(
+                                        main_window.id,
+                                        &symbol,
+                                        drawing_id,
+                                    );
+                                }
+                                Task::none()
+                            }
                         };
                         return (task, None);
                     }
@@ -506,6 +553,8 @@ impl Dashboard {
                         chart.mark_trades_fetched(from_time, actual_last_trade_t);
                         chart.finish_one_trade_fetch();
                         chart.flush_footprint_cache();
+                        let _ = exchange::trades::cache::flush_all_intraday_trades_cache();
+                        chart.invalidate_all();
                         if !chart.is_fetching_trades() {
                             pane_state.status = pane::Status::Ready;
                         }
@@ -713,6 +762,72 @@ impl Dashboard {
                     chart.flush_footprint_cache();
                 }
             });
+    }
+
+    pub fn sync_drawing_to_panes(
+        &mut self,
+        main_window: window::Id,
+        target_symbol: &str,
+        drawing: &data::chart::drawing::Drawing,
+        originating_pane_id: uuid::Uuid,
+    ) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let is_other_pane = state.unique_id() != originating_pane_id;
+            if let pane::Content::Kline {
+                chart: Some(chart), ..
+            } = &mut state.content
+            {
+                let symbol = chart.ticker_info.ticker.display_symbol_and_type().0;
+                if symbol == target_symbol {
+                    let mut d = drawing.clone();
+                    if is_other_pane {
+                        d.is_selected = false;
+                    }
+                    chart.update_or_add_drawing(d);
+                }
+            }
+        }
+    }
+
+    pub fn unsync_drawing_from_other_panes(
+        &mut self,
+        main_window: window::Id,
+        target_symbol: &str,
+        drawing_id: uuid::Uuid,
+        originating_pane_id: uuid::Uuid,
+    ) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            let is_other_pane = state.unique_id() != originating_pane_id;
+            if is_other_pane
+                && let pane::Content::Kline {
+                    chart: Some(chart), ..
+                } = &mut state.content
+            {
+                let symbol = chart.ticker_info.ticker.display_symbol_and_type().0;
+                if symbol == target_symbol {
+                    chart.delete_drawing(drawing_id);
+                }
+            }
+        }
+    }
+
+    pub fn delete_synced_drawing_from_panes(
+        &mut self,
+        main_window: window::Id,
+        target_symbol: &str,
+        drawing_id: uuid::Uuid,
+    ) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let pane::Content::Kline {
+                chart: Some(chart), ..
+            } = &mut state.content
+            {
+                let symbol = chart.ticker_info.ticker.display_symbol_and_type().0;
+                if symbol == target_symbol {
+                    chart.delete_drawing(drawing_id);
+                }
+            }
+        }
     }
 
     fn set_focus(&mut self, main_window: window::Id, window: window::Id, pane: pane_grid::Pane) {
@@ -1242,6 +1357,7 @@ impl Dashboard {
     pub fn tick(&mut self, now: Instant, main_window: window::Id) -> Task<Message> {
         let mut tasks = vec![];
         let layout_id = self.layout_id;
+        let mut needs_refresh = false;
 
         self.iter_all_panes_mut(main_window)
             .for_each(|(_window_id, _pane, state)| match state.tick(now) {
@@ -1268,14 +1384,20 @@ impl Dashboard {
                 Some(pane::Action::ResolveContent) => match state.stream_pair_kind() {
                     Some(StreamPairKind::MultiSource(tickers)) => {
                         state.set_content_and_streams(tickers, state.content.kind());
+                        needs_refresh = true;
                     }
                     Some(StreamPairKind::SingleSource(ticker)) => {
                         state.set_content_and_streams(vec![ticker], state.content.kind());
+                        needs_refresh = true;
                     }
                     None => {}
                 },
                 None => {}
             });
+
+        if needs_refresh {
+            tasks.push(self.refresh_streams(main_window));
+        }
 
         Task::batch(tasks)
     }
@@ -1770,26 +1892,35 @@ pub fn fetch_trades_batched(
     sipper(async move |mut progress| {
         let mut latest_trade_t = from_time;
         let mut actual_last_trade_t = from_time;
-        let today_midnight = chrono::Utc::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as u64;
+        let mut reached_end = false;
 
         while latest_trade_t < to_time {
             match exchange::trades::fetch_trades(ticker_info, latest_trade_t, data_path.clone())
                 .await
             {
-                Ok((batch, next_trade_t)) => {
+                Ok((mut batch, next_trade_t)) => {
                     let batch_len = batch.len();
                     if batch_len == 0 {
                         break;
                     }
+                    let had_trades_beyond_to_time = batch.iter().any(|t| t.time >= to_time);
+                    batch.retain(|t| t.time < to_time);
+
                     if let Some(last_trade) = batch.last() {
                         actual_last_trade_t = actual_last_trade_t.max(last_trade.time);
                     }
-                    let () = progress.send(batch).await;
+                    if !batch.is_empty() {
+                        let () = progress.send(batch).await;
+                    }
+
+                    if had_trades_beyond_to_time || next_trade_t >= to_time {
+                        reached_end = true;
+                        break;
+                    }
+
+                    if next_trade_t <= latest_trade_t {
+                        break;
+                    }
 
                     let sleep_ms = match ticker_info.exchange() {
                         Exchange::OkexSpot | Exchange::OkexLinear | Exchange::OkexInverse => 200,
@@ -1797,20 +1928,21 @@ pub fn fetch_trades_batched(
                         _ => 50,
                     };
 
-                    if latest_trade_t >= today_midnight && batch_len >= 100 {
+                    if (100..=2000).contains(&batch_len) {
                         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                     }
 
-                    if next_trade_t <= latest_trade_t {
-                        break;
-                    }
                     latest_trade_t = next_trade_t;
                 }
                 Err(err) => return Err(err),
             }
         }
 
-        Ok(actual_last_trade_t)
+        Ok(if reached_end {
+            to_time
+        } else {
+            actual_last_trade_t
+        })
     })
 }
 
@@ -1992,5 +2124,107 @@ mod tests {
             dashboard.active_kline_pane(main_window_id),
             Some((main_window_id, second_pane))
         );
+    }
+
+    #[test]
+    fn test_drawing_isolation_and_cross_pane_sync() {
+        let mut dashboard = Dashboard::default();
+        let main_window_id = window::Id::unique();
+
+        // 1. Setup two panes with BTCUSDT kline charts
+        let panes: Vec<pane_grid::Pane> = dashboard.panes.iter().map(|(p, _)| *p).collect();
+        let p1 = panes[0];
+        let p2 = panes[1];
+
+        let p1_id = dashboard.panes.get(p1).unwrap().unique_id();
+        let p2_id = dashboard.panes.get(p2).unwrap().unique_id();
+        assert_ne!(p1_id, p2_id);
+
+        dashboard.panes.get_mut(p1).unwrap().content = pane::Content::Kline {
+            chart: Some(make_test_chart()),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Candles,
+        };
+        dashboard.panes.get_mut(p2).unwrap().content = pane::Content::Kline {
+            chart: Some(make_test_chart()),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Candles,
+        };
+
+        // 2. Add an unsynced drawing to pane 1
+        let mut drawing =
+            data::chart::drawing::Drawing::horizontal(65000.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        drawing.pane_id = Some(p1_id);
+        drawing.is_synced = false;
+        let drawing_id = drawing.id;
+
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &mut dashboard.panes.get_mut(p1).unwrap().content
+        {
+            c.add_drawing(drawing.clone());
+        }
+
+        // Verify pane 1 has 1 drawing and pane 2 has 0 drawings (isolated)
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 1);
+        }
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p2).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 0);
+        }
+
+        // 3. Sync drawing to all charts of the same ticker
+        drawing.is_synced = true;
+        dashboard.sync_drawing_to_panes(main_window_id, "BTCUSDT", &drawing, p1_id);
+
+        // Verify both panes now have the drawing
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 1);
+            assert!(c.drawings[0].is_synced);
+        }
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p2).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 1);
+            assert_eq!(c.drawings[0].id, drawing_id);
+            assert!(c.drawings[0].is_synced);
+        }
+
+        // 4. Unsync from other panes
+        dashboard.unsync_drawing_from_other_panes(main_window_id, "BTCUSDT", drawing_id, p1_id);
+
+        // Verify pane 1 retains drawing, pane 2 no longer has it
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 1);
+        }
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p2).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 0);
+        }
+
+        // 5. Re-sync and then delete synced drawing
+        dashboard.sync_drawing_to_panes(main_window_id, "BTCUSDT", &drawing, p1_id);
+        dashboard.delete_synced_drawing_from_panes(main_window_id, "BTCUSDT", drawing_id);
+
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 0);
+        }
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p2).unwrap().content
+        {
+            assert_eq!(c.drawings.len(), 0);
+        }
     }
 }

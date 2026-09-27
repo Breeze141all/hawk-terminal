@@ -140,6 +140,7 @@ impl From<&pane::State> for data::Pane {
                             data::chart::kline::user_default_kline_config()
                                 .map(data::layout::pane::VisualConfig::Kline)
                         }),
+                    pane_id: Some(pane.unique_id()),
                     ..pane.settings.clone()
                 };
 
@@ -358,7 +359,12 @@ pub fn load_saved_state() -> SavedState {
     match data::read_from_file(data::SAVED_STATE_PATH) {
         Ok(mut state) => {
             let mut modified = false;
-            if !state.layout_manager.layouts.iter().any(|l| l.name == "Hawk") {
+            if !state
+                .layout_manager
+                .layouts
+                .iter()
+                .any(|l| l.name == "Hawk")
+            {
                 log::info!(
                     "Hawk template not found in existing state ({} layout(s)). Injecting default Hawk template...",
                     state.layout_manager.layouts.len()
@@ -373,10 +379,8 @@ pub fn load_saved_state() -> SavedState {
                 modified = true;
             }
 
-            if modified {
-                if let Ok(json) = serde_json::to_string_pretty(&state) {
-                    let _ = data::write_json_to_file(&json, data::SAVED_STATE_PATH);
-                }
+            if modified && let Ok(json) = serde_json::to_string_pretty(&state) {
+                let _ = data::write_json_to_file(&json, data::SAVED_STATE_PATH);
             }
 
             state_to_saved_state(state)
@@ -412,10 +416,21 @@ mod tests {
             name: "CustomLayout".to_string(),
             dashboard: data::Dashboard::default(),
         }];
-        assert!(!state.layout_manager.layouts.iter().any(|l| l.name == "Hawk"));
+        assert!(
+            !state
+                .layout_manager
+                .layouts
+                .iter()
+                .any(|l| l.name == "Hawk")
+        );
 
         // Simulate logic in load_saved_state:
-        if !state.layout_manager.layouts.iter().any(|l| l.name == "Hawk") {
+        if !state
+            .layout_manager
+            .layouts
+            .iter()
+            .any(|l| l.name == "Hawk")
+        {
             let hawk_layout = data::default_hawk_layout();
             state.layout_manager.layouts.insert(0, hawk_layout);
         }

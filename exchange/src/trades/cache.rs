@@ -15,6 +15,35 @@ pub fn find_gap_index(trades: &[Trade], from_idx: usize, max_gap_ms: u64) -> Opt
         .find(|&i| trades[i + 1].time.saturating_sub(trades[i].time) > max_gap_ms)
 }
 
+pub fn slice_cached_trades(
+    cached: &[Trade],
+    start_idx: usize,
+    max_gap_ms: u64,
+    max_batch: usize,
+) -> (Vec<Trade>, u64) {
+    if cached.is_empty() || start_idx >= cached.len() {
+        return (Vec::new(), 0);
+    }
+
+    let effective_end = find_gap_index(cached, start_idx, max_gap_ms)
+        .map(|idx| idx + 1)
+        .unwrap_or(cached.len());
+
+    if start_idx >= effective_end {
+        let fallback_t = cached[start_idx].time.saturating_add(1);
+        return (Vec::new(), fallback_t);
+    }
+
+    let mut chunk_end = (start_idx + max_batch).min(effective_end);
+    let boundary_time = cached[chunk_end - 1].time;
+    while chunk_end < effective_end && cached[chunk_end].time == boundary_time {
+        chunk_end += 1;
+    }
+    let trades = cached[start_idx..chunk_end].to_vec();
+    let next_from = boundary_time.saturating_add(1);
+    (trades, next_from)
+}
+
 pub fn encode_trades_binary(trades: &[Trade]) -> Vec<u8> {
     let num_trades = trades.len();
     let mut raw = Vec::with_capacity(8 + num_trades * TRADE_RECORD_SIZE);
@@ -134,64 +163,127 @@ pub fn load_intraday_trades_from_cache(
     ticker_info: &TickerInfo,
     date: chrono::NaiveDate,
 ) -> Option<Vec<Trade>> {
+    let key = (base_data_path.to_path_buf(), *ticker_info, date);
+    let pending = {
+        let buffer = INTRADAY_BUFFER.lock().ok()?;
+        buffer.get(&key).cloned()
+    };
+
     let bin_path = intraday_raw_trade_bin_path(base_data_path, ticker_info, date);
-    if bin_path.exists()
+    let disk_trades = if bin_path.exists()
         && let Ok(bytes) = std::fs::read(&bin_path)
         && let Ok(trades) = decode_trades_binary(&bytes)
     {
-        return Some(trades);
+        Some(trades)
+    } else {
+        None
+    };
+
+    match (disk_trades, pending) {
+        (Some(disk), Some(mem)) if !mem.is_empty() => Some(merge_intraday_trades(&disk, &mem)),
+        (Some(disk), _) => Some(disk),
+        (None, Some(mem)) if !mem.is_empty() => Some(merge_intraday_trades(&[], &mem)),
+        _ => None,
     }
-    None
 }
 
-pub fn merge_intraday_trades(existing: &[Trade], new_trades: &[Trade]) -> Vec<Trade> {
-    if existing.is_empty() {
-        let mut res = new_trades.to_vec();
-        res.sort_by(|a, b| {
-            a.time
-                .cmp(&b.time)
-                .then_with(|| a.price.cmp(&b.price))
-                .then_with(|| a.qty.total_cmp(&b.qty))
-                .then_with(|| a.is_sell.cmp(&b.is_sell))
-        });
-        res.dedup_by(|a, b| {
-            a.time == b.time
-                && a.price == b.price
-                && (a.qty - b.qty).abs() < 1e-5
-                && a.is_sell == b.is_sell
-        });
-        return res;
-    }
-    if new_trades.is_empty() {
-        return existing.to_vec();
-    }
+use rustc_hash::FxHashMap;
+use std::sync::{LazyLock, Mutex};
 
-    let mut merged = Vec::with_capacity(existing.len() + new_trades.len());
-    merged.extend_from_slice(existing);
-    merged.extend_from_slice(new_trades);
-    merged.sort_by(|a, b| {
+type IntradayKey = (PathBuf, TickerInfo, chrono::NaiveDate);
+
+static INTRADAY_BUFFER: LazyLock<Mutex<FxHashMap<IntradayKey, Vec<Trade>>>> =
+    LazyLock::new(|| Mutex::new(FxHashMap::default()));
+
+const INTRADAY_FLUSH_THRESHOLD: usize = 20_000;
+
+pub fn merge_intraday_trades_with_diff(
+    existing: &[Trade],
+    new_trades: &[Trade],
+) -> (Vec<Trade>, Vec<Trade>) {
+    let trade_cmp = |a: &Trade, b: &Trade| {
         a.time
             .cmp(&b.time)
             .then_with(|| a.price.cmp(&b.price))
             .then_with(|| a.qty.total_cmp(&b.qty))
             .then_with(|| a.is_sell.cmp(&b.is_sell))
-    });
-    merged.dedup_by(|a, b| {
+    };
+
+    let trade_eq = |a: &mut Trade, b: &mut Trade| {
         a.time == b.time
             && a.price == b.price
             && (a.qty - b.qty).abs() < 1e-5
             && a.is_sell == b.is_sell
-    });
-    merged
+    };
+
+    if existing.is_empty() {
+        let mut res = new_trades.to_vec();
+        res.sort_by(trade_cmp);
+        res.dedup_by(trade_eq);
+        let diff = res.clone();
+        return (res, diff);
+    }
+    if new_trades.is_empty() {
+        return (existing.to_vec(), Vec::new());
+    }
+
+    let mut sorted_new = new_trades.to_vec();
+    sorted_new.sort_by(trade_cmp);
+    sorted_new.dedup_by(trade_eq);
+
+    let last_existing = &existing[existing.len() - 1];
+    let first_new = &sorted_new[0];
+
+    let mut merged = Vec::with_capacity(existing.len() + sorted_new.len());
+    let mut diff = Vec::with_capacity(sorted_new.len());
+
+    if first_new.time > last_existing.time {
+        merged.extend_from_slice(existing);
+        merged.extend(sorted_new.clone());
+        return (merged, sorted_new);
+    }
+
+    let mut i = 0;
+    let mut j = 0;
+    while i < existing.len() && j < sorted_new.len() {
+        match trade_cmp(&existing[i], &sorted_new[j]) {
+            std::cmp::Ordering::Less => {
+                merged.push(existing[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(sorted_new[j]);
+                diff.push(sorted_new[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                merged.push(existing[i]);
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    if i < existing.len() {
+        merged.extend_from_slice(&existing[i..]);
+    }
+    if j < sorted_new.len() {
+        merged.extend_from_slice(&sorted_new[j..]);
+        diff.extend_from_slice(&sorted_new[j..]);
+    }
+    (merged, diff)
 }
 
-pub fn save_intraday_trades_to_cache(
+pub fn merge_intraday_trades(existing: &[Trade], new_trades: &[Trade]) -> Vec<Trade> {
+    merge_intraday_trades_with_diff(existing, new_trades).0
+}
+
+fn write_intraday_trades_to_disk(
     base_data_path: &Path,
     ticker_info: &TickerInfo,
     date: chrono::NaiveDate,
-    trades: &[Trade],
+    trades_to_persist: &[Trade],
 ) -> Result<(), AdapterError> {
-    if trades.is_empty() {
+    if trades_to_persist.is_empty() {
         return Ok(());
     }
     let base_bin_path = intraday_raw_trade_bin_path(base_data_path, ticker_info, date);
@@ -200,9 +292,16 @@ pub fn save_intraday_trades_to_cache(
             .map_err(|e| AdapterError::ParseError(format!("Failed to create dir: {e}")))?;
     }
 
-    let existing =
-        load_intraday_trades_from_cache(base_data_path, ticker_info, date).unwrap_or_default();
-    let merged = merge_intraday_trades(&existing, trades);
+    let disk_existing = if base_bin_path.exists()
+        && let Ok(bytes) = std::fs::read(&base_bin_path)
+        && let Ok(trades) = decode_trades_binary(&bytes)
+    {
+        trades
+    } else {
+        Vec::new()
+    };
+
+    let merged = merge_intraday_trades(&disk_existing, trades_to_persist);
 
     let compressed = encode_trades_binary(&merged);
     let temp_bin_path = base_bin_path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
@@ -227,6 +326,70 @@ pub fn save_intraday_trades_to_cache(
         base_bin_path
     );
     Ok(())
+}
+
+pub fn save_intraday_trades_to_cache_buffered(
+    base_data_path: &Path,
+    ticker_info: &TickerInfo,
+    date: chrono::NaiveDate,
+    trades: &[Trade],
+) -> Result<(), AdapterError> {
+    if trades.is_empty() {
+        return Ok(());
+    }
+    let key = (base_data_path.to_path_buf(), *ticker_info, date);
+    let mut buffer = INTRADAY_BUFFER
+        .lock()
+        .map_err(|e| AdapterError::ParseError(e.to_string()))?;
+    let entry: &mut Vec<Trade> = buffer.entry(key).or_default();
+    entry.extend_from_slice(trades);
+    if entry.len() >= INTRADAY_FLUSH_THRESHOLD {
+        let to_flush: Vec<Trade> = std::mem::take(entry);
+        drop(buffer);
+        write_intraday_trades_to_disk(base_data_path, ticker_info, date, &to_flush)?;
+    }
+    Ok(())
+}
+
+pub fn flush_intraday_trades_cache(
+    base_data_path: &Path,
+    ticker_info: &TickerInfo,
+    date: chrono::NaiveDate,
+) -> Result<(), AdapterError> {
+    let key = (base_data_path.to_path_buf(), *ticker_info, date);
+    let mut buffer = INTRADAY_BUFFER
+        .lock()
+        .map_err(|e| AdapterError::ParseError(e.to_string()))?;
+    if let Some(trades) = buffer.remove(&key)
+        && !trades.is_empty()
+    {
+        drop(buffer);
+        write_intraday_trades_to_disk(base_data_path, ticker_info, date, &trades)?;
+    }
+    Ok(())
+}
+
+pub fn flush_all_intraday_trades_cache() -> Result<(), AdapterError> {
+    let mut buffer = INTRADAY_BUFFER
+        .lock()
+        .map_err(|e| AdapterError::ParseError(e.to_string()))?;
+    let all: Vec<(IntradayKey, Vec<Trade>)> = buffer.drain().collect();
+    drop(buffer);
+    for ((base_path, ticker_info, date), trades) in all {
+        if !trades.is_empty() {
+            write_intraday_trades_to_disk(&base_path, &ticker_info, date, &trades)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn save_intraday_trades_to_cache(
+    base_data_path: &Path,
+    ticker_info: &TickerInfo,
+    date: chrono::NaiveDate,
+    trades: &[Trade],
+) -> Result<(), AdapterError> {
+    write_intraday_trades_to_disk(base_data_path, ticker_info, date, trades)
 }
 
 pub fn load_raw_trades_from_cache(

@@ -12,7 +12,7 @@ mod style;
 mod widget;
 mod window;
 
-use data::config::theme::default_theme;
+use data::config::theme::{breez_theme, deeptrades_theme, default_theme, flowsurface_legacy_theme};
 use data::{layout::WindowSpec, sidebar};
 use layout::{LayoutId, configuration};
 use modal::{LayoutManager, ThemeEditor, audio::AudioStream};
@@ -483,196 +483,82 @@ impl HawkTerminal {
                             manager.insert_layout(new_layout.clone(), dashboard);
                         }
                     }
-                    Some(modal::layout_manager::Action::ExportLayout(id)) => {
-                        if let Some(layout) = self.layout_manager.get(id) {
-                            let ser_dashboard = data::Dashboard::from(&layout.dashboard);
-                            let data_layout = data::Layout {
-                                name: layout.id.name.clone(),
-                                dashboard: ser_dashboard,
-                            };
-                            let bundle = data::ConfigBundle::new_layout(
-                                data_layout,
-                                Some(data::BundleMetadata {
-                                    name: layout.id.name.clone(),
-                                    description: None,
-                                    author: None,
-                                }),
-                            );
-                            match bundle.to_json_pretty() {
-                                Ok(json) => {
-                                    let sanitized_filename = layout
-                                        .id
-                                        .name
-                                        .chars()
-                                        .map(|c| {
-                                            if c.is_alphanumeric() || c == '-' || c == '_' {
-                                                c
-                                            } else {
-                                                '_'
-                                            }
-                                        })
-                                        .collect::<String>();
-                                    let filename = format!("layout_{sanitized_filename}.json");
-
-                                    let picked_path = rfd::FileDialog::new()
-                                        .set_title("Export Layout")
-                                        .set_file_name(&filename)
-                                        .add_filter("Hawk Layout (*.json)", &["json"])
-                                        .save_file();
-
-                                    if let Some(path) = picked_path {
-                                        match std::fs::write(&path, &json) {
-                                            Ok(()) => {
-                                                let display_name = path
-                                                    .file_name()
-                                                    .and_then(|n| n.to_str())
-                                                    .unwrap_or(&filename);
-                                                self.notifications.push(Toast::info(format!(
-                                                    "Layout '{}' exported to {display_name}",
-                                                    layout.id.name
-                                                )));
-                                            }
-                                            Err(e) => {
-                                                self.notifications.push(Toast::error(format!(
-                                                    "Failed to save to {}: {e}",
-                                                    path.display()
-                                                )));
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    self.notifications.push(Toast::error(format!(
-                                        "Failed to serialize layout: {e}"
-                                    )));
-                                }
-                            }
-                        }
-                    }
-                    Some(modal::layout_manager::Action::ExportWorkspace) => {
-                        let mut ser_layouts = vec![];
-                        for layout in &self.layout_manager.layouts {
-                            if let Some(l) = self.layout_manager.get(layout.id.unique) {
-                                ser_layouts.push(data::Layout {
-                                    name: l.id.name.clone(),
-                                    dashboard: data::Dashboard::from(&l.dashboard),
-                                });
-                            }
-                        }
-
-                        let ws_bundle = data::WorkspaceBundle {
-                            layouts: ser_layouts,
-                            active_layout: self
-                                .layout_manager
-                                .active_layout_id()
-                                .map(|l| l.name.clone()),
-                            custom_theme: self.theme_editor.custom_theme.clone().map(data::Theme),
-                            timezone: Some(self.timezone),
-                            tickers_table: self.sidebar.state.tickers_table.clone(),
-                            audio_cfg: Some(data::AudioStream::from(&self.audio_stream)),
-                            size_in_quote_ccy: Some(self.volume_size_unit),
-                            default_kline_config: data::chart::kline::user_default_kline_config(),
-                            drawings: Some(data::DrawingStore::all()),
+                    Some(modal::layout_manager::Action::Export) => {
+                        let Some(active_layout_id) = self.layout_manager.active_layout_id() else {
+                            self.notifications
+                                .push(Toast::error("No active layout to export"));
+                            return Task::none();
+                        };
+                        let active_name = active_layout_id.name.clone();
+                        let active_uid = active_layout_id.unique;
+                        let Some(layout) = self.layout_manager.get(active_uid) else {
+                            self.notifications.push(Toast::error("Layout not found"));
+                            return Task::none();
                         };
 
-                        let bundle = data::ConfigBundle::new_workspace(
-                            ws_bundle,
+                        let serialized_dashboard = data::Dashboard::from(&layout.dashboard);
+                        let data_layout = data::Layout {
+                            name: active_name.clone(),
+                            dashboard: serialized_dashboard,
+                        };
+                        let bundle = data::ConfigBundle::new_layout(
+                            data_layout,
                             Some(data::BundleMetadata {
-                                name: "Hawk Workspace".to_string(),
+                                name: active_name.clone(),
                                 description: None,
                                 author: None,
                             }),
                         );
 
                         match bundle.to_json_pretty() {
-                            Ok(json) => {
-                                let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                                let filename = format!("workspace_{timestamp}.json");
-
-                                let picked_path = rfd::FileDialog::new()
-                                    .set_title("Export Workspace")
-                                    .set_file_name(&filename)
-                                    .add_filter("Hawk Workspace (*.json)", &["json"])
-                                    .save_file();
-
-                                if let Some(path) = picked_path {
-                                    match std::fs::write(&path, &json) {
-                                        Ok(()) => {
-                                            let display_name = path
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or(&filename);
-                                            self.notifications.push(Toast::info(format!(
-                                                "Workspace exported to {display_name}",
-                                            )));
-                                        }
-                                        Err(e) => {
-                                            self.notifications.push(Toast::error(format!(
-                                                "Failed to save to {}: {e}",
-                                                path.display()
-                                            )));
-                                        }
-                                    }
+                            Ok(json) => match data::save_layout_to_downloads(&json, &active_name) {
+                                Ok(saved_path) => {
+                                    let filename = saved_path
+                                        .file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("layout.json");
+                                    self.notifications.push(Toast::info(format!(
+                                        "Layout '{active_name}' exported to Downloads ({filename})"
+                                    )));
                                 }
-                            }
-                            Err(e) => {
+                                Err(err) => {
+                                    self.notifications.push(Toast::error(format!(
+                                        "Failed to save layout to Downloads: {err}"
+                                    )));
+                                }
+                            },
+                            Err(err) => {
                                 self.notifications.push(Toast::error(format!(
-                                    "Failed to serialize workspace: {e}"
+                                    "Failed to serialize layout: {err}"
                                 )));
                             }
                         }
                     }
-                    Some(modal::layout_manager::Action::OpenExportsFolder) => {
-                        if let Err(err) = data::open_exports_folder() {
-                            self.notifications.push(Toast::error(format!(
-                                "Failed to open exports folder: {err}"
-                            )));
-                        }
-                    }
-                    Some(modal::layout_manager::Action::ImportFromFile) => {
-                        let picked_path = rfd::FileDialog::new()
-                            .set_title("Import Hawk Layout or Workspace")
-                            .add_filter("Hawk Config (*.json)", &["json"])
-                            .pick_file();
+                    Some(modal::layout_manager::Action::Import) => {
+                        let downloads_dir = data::user_downloads_dir();
+                        let dialog = rfd::FileDialog::new()
+                            .set_title("Import Layout")
+                            .set_directory(&downloads_dir)
+                            .add_filter("Hawk Layout (*.json)", &["json"]);
 
-                        if let Some(path) = picked_path {
+                        if let Some(path) = dialog.pick_file() {
                             match std::fs::read_to_string(&path) {
-                                Err(e) => {
-                                    self.notifications.push(Toast::error(format!(
-                                        "Failed to read {}: {e}",
-                                        path.display()
-                                    )));
-                                }
-                                Ok(text) => match data::ConfigBundle::from_json(&text) {
-                                    Err(e) => {
-                                        self.notifications.push(Toast::error(format!(
-                                            "Invalid layout or workspace JSON: {e}"
-                                        )));
-                                    }
+                                Ok(content) => match data::ConfigBundle::from_json(&content) {
                                     Ok(bundle) => {
                                         return self.apply_imported_bundle(bundle);
                                     }
+                                    Err(err) => {
+                                        self.notifications.push(Toast::error(format!(
+                                            "Failed to parse layout file: {err}"
+                                        )));
+                                    }
                                 },
-                            }
-                        }
-                    }
-                    Some(modal::layout_manager::Action::ImportFromClipboard) => {
-                        match window::read_text_from_clipboard() {
-                            Err(e) => {
-                                self.notifications.push(Toast::error(format!(
-                                    "Failed to read from clipboard: {e}"
-                                )));
-                            }
-                            Ok(text) => match data::ConfigBundle::from_json(&text) {
-                                Err(e) => {
+                                Err(err) => {
                                     self.notifications.push(Toast::error(format!(
-                                        "Invalid layout or workspace JSON: {e}"
+                                        "Failed to read layout file: {err}"
                                     )));
                                 }
-                                Ok(bundle) => {
-                                    return self.apply_imported_bundle(bundle);
-                                }
-                            },
+                            }
                         }
                     }
                     None => {}
@@ -1125,8 +1011,30 @@ impl HawkTerminal {
     }
 
     fn apply_imported_bundle(&mut self, bundle: data::ConfigBundle) -> Task<Message> {
+        fn reset_pane_ids(pane: &mut data::Pane) {
+            match pane {
+                data::Pane::Split { a, b, .. } => {
+                    reset_pane_ids(a);
+                    reset_pane_ids(b);
+                }
+                data::Pane::KlineChart { settings, .. }
+                | data::Pane::HeatmapChart { settings, .. }
+                | data::Pane::ComparisonChart { settings, .. }
+                | data::Pane::TimeAndSales { settings, .. }
+                | data::Pane::Ladder { settings, .. } => {
+                    settings.pane_id = Some(uuid::Uuid::new_v4());
+                }
+                data::Pane::Starter { .. } => {}
+            }
+        }
+
         match bundle.payload {
-            data::BundlePayload::Layout(data_layout) => {
+            data::BundlePayload::Layout(mut data_layout) => {
+                reset_pane_ids(&mut data_layout.dashboard.pane);
+                for (pane, _) in &mut data_layout.dashboard.popout {
+                    reset_pane_ids(pane);
+                }
+
                 let new_uid = uuid::Uuid::new_v4();
                 let unique_name = self
                     .layout_manager
@@ -1175,7 +1083,12 @@ impl HawkTerminal {
                 let mut first_uid = None;
                 let mut active_target_uid = None;
 
-                for data_layout in ws_bundle.layouts {
+                for mut data_layout in ws_bundle.layouts {
+                    reset_pane_ids(&mut data_layout.dashboard.pane);
+                    for (pane, _) in &mut data_layout.dashboard.popout {
+                        reset_pane_ids(pane);
+                    }
+
                     let new_uid = uuid::Uuid::new_v4();
                     if first_uid.is_none() {
                         first_uid = Some(new_uid);
@@ -1218,12 +1131,6 @@ impl HawkTerminal {
                     data::chart::kline::set_user_default_kline_config(kline_cfg);
                 }
 
-                if let Some(drawings) = ws_bundle.drawings {
-                    for rec in drawings {
-                        data::DrawingStore::add(rec.ticker_symbol, rec.drawing);
-                    }
-                }
-
                 self.notifications.push(Toast::info(format!(
                     "Imported {count} layout(s) from workspace"
                 )));
@@ -1250,15 +1157,13 @@ impl HawkTerminal {
                 let settings_modal = {
                     let theme_picklist = {
                         let default_theme = iced_core::Theme::Custom(default_theme().into());
-                        let deeptrades = iced_core::Theme::Custom(
-                            data::config::theme::deeptrades_theme().into(),
-                        );
-                        let flowsurface_classic = iced_core::Theme::Custom(
-                            data::config::theme::flowsurface_legacy_theme().into(),
-                        );
+                        let breez = iced_core::Theme::Custom(breez_theme().into());
+                        let deeptrades = iced_core::Theme::Custom(deeptrades_theme().into());
+                        let flowsurface_classic =
+                            iced_core::Theme::Custom(flowsurface_legacy_theme().into());
 
                         let mut themes: Vec<iced::Theme> =
-                            vec![default_theme, deeptrades, flowsurface_classic];
+                            vec![default_theme, breez, deeptrades, flowsurface_classic];
 
                         if let Some(custom_theme) = &self.theme_editor.custom_theme {
                             themes.push(custom_theme.clone());

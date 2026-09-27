@@ -480,17 +480,24 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
             }
         }
         Message::BoundsChanged(bounds) => {
-            let state = chart.mut_state();
+            let (old_center_x, autoscale, scaling) = {
+                let state = chart.state();
+                (
+                    state.bounds.width / 2.0,
+                    state.layout.autoscale,
+                    state.scaling,
+                )
+            };
 
-            // calculate how center shifted
-            let old_center_x = state.bounds.width / 2.0;
-            let new_center_x = bounds.width / 2.0;
-            let center_delta_x = (new_center_x - old_center_x) / state.scaling;
+            chart.mut_state().bounds = *bounds;
 
-            state.bounds = *bounds;
-
-            if state.layout.autoscale != Some(Autoscale::CenterLatest) {
-                state.translation.x += center_delta_x;
+            if autoscale != Some(Autoscale::CenterLatest) {
+                let new_center_x = bounds.width / 2.0;
+                let center_delta_x = (new_center_x - old_center_x) / scaling;
+                chart.mut_state().translation.x += center_delta_x;
+            } else {
+                let coords = chart.autoscaled_coords();
+                chart.mut_state().translation = coords;
             }
         }
         Message::SplitDragged(split, size) => {
@@ -500,7 +507,10 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
                 *split = (size * 100.0).round() / 100.0;
             }
         }
-        Message::CrosshairMoved => return chart.invalidate_crosshair(),
+        Message::CrosshairMoved => {
+            chart.invalidate_crosshair();
+            return;
+        }
         Message::MergeSessions(_, _)
         | Message::SplitCluster(_)
         | Message::ToggleSplitBrackets(_)

@@ -50,6 +50,9 @@ const DEFAULT_CELL_WIDTH: f32 = 3.0;
 const TOOLTIP_WIDTH: f32 = 198.0;
 const TOOLTIP_HEIGHT: f32 = 66.0;
 
+const DEPTH_ORDER_TOLERANCE: f32 = 0.03;
+const DEPTH_RETENTION_WINDOW_MS: u64 = 7_200_000; // 2 hours
+
 /// Format filter value for display in input field
 fn format_filter_value(value: f32) -> String {
     if value == 0.0 {
@@ -189,6 +192,8 @@ pub struct HeatmapChart {
     last_camera_update: Instant,
     /// Target price for smooth camera following
     camera_target_price: f32,
+    /// Last time historical depth sliding window cleanup was executed
+    last_depth_cleanup: Instant,
 }
 
 impl HeatmapChart {
@@ -210,7 +215,7 @@ impl HeatmapChart {
             });
         }
 
-        let heatmap = HistoricalDepth::new(ticker_info.min_qty.into(), step, basis);
+        let heatmap = HistoricalDepth::new(DEPTH_ORDER_TOLERANCE, step, basis);
 
         let view_state = ViewState::new(
             basis,
@@ -243,6 +248,7 @@ impl HeatmapChart {
             order_size_input,
             last_camera_update: Instant::now(),
             camera_target_price: 0.0,
+            last_depth_cleanup: Instant::now(),
         }
     }
 
@@ -275,13 +281,21 @@ impl HeatmapChart {
                 self.process_datapoint(&trades, time, &depth);
             }
         } else {
-            self.cleanup_old_data();
+            self.cleanup_old_data(depth_update_t);
         }
 
         self.process_datapoint(trades_buffer, depth_update_t, &depth);
     }
 
-    fn cleanup_old_data(&mut self) {
+    fn cleanup_old_data(&mut self, current_time: u64) {
+        if self.last_depth_cleanup.elapsed().as_secs() >= 60
+            && current_time > DEPTH_RETENTION_WINDOW_MS
+        {
+            self.last_depth_cleanup = Instant::now();
+            let oldest_depth_time = current_time.saturating_sub(DEPTH_RETENTION_WINDOW_MS);
+            self.heatmap.cleanup_old_price_levels(oldest_depth_time);
+        }
+
         if self.trades.datapoints.len() > CLEANUP_THRESHOLD {
             let keys_to_remove = self
                 .trades
@@ -421,11 +435,7 @@ impl HeatmapChart {
         self.chart.basis = basis;
 
         self.trades.datapoints.clear();
-        self.heatmap = HistoricalDepth::new(
-            self.chart.ticker_info.min_qty.into(),
-            self.chart.tick_size,
-            basis,
-        );
+        self.heatmap = HistoricalDepth::new(DEPTH_ORDER_TOLERANCE, self.chart.tick_size, basis);
 
         let chart = &mut self.chart;
         chart.translation = Vector::new(
@@ -487,7 +497,7 @@ impl HeatmapChart {
         chart_state.decimals = count_decimals(new_tick_size);
 
         self.trades.datapoints.clear();
-        self.heatmap = HistoricalDepth::new(self.chart.ticker_info.min_qty.into(), step, basis);
+        self.heatmap = HistoricalDepth::new(DEPTH_ORDER_TOLERANCE, step, basis);
     }
 
     pub fn tick_size(&self) -> f32 {
@@ -511,7 +521,7 @@ impl HeatmapChart {
         if chart.layout.autoscale.is_some() {
             chart.translation = Vector::new(
                 0.5 * (chart.bounds.width / chart.scaling) - (90.0 / chart.scaling),
-                0.0,
+                chart.translation.y,
             );
         }
 
@@ -616,6 +626,12 @@ impl canvas::Program<Message> for HeatmapChart {
 
             let volume_indicator = self.indicators[HeatmapIndicator::Volume].is_some();
 
+            let (symbol_str, _) = chart.ticker_info.ticker.to_full_symbol_and_type();
+            let volume_threshold = calculate_large_volume_threshold(&symbol_str, max_depth_qty);
+
+            let vis_left = region.x;
+            let vis_right = region.x + region.width;
+
             if let Some(merge_strat) = self.visual_config().coalescing {
                 let coalesced_visual_runs = self.heatmap.coalesced_runs(
                     earliest,
@@ -637,19 +653,26 @@ impl canvas::Program<Message> for HeatmapChart {
                         continue;
                     }
 
-                    let start_x = chart.interval_to_x(run_start_time_clipped);
+                    let start_x = chart.interval_to_x(run_start_time_clipped).min(0.0);
                     let end_x = chart.interval_to_x(run_until_time_clipped).min(0.0);
 
                     let width = end_x - start_x;
 
-                    if width > 0.001 {
-                        let color_alpha = (visual_run.qty() / max_depth_qty).min(1.0);
+                    if width >= 0.5 && end_x >= vis_left && start_x <= vis_right {
+                        let ratio = if volume_threshold > 0.0 && visual_run.qty() > 0.0 {
+                            (visual_run.qty() / volume_threshold).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        };
 
-                        frame.fill_rectangle(
-                            Point::new(start_x, y_position - (cell_height / 2.0)),
-                            Size::new(width, cell_height),
-                            depth_color(palette, visual_run.is_bid, color_alpha),
-                        );
+                        let (color, alpha) = heatmap_run_color(palette, visual_run.is_bid, ratio);
+                        if alpha >= 0.03 {
+                            frame.fill_rectangle(
+                                Point::new(start_x, y_position - (cell_height / 2.0)),
+                                Size::new(width, cell_height),
+                                color.scale_alpha(alpha),
+                            );
+                        }
                     }
                 }
             } else {
@@ -668,36 +691,53 @@ impl canvas::Program<Message> for HeatmapChart {
                                 order_size > self.visual_config.order_size_filter
                             })
                             .for_each(|run| {
-                                let start_x = chart.interval_to_x(run.start_time.max(earliest));
+                                let start_x =
+                                    chart.interval_to_x(run.start_time.max(earliest)).min(0.0);
                                 let end_x =
                                     chart.interval_to_x(run.until_time.min(latest)).min(0.0);
 
                                 let width = end_x - start_x;
 
-                                let color_alpha = (run.qty() / max_depth_qty).min(1.0);
+                                if width >= 0.5 && end_x >= vis_left && start_x <= vis_right {
+                                    let ratio = if volume_threshold > 0.0 && run.qty() > 0.0 {
+                                        (run.qty() / volume_threshold).clamp(0.0, 1.0)
+                                    } else {
+                                        0.0
+                                    };
 
-                                frame.fill_rectangle(
-                                    Point::new(start_x, y_position - (cell_height / 2.0)),
-                                    Size::new(width, cell_height),
-                                    depth_color(palette, run.is_bid, color_alpha),
-                                );
+                                    let (color, alpha) =
+                                        heatmap_run_color(palette, run.is_bid, ratio);
+                                    if alpha >= 0.03 {
+                                        frame.fill_rectangle(
+                                            Point::new(start_x, y_position - (cell_height / 2.0)),
+                                            Size::new(width, cell_height),
+                                            color.scale_alpha(alpha),
+                                        );
+                                    }
+                                }
                             });
                     });
             }
 
-            if let Some(latest_timestamp) = self.trades.latest_timestamp() {
+            let latest_depth_timestamp = if chart.latest_x > 0 {
+                chart.latest_x
+            } else {
+                self.trades.latest_timestamp().unwrap_or(0)
+            };
+
+            if latest_depth_timestamp > 0 {
                 let max_qty = self
                     .heatmap
-                    .latest_order_runs(highest, lowest, latest_timestamp)
+                    .latest_order_runs(highest, lowest, latest_depth_timestamp)
                     .map(|(_, run)| run.qty())
-                    .fold(f32::MIN, f32::max)
+                    .fold(0.0f32, f32::max)
                     .ceil()
                     * 5.0
                     / 5.0;
 
-                if !max_qty.is_infinite() {
+                if max_qty > 0.0 && !max_qty.is_nan() && !max_qty.is_infinite() {
                     self.heatmap
-                        .latest_order_runs(highest, lowest, latest_timestamp)
+                        .latest_order_runs(highest, lowest, latest_depth_timestamp)
                         .for_each(|(price, run)| {
                             let y_position = chart.price_to_y(*price);
                             let bar_width = (run.qty() / max_qty) * 50.0;
@@ -1027,6 +1067,48 @@ impl canvas::Program<Message> for HeatmapChart {
     }
 }
 
+pub fn calculate_large_volume_threshold(symbol_str: &str, max_depth_qty: f32) -> f32 {
+    let is_btc = symbol_str.to_uppercase().starts_with("BTC");
+    if is_btc {
+        100.0f32.min(max_depth_qty.max(10.0))
+    } else {
+        (max_depth_qty * 0.70).max(0.001)
+    }
+}
+
+pub fn heatmap_run_color(palette: &Extended, is_bid: bool, ratio: f32) -> (Color, f32) {
+    let clamped_ratio = ratio.clamp(0.0, 1.0);
+    let curve = clamped_ratio.powf(1.8);
+    let alpha = (curve * 0.96 + 0.04).min(1.0);
+
+    let (base_color, highlight_color) = if is_bid {
+        (palette.success.base.color, palette.success.strong.color)
+    } else {
+        (palette.danger.base.color, palette.danger.strong.color)
+    };
+
+    let dark_color = lerp_color(palette.background.base.color, base_color, 0.08);
+
+    let color = if clamped_ratio >= 0.70 {
+        let t = ((clamped_ratio - 0.70) / 0.30).clamp(0.0, 1.0);
+        lerp_color(base_color, highlight_color, t)
+    } else {
+        let t = (clamped_ratio / 0.70).clamp(0.0, 1.0).powf(1.5);
+        lerp_color(dark_color, base_color, t)
+    };
+
+    (color, alpha)
+}
+
+fn lerp_color(c1: Color, c2: Color, t: f32) -> Color {
+    Color {
+        r: c1.r + (c2.r - c1.r) * t,
+        g: c1.g + (c2.g - c1.g) * t,
+        b: c1.b + (c2.b - c1.b) * t,
+        a: 1.0,
+    }
+}
+
 fn depth_color(palette: &Extended, is_bid: bool, alpha: f32) -> Color {
     if is_bid {
         palette.success.strong.color.scale_alpha(alpha)
@@ -1151,5 +1233,53 @@ fn draw_volume_profile(
             font: style::AZERET_MONO,
             ..canvas::Text::default()
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_btc_large_volume_threshold_anchor() {
+        // For Bitcoin, 100.0 is the benchmark for large volume.
+        let threshold = calculate_large_volume_threshold("BTCUSDT", 250.0);
+        assert_eq!(threshold, 100.0);
+
+        // When max depth is smaller (e.g. 40.0), it scales with max but never drops below 10.0
+        let threshold_low = calculate_large_volume_threshold("BTCUSDT", 40.0);
+        assert_eq!(threshold_low, 40.0);
+    }
+
+    #[test]
+    fn test_altcoin_large_volume_threshold() {
+        // For other coins, 70% of max depth triggers the large order highlight
+        let threshold = calculate_large_volume_threshold("ETHUSDT", 1000.0);
+        assert!((threshold - 700.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_heatmap_contrast_and_highlighting() {
+        let theme = iced::Theme::Dark;
+        let palette = theme.extended_palette();
+
+        // Low volume (ratio = 0.05): low alpha, significantly darkened tone compared to base color
+        let (color_low, alpha_low) = heatmap_run_color(palette, true, 0.05);
+        assert!(alpha_low < 0.06);
+        assert!(color_low.g < palette.success.base.color.g * 0.5);
+
+        // High volume (ratio >= 1.0): alpha = 1.0, highlight color from palette
+        let (color_high, alpha_high) = heatmap_run_color(palette, true, 1.0);
+        assert_eq!(alpha_high, 1.0);
+        assert_eq!(color_high, palette.success.strong.color);
+
+        // Sell side high volume: highlight danger color from palette
+        let (color_ask, alpha_ask) = heatmap_run_color(palette, false, 1.0);
+        assert_eq!(alpha_ask, 1.0);
+        assert_eq!(color_ask, palette.danger.strong.color);
+
+        // Sell side low volume: significantly darker than base danger color
+        let (color_ask_low, _) = heatmap_run_color(palette, false, 0.05);
+        assert!(color_ask_low.r < palette.danger.base.color.r * 0.5);
     }
 }

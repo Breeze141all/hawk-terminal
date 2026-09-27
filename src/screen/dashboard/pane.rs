@@ -46,6 +46,24 @@ pub enum Effect {
     FocusWidget(iced::widget::Id),
     TakeScreenshot(window::Id),
     AutofillJournal(data::journal::PositionAutofill),
+    SyncDrawing {
+        symbol: String,
+        drawing: data::chart::drawing::Drawing,
+        originating_pane_id: uuid::Uuid,
+    },
+    UnsyncDrawing {
+        symbol: String,
+        drawing_id: uuid::Uuid,
+        originating_pane_id: uuid::Uuid,
+    },
+    DeleteSyncedDrawing {
+        symbol: String,
+        drawing_id: uuid::Uuid,
+    },
+    ClearSyncedDrawings {
+        symbol: String,
+        drawing_ids: Vec<uuid::Uuid>,
+    },
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -165,7 +183,9 @@ impl State {
         settings: Settings,
         link_group: Option<LinkGroup>,
     ) -> Self {
+        let id = settings.pane_id.unwrap_or_else(uuid::Uuid::new_v4);
         Self {
+            id,
             content,
             settings,
             streams: ResolvedStream::Waiting(streams),
@@ -254,6 +274,7 @@ impl State {
                         derived_plan.ticker_info,
                         &self.settings,
                         derived_plan.tick_size,
+                        self.id,
                     );
 
                     let streams = by_basis_default(
@@ -279,6 +300,7 @@ impl State {
                             derived_plan.ticker_info,
                             &self.settings,
                             base_ticker.min_ticksize.into(),
+                            self.id,
                         )
                     };
 
@@ -310,6 +332,7 @@ impl State {
                             derived_plan.ticker_info,
                             &self.settings,
                             base_ticker.min_ticksize.into(),
+                            self.id,
                         )
                     };
 
@@ -528,7 +551,7 @@ impl State {
                     chart.drawings = if !existing_drawings.is_empty() {
                         existing_drawings
                     } else {
-                        data::DrawingStore::for_symbol(&symbol)
+                        data::DrawingStore::for_symbol_and_pane(&symbol, self.id)
                     };
                 }
             }
@@ -1259,6 +1282,9 @@ impl State {
                     }
                     chart::Message::AddDrawing(drawing) => {
                         let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        let mut drawing = drawing.clone();
+                        drawing.pane_id = Some(self.id);
+                        drawing.is_synced = false;
                         c.add_drawing(drawing.clone());
                         data::DrawingStore::add(&symbol, drawing.clone());
                     }
@@ -1266,17 +1292,48 @@ impl State {
                         let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                         c.update_drawing(drawing.clone());
                         data::DrawingStore::update(&symbol, drawing.clone());
+                        if drawing.is_synced {
+                            return Some(Effect::SyncDrawing {
+                                symbol,
+                                drawing: drawing.clone(),
+                                originating_pane_id: self.id,
+                            });
+                        }
                     }
                     chart::Message::DeleteDrawing(id) => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        let was_synced = c
+                            .drawings
+                            .iter()
+                            .find(|d| d.id == *id)
+                            .is_some_and(|d| d.is_synced);
                         c.delete_drawing(*id);
                         data::DrawingStore::remove(*id);
                         self.selected_drawing_show_settings = false;
+                        if was_synced {
+                            return Some(Effect::DeleteSyncedDrawing {
+                                symbol,
+                                drawing_id: *id,
+                            });
+                        }
                     }
                     chart::Message::ClearDrawings => {
                         let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        let cleared_synced_ids: Vec<uuid::Uuid> = c
+                            .drawings
+                            .iter()
+                            .filter(|d| !d.is_locked && d.is_synced)
+                            .map(|d| d.id)
+                            .collect();
                         c.clear_drawings();
-                        data::DrawingStore::clear_for_symbol(&symbol);
+                        data::DrawingStore::clear_for_symbol_and_pane(&symbol, self.id);
                         self.selected_drawing_show_settings = false;
+                        if !cleared_synced_ids.is_empty() {
+                            return Some(Effect::ClearSyncedDrawings {
+                                symbol,
+                                drawing_ids: cleared_synced_ids,
+                            });
+                        }
                     }
                     chart::Message::SelectDrawing(id) => {
                         c.set_selected_drawing(*id);
@@ -1502,6 +1559,8 @@ impl State {
                                                     )) = action
                                                     {
                                                         effect = Some(Effect::RequestFetch(fetch));
+                                                    } else {
+                                                        effect = Some(Effect::RefreshStreams);
                                                     }
                                                 }
                                                 Basis::Tick(_) => {
@@ -1549,9 +1608,12 @@ impl State {
                                             if let Some(chart::Action::RequestFetch(fetch)) = action
                                             {
                                                 effect = Some(Effect::RequestFetch(fetch));
+                                            } else {
+                                                effect = Some(Effect::RefreshStreams);
                                             }
                                         }
                                     }
+
                                     _ => {}
                                 }
                             }
@@ -1644,9 +1706,21 @@ impl State {
             Event::ClearDrawings => {
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
                     let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                    let cleared_synced_ids: Vec<uuid::Uuid> = c
+                        .drawings
+                        .iter()
+                        .filter(|d| !d.is_locked && d.is_synced)
+                        .map(|d| d.id)
+                        .collect();
                     c.clear_drawings();
-                    data::DrawingStore::clear_for_symbol(&symbol);
+                    data::DrawingStore::clear_for_symbol_and_pane(&symbol, self.id);
                     self.selected_drawing_show_settings = false;
+                    if !cleared_synced_ids.is_empty() {
+                        return Some(Effect::ClearSyncedDrawings {
+                            symbol,
+                            drawing_ids: cleared_synced_ids,
+                        });
+                    }
                 }
             }
             Event::DrawingToolbarMoved(pos) => {
@@ -1666,44 +1740,125 @@ impl State {
                             c.toggle_selected_drawing_lock();
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
+                            }
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleSync => {
+                            c.toggle_selected_drawing_sync(self.id);
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                } else {
+                                    return Some(Effect::UnsyncDrawing {
+                                        symbol,
+                                        drawing_id: d.id,
+                                        originating_pane_id: self.id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::Delete => {
                             if let Some(d) = c.selected_drawing() {
                                 let id = d.id;
+                                let was_synced = d.is_synced;
                                 c.delete_drawing(id);
                                 data::DrawingStore::remove(id);
                                 self.selected_drawing_show_settings = false;
+                                if was_synced {
+                                    return Some(Effect::DeleteSyncedDrawing {
+                                        symbol,
+                                        drawing_id: id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetColor(color) => {
                             c.update_selected_drawing_color(color);
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetWidth(w) => {
                             c.update_selected_drawing_width(w);
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionProfitColor(color) => {
                             c.update_selected_position_profit_color(color);
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionStopColor(color) => {
                             c.update_selected_position_stop_color(color);
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionEntryColor(color) => {
                             c.update_selected_position_entry_color(color);
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
+                            }
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::TogglePositionPricePath => {
+                            c.toggle_selected_position_price_path();
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::AutofillJournal => {
@@ -2461,7 +2616,7 @@ impl State {
             Content::Comparison(_) => Some(1000),
             Content::Heatmap { chart, .. } => {
                 if let Some(chart) = chart {
-                    chart.basis_interval()
+                    chart.basis_interval().map(|ms| ms.clamp(100, 1000))
                 } else {
                     None
                 }
@@ -2621,6 +2776,7 @@ impl Content {
         ticker_info: TickerInfo,
         settings: &Settings,
         tick_size: f32,
+        pane_id: uuid::Uuid,
     ) -> Self {
         let (prev_indis, prev_layout, prev_kind_opt, prev_config) = if let Content::Kline {
             chart,
@@ -2751,7 +2907,7 @@ impl Content {
         );
         let symbol = ticker_info.ticker.display_symbol_and_type().0;
         chart.alerts = data::AlertStore::for_symbol(&symbol);
-        chart.drawings = data::DrawingStore::for_symbol(&symbol);
+        chart.drawings = data::DrawingStore::for_symbol_and_pane(&symbol, pane_id);
 
         Content::Kline {
             chart: Some(chart),

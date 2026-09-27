@@ -10,6 +10,10 @@ pub struct Drawing {
     pub is_selected: bool,
     #[serde(default)]
     pub is_locked: bool,
+    #[serde(default)]
+    pub is_synced: bool,
+    #[serde(default)]
+    pub pane_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -31,37 +35,58 @@ pub enum DrawingKind {
         target_price: f32,
         is_long: bool,
         #[serde(default)]
+        end_time: Option<u64>,
+        #[serde(default)]
         style: Option<PositionStyle>,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PositionStyle {
-    pub profit_color: [f32; 4],
-    pub stop_color: [f32; 4],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profit_color: Option<[f32; 4]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_color: Option<[f32; 4]>,
     #[serde(default = "default_entry_color")]
     pub entry_color: [f32; 4],
+    #[serde(default = "default_true")]
+    pub show_price_path: bool,
 }
 
 pub fn default_profit_color() -> [f32; 4] {
-    [0.12, 0.78, 0.42, 0.2]
+    [0.12, 0.78, 0.42, 0.1]
 }
 
 pub fn default_stop_color() -> [f32; 4] {
-    [0.88, 0.24, 0.24, 0.2]
+    [0.88, 0.24, 0.24, 0.1]
 }
 
 pub fn default_entry_color() -> [f32; 4] {
     [0.85, 0.9, 0.95, 0.9]
 }
 
+pub fn default_true() -> bool {
+    true
+}
+
 impl Default for PositionStyle {
     fn default() -> Self {
         Self {
-            profit_color: default_profit_color(),
-            stop_color: default_stop_color(),
+            profit_color: None,
+            stop_color: None,
             entry_color: default_entry_color(),
+            show_price_path: true,
         }
+    }
+}
+
+impl PositionStyle {
+    pub fn resolved_profit_color(&self, fallback: [f32; 4]) -> [f32; 4] {
+        self.profit_color.unwrap_or(fallback)
+    }
+
+    pub fn resolved_stop_color(&self, fallback: [f32; 4]) -> [f32; 4] {
+        self.stop_color.unwrap_or(fallback)
     }
 }
 
@@ -102,6 +127,8 @@ impl Drawing {
             width,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         }
     }
 
@@ -113,6 +140,8 @@ impl Drawing {
             width,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         }
     }
 
@@ -124,6 +153,8 @@ impl Drawing {
             width,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         }
     }
 
@@ -135,6 +166,8 @@ impl Drawing {
             width,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         }
     }
 
@@ -146,6 +179,8 @@ impl Drawing {
             width,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         }
     }
 
@@ -154,6 +189,7 @@ impl Drawing {
         stop_price: f32,
         target_price: f32,
         is_long: bool,
+        end_time: Option<u64>,
         color: [f32; 4],
         width: f32,
     ) -> Self {
@@ -164,12 +200,15 @@ impl Drawing {
                 stop_price,
                 target_price,
                 is_long,
+                end_time,
                 style: Some(PositionStyle::default()),
             },
             color,
             width,
             is_selected: false,
             is_locked: false,
+            is_synced: false,
+            pane_id: None,
         }
     }
 
@@ -207,12 +246,16 @@ impl Drawing {
                 entry,
                 stop_price,
                 target_price,
+                end_time,
                 ..
             } => {
                 entry.0 = shift_time(entry.0);
                 entry.1 = shift_price(entry.1);
                 *stop_price = shift_price(*stop_price);
                 *target_price = shift_price(*target_price);
+                if let Some(et) = end_time {
+                    *et = shift_time(*et);
+                }
             }
         }
     }
@@ -229,8 +272,17 @@ impl Drawing {
                 entry,
                 stop_price,
                 target_price,
+                end_time,
                 ..
-            } => vec![*entry, (entry.0, *target_price), (entry.0, *stop_price)],
+            } => {
+                let et = end_time.unwrap_or(entry.0);
+                vec![
+                    *entry,
+                    (entry.0, *target_price),
+                    (entry.0, *stop_price),
+                    (et, entry.1),
+                ]
+            }
         }
     }
 
@@ -241,7 +293,7 @@ impl Drawing {
         }
     }
 
-    pub fn set_position_profit_color(&mut self, color: [f32; 4]) {
+    pub fn set_position_profit_color(&mut self, color: Option<[f32; 4]>) {
         if let DrawingKind::Position { ref mut style, .. } = self.kind {
             let mut s = style.unwrap_or_default();
             s.profit_color = color;
@@ -249,7 +301,7 @@ impl Drawing {
         }
     }
 
-    pub fn set_position_stop_color(&mut self, color: [f32; 4]) {
+    pub fn set_position_stop_color(&mut self, color: Option<[f32; 4]>) {
         if let DrawingKind::Position { ref mut style, .. } = self.kind {
             let mut s = style.unwrap_or_default();
             s.stop_color = color;
@@ -261,6 +313,14 @@ impl Drawing {
         if let DrawingKind::Position { ref mut style, .. } = self.kind {
             let mut s = style.unwrap_or_default();
             s.entry_color = color;
+            *style = Some(s);
+        }
+    }
+
+    pub fn set_position_show_price_path(&mut self, show: bool) {
+        if let DrawingKind::Position { ref mut style, .. } = self.kind {
+            let mut s = style.unwrap_or_default();
+            s.show_price_path = show;
             *style = Some(s);
         }
     }
@@ -292,6 +352,24 @@ impl DrawingStore {
             .unwrap()
             .iter()
             .filter(|r| r.ticker_symbol == symbol)
+            .map(|r| r.drawing.clone())
+            .collect()
+    }
+
+    /// Retrieve drawings for a specific ticker symbol visible to a given pane.
+    /// Returns drawings that are synced to all charts, drawings specific to this pane,
+    /// or legacy drawings that have no pane_id assigned yet.
+    pub fn for_symbol_and_pane(symbol: &str, pane_id: uuid::Uuid) -> Vec<Drawing> {
+        GLOBAL_DRAWINGS
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.ticker_symbol == symbol
+                    && (r.drawing.is_synced
+                        || r.drawing.pane_id == Some(pane_id)
+                        || r.drawing.pane_id.is_none())
+            })
             .map(|r| r.drawing.clone())
             .collect()
     }
@@ -339,6 +417,25 @@ impl DrawingStore {
         let _ = crate::save_drawings(&drawings);
     }
 
+    /// Clear unlocked drawings for a specific symbol visible to a given pane.
+    /// Drawings belonging exclusively to another pane remain untouched.
+    pub fn clear_for_symbol_and_pane(symbol: &str, pane_id: uuid::Uuid) {
+        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
+        drawings.retain(|r| {
+            if r.ticker_symbol != symbol || r.drawing.is_locked {
+                return true;
+            }
+            if !r.drawing.is_synced
+                && r.drawing.pane_id.is_some()
+                && r.drawing.pane_id != Some(pane_id)
+            {
+                return true;
+            }
+            false
+        });
+        let _ = crate::save_drawings(&drawings);
+    }
+
     /// Force save all drawings to disk
     pub fn save() {
         let drawings = GLOBAL_DRAWINGS.read().unwrap();
@@ -375,10 +472,12 @@ mod tests {
             49000.0,
             53000.0,
             true,
+            Some(200),
             [0.0, 1.0, 0.0, 1.0],
             1.0,
         );
         assert!(matches!(pos.kind, DrawingKind::Position { .. }));
+        assert_eq!(pos.handles().len(), 4);
     }
 
     #[test]
@@ -390,6 +489,26 @@ mod tests {
             assert_eq!(p2, (250, 25.0));
         } else {
             panic!("Expected Trendline");
+        }
+
+        let mut p = Drawing::position(
+            (100, 50000.0),
+            49000.0,
+            53000.0,
+            true,
+            Some(200),
+            [0.0, 1.0, 0.0, 1.0],
+            1.0,
+        );
+        p.translate(50, 5.0);
+        if let DrawingKind::Position {
+            entry, end_time, ..
+        } = p.kind
+        {
+            assert_eq!(entry, (150, 50005.0));
+            assert_eq!(end_time, Some(250));
+        } else {
+            panic!("Expected Position");
         }
     }
 
@@ -416,28 +535,57 @@ mod tests {
             49000.0,
             53000.0,
             true,
+            Some(2000),
             [0.2, 0.8, 0.4, 1.0],
             1.5,
         );
-        pos.set_position_profit_color([0.1, 0.9, 0.5, 0.4]);
-        pos.set_position_stop_color([0.9, 0.2, 0.1, 0.5]);
+        pos.set_position_profit_color(Some([0.1, 0.9, 0.5, 0.4]));
+        pos.set_position_stop_color(Some([0.9, 0.2, 0.1, 0.5]));
         let serialized = serde_json::to_string(&pos).unwrap();
         let deserialized: Drawing = serde_json::from_str(&serialized).unwrap();
         assert_eq!(pos, deserialized);
         assert_eq!(
             deserialized.position_style().profit_color,
-            [0.1, 0.9, 0.5, 0.4]
+            Some([0.1, 0.9, 0.5, 0.4])
         );
         assert_eq!(
             deserialized.position_style().stop_color,
-            [0.9, 0.2, 0.1, 0.5]
+            Some([0.9, 0.2, 0.1, 0.5])
         );
+        assert!(deserialized.position_style().show_price_path);
 
-        // 2. Backward compatibility: legacy Position JSON without style
+        // 2. Backward compatibility: legacy Position JSON without style and without end_time
         let legacy_json = r#"{"id":"11111111-1111-1111-1111-111111111111","kind":{"Position":{"entry":[1000,50000.0],"stop_price":49000.0,"target_price":53000.0,"is_long":true}},"color":[0.2,0.8,0.4,1.0],"width":1.0,"is_selected":false,"is_locked":false}"#;
         let leg_pos: Drawing = serde_json::from_str(legacy_json).unwrap();
         let style = leg_pos.position_style();
         assert_eq!(style, PositionStyle::default());
+        assert_eq!(style.profit_color, None);
+        assert_eq!(style.stop_color, None);
+        assert_eq!(
+            style.resolved_profit_color(default_profit_color()),
+            [0.12, 0.78, 0.42, 0.1]
+        );
+        assert_eq!(
+            style.resolved_stop_color(default_stop_color()),
+            [0.88, 0.24, 0.24, 0.1]
+        );
+        if let DrawingKind::Position { end_time, .. } = leg_pos.kind {
+            assert_eq!(end_time, None);
+        } else {
+            panic!("Expected Position");
+        }
+
+        // 3. Backward compatibility: legacy Position with explicit profit_color and stop_color array
+        let legacy_colored = r#"{"id":"11111111-1111-1111-1111-111111111111","kind":{"Position":{"entry":[1000,50000.0],"stop_price":49000.0,"target_price":53000.0,"is_long":true,"style":{"profit_color":[0.12,0.78,0.42,0.2],"stop_color":[0.88,0.24,0.24,0.2],"entry_color":[0.85,0.9,0.95,0.9],"show_price_path":true}}},"color":[0.2,0.8,0.4,1.0],"width":1.0,"is_selected":false,"is_locked":false}"#;
+        let leg_colored_pos: Drawing = serde_json::from_str(legacy_colored).unwrap();
+        assert_eq!(
+            leg_colored_pos.position_style().profit_color,
+            Some([0.12, 0.78, 0.42, 0.2])
+        );
+        assert_eq!(
+            leg_colored_pos.position_style().stop_color,
+            Some([0.88, 0.24, 0.24, 0.2])
+        );
     }
 
     #[test]
@@ -478,5 +626,56 @@ mod tests {
         // Remove locked drawing directly
         DrawingStore::remove(id2);
         assert!(DrawingStore::for_symbol(sym).is_empty());
+    }
+
+    #[test]
+    fn test_drawing_pane_isolation_and_sync() {
+        let sym = "TEST_PANE_SYM";
+        let pane_1 = uuid::Uuid::new_v4();
+        let pane_2 = uuid::Uuid::new_v4();
+
+        // 1. Drawing created on pane 1 is unsynced by default
+        let mut d1 = Drawing::horizontal(100.0, [1.0, 0.0, 0.0, 1.0], 1.0);
+        d1.pane_id = Some(pane_1);
+        d1.is_synced = false;
+        let id1 = d1.id;
+        DrawingStore::add(sym, d1.clone());
+
+        // Pane 1 can see it
+        let for_p1 = DrawingStore::for_symbol_and_pane(sym, pane_1);
+        assert_eq!(for_p1.len(), 1);
+        assert_eq!(for_p1[0].id, id1);
+
+        // Pane 2 cannot see it
+        let for_p2 = DrawingStore::for_symbol_and_pane(sym, pane_2);
+        assert_eq!(for_p2.len(), 0);
+
+        // 2. Toggle sync to true on d1
+        d1.is_synced = true;
+        DrawingStore::update(sym, d1.clone());
+
+        // Now both panes see it
+        assert_eq!(DrawingStore::for_symbol_and_pane(sym, pane_1).len(), 1);
+        assert_eq!(DrawingStore::for_symbol_and_pane(sym, pane_2).len(), 1);
+
+        // 3. Add unsynced drawing on pane 2
+        let mut d2 = Drawing::trendline((10, 10.0), (20, 20.0), [0.0, 1.0, 0.0, 1.0], 1.0);
+        d2.pane_id = Some(pane_2);
+        d2.is_synced = false;
+        let id2 = d2.id;
+        DrawingStore::add(sym, d2);
+
+        // Pane 1 sees synced d1 only (len = 1)
+        assert_eq!(DrawingStore::for_symbol_and_pane(sym, pane_1).len(), 1);
+        // Pane 2 sees synced d1 AND its local d2 (len = 2)
+        assert_eq!(DrawingStore::for_symbol_and_pane(sym, pane_2).len(), 2);
+
+        // 4. Clearing on pane 2 removes d2 and synced d1, but preserves pane 1 if pane 1 had its own local
+        DrawingStore::clear_for_symbol_and_pane(sym, pane_2);
+        assert_eq!(DrawingStore::for_symbol_and_pane(sym, pane_2).len(), 0);
+
+        // Cleanup
+        DrawingStore::remove(id1);
+        DrawingStore::remove(id2);
     }
 }

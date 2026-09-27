@@ -78,6 +78,12 @@ pub struct JournalEntry {
     pub notes: String,
     #[serde(default)]
     pub images: Vec<String>,
+    #[serde(default)]
+    pub stop_price: Option<f64>,
+    #[serde(default)]
+    pub target_price: Option<f64>,
+    #[serde(default)]
+    pub drawing_id: Option<Uuid>,
 }
 
 impl JournalEntry {
@@ -109,12 +115,54 @@ impl JournalEntry {
             setup_tag,
             notes,
             images: Vec::new(),
+            stop_price: None,
+            target_price: None,
+            drawing_id: None,
         }
     }
 
     pub fn with_images(mut self, images: Vec<String>) -> Self {
         self.images = images;
         self
+    }
+
+    pub fn with_targets(mut self, stop_price: Option<f64>, target_price: Option<f64>) -> Self {
+        self.stop_price = stop_price;
+        self.target_price = target_price;
+        self
+    }
+
+    pub fn with_drawing_id(mut self, drawing_id: Option<Uuid>) -> Self {
+        self.drawing_id = drawing_id;
+        self
+    }
+
+    pub fn planned_rr(&self) -> Option<f64> {
+        let (Some(sl), Some(tp)) = (self.stop_price, self.target_price) else {
+            return None;
+        };
+        let risk = (self.entry_price - sl).abs();
+        let reward = (tp - self.entry_price).abs();
+        if risk > 1e-6 {
+            Some(reward / risk)
+        } else {
+            None
+        }
+    }
+
+    pub fn realized_rr(&self) -> Option<f64> {
+        let (Some(exit), Some(sl)) = (self.exit_price, self.stop_price) else {
+            return None;
+        };
+        let risk = (self.entry_price - sl).abs();
+        if risk <= 1e-6 {
+            return None;
+        }
+        let diff = match self.side {
+            TradeSide::Long => exit - self.entry_price,
+            TradeSide::Short => self.entry_price - exit,
+        };
+        Some(diff / risk)
     }
 
     pub fn close(&mut self, exit_price: f64, close_fee: f64) {
@@ -152,6 +200,14 @@ pub struct PositionAutofill {
     pub stop_price: f64,
     pub target_price: f64,
     pub timestamp_open: u64,
+    #[serde(default)]
+    pub timestamp_close: Option<u64>,
+    #[serde(default)]
+    pub exit_price: Option<f64>,
+    #[serde(default)]
+    pub is_closed: bool,
+    #[serde(default)]
+    pub drawing_id: Option<Uuid>,
     pub notes: String,
 }
 
@@ -164,6 +220,34 @@ impl PositionAutofill {
         stop_price: f64,
         target_price: f64,
         timestamp_open: u64,
+    ) -> Self {
+        Self::with_outcome(
+            ticker,
+            exchange,
+            side,
+            entry_price,
+            stop_price,
+            target_price,
+            timestamp_open,
+            None,
+            None,
+            false,
+            None,
+        )
+    }
+
+    pub fn with_outcome(
+        ticker: String,
+        exchange: String,
+        side: TradeSide,
+        entry_price: f64,
+        stop_price: f64,
+        target_price: f64,
+        timestamp_open: u64,
+        timestamp_close: Option<u64>,
+        exit_price: Option<f64>,
+        is_closed: bool,
+        drawing_id: Option<Uuid>,
     ) -> Self {
         let risk = (entry_price - stop_price).abs();
         let reward = (target_price - entry_price).abs();
@@ -198,6 +282,10 @@ impl PositionAutofill {
             stop_price,
             target_price,
             timestamp_open,
+            timestamp_close,
+            exit_price,
+            is_closed,
+            drawing_id,
             notes,
         }
     }
@@ -241,6 +329,8 @@ pub struct JournalStats {
     pub total_fees: f64,
     pub avg_win: f64,
     pub avg_loss: f64,
+    pub avg_planned_rr: f64,
+    pub avg_realized_rr: f64,
 }
 
 impl JournalStats {
@@ -250,14 +340,28 @@ impl JournalStats {
             ..Default::default()
         };
 
+        let mut total_planned_rr = 0.0;
+        let mut planned_rr_count = 0;
+        let mut total_realized_rr = 0.0;
+        let mut realized_rr_count = 0;
+
         for entry in entries {
             stats.total_fees += entry.fee;
+
+            if let Some(rr) = entry.planned_rr() {
+                total_planned_rr += rr;
+                planned_rr_count += 1;
+            }
 
             match entry.status {
                 TradeStatus::Open => stats.open_trades += 1,
                 TradeStatus::Cancelled => {}
                 TradeStatus::Closed => {
                     stats.closed_trades += 1;
+                    if let Some(r_mult) = entry.realized_rr() {
+                        total_realized_rr += r_mult;
+                        realized_rr_count += 1;
+                    }
                     if let Some(pnl) = entry.pnl {
                         stats.net_pnl += pnl;
                         if pnl > 0.0001 {
@@ -290,6 +394,14 @@ impl JournalStats {
             stats.profit_factor = stats.total_profit / stats.total_loss;
         } else if stats.total_profit > 0.0 {
             stats.profit_factor = f64::INFINITY;
+        }
+
+        if planned_rr_count > 0 {
+            stats.avg_planned_rr = total_planned_rr / planned_rr_count as f64;
+        }
+
+        if realized_rr_count > 0 {
+            stats.avg_realized_rr = total_realized_rr / realized_rr_count as f64;
         }
 
         stats
@@ -521,5 +633,56 @@ mod tests {
             short_pos.notes,
             "SL: 3060.00 (+2.00%) | TP: 2850.00 (-5.00%) | R:R: 1:2.50"
         );
+        assert!(!short_pos.is_closed);
+        assert!(short_pos.exit_price.is_none());
+    }
+
+    #[test]
+    fn test_planned_and_realized_rr() {
+        let mut entry = JournalEntry::new(
+            "Binance".into(),
+            "BTCUSDT".into(),
+            TradeSide::Long,
+            50000.0,
+            1.0,
+            0.0,
+            None,
+            "".into(),
+        )
+        .with_targets(Some(49000.0), Some(53000.0));
+
+        // Planned RR: (53000 - 50000) / (50000 - 49000) = 3000 / 1000 = 3.0
+        assert_eq!(entry.planned_rr(), Some(3.0));
+        assert_eq!(entry.realized_rr(), None);
+
+        // Close at 52000: Realized RR = (52000 - 50000) / 1000 = 2.0
+        entry.close(52000.0, 0.0);
+        assert_eq!(entry.realized_rr(), Some(2.0));
+
+        // Short trade test
+        let mut short_entry = JournalEntry::new(
+            "Bybit".into(),
+            "ETHUSDT".into(),
+            TradeSide::Short,
+            3000.0,
+            1.0,
+            0.0,
+            None,
+            "".into(),
+        )
+        .with_targets(Some(3100.0), Some(2800.0));
+
+        // Planned RR: (3000 - 2800) / (3100 - 3000) = 200 / 100 = 2.0
+        assert_eq!(short_entry.planned_rr(), Some(2.0));
+
+        // Close at 3100 (stop hit): Realized RR = (3000 - 3100) / 100 = -1.0
+        short_entry.close(3100.0, 0.0);
+        assert_eq!(short_entry.realized_rr(), Some(-1.0));
+
+        let stats = JournalStats::compute(&[entry, short_entry]);
+        // avg planned: (3.0 + 2.0) / 2 = 2.5
+        assert!((stats.avg_planned_rr - 2.5).abs() < 1e-4);
+        // avg realized: (2.0 + -1.0) / 2 = 0.5
+        assert!((stats.avg_realized_rr - 0.5).abs() < 1e-4);
     }
 }

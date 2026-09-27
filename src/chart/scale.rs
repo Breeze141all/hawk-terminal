@@ -533,9 +533,22 @@ impl canvas::Program<Message> for AxisLabelsX<'_> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BadgeColor {
+    Explicit(Color),
+    ThemeProfit,
+    ThemeStop,
+}
+
+impl From<Color> for BadgeColor {
+    fn from(c: Color) -> Self {
+        BadgeColor::Explicit(c)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PriceAxisBadge {
     pub price: f32,
-    pub background_color: Color,
+    pub background_color: BadgeColor,
     pub text_color: Color,
 }
 
@@ -761,9 +774,14 @@ impl canvas::Program<Message> for AxisLabelsY<'_> {
                 for badge in &self.drag_badges {
                     let y_position =
                         bounds.height - ((badge.price - lowest) / range * bounds.height);
+                    let bg_color = match badge.background_color {
+                        BadgeColor::Explicit(c) => c,
+                        BadgeColor::ThemeProfit => palette.success.base.color,
+                        BadgeColor::ThemeStop => palette.danger.base.color,
+                    };
                     let label = LabelContent {
                         content: format!("{:.*}", self.decimals, badge.price),
-                        background_color: Some(badge.background_color),
+                        background_color: Some(bg_color),
                         text_color: badge.text_color,
                         text_size: 12.0,
                     };

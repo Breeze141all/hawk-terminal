@@ -11,12 +11,14 @@ use iced::{Alignment, Color, Element, Length, Theme, border, padding};
 pub enum SelectionToolbarAction {
     ToggleSettings,
     ToggleLock,
+    ToggleSync,
     Delete,
     SetColor([f32; 4]),
     SetWidth(f32),
-    SetPositionProfitColor([f32; 4]),
-    SetPositionStopColor([f32; 4]),
+    SetPositionProfitColor(Option<[f32; 4]>),
+    SetPositionStopColor(Option<[f32; 4]>),
     SetPositionEntryColor([f32; 4]),
+    TogglePositionPricePath,
     AutofillJournal,
 }
 
@@ -114,7 +116,47 @@ pub fn view<'a, Message: 'a + Clone>(
         iced::widget::tooltip::Position::Top,
     );
 
-    // 5. Trash button (Delete this drawing)
+    // 5. Sync button (Sync to all charts / Local to this chart)
+    let is_synced = drawing.is_synced;
+    let sync_icon = icon_text(Icon::Clone, 14);
+    let sync_btn = button(sync_icon)
+        .padding(4)
+        .style(move |theme: &Theme, status| {
+            let palette = theme.extended_palette();
+            if is_synced {
+                button::Style {
+                    background: Some(
+                        palette
+                            .primary
+                            .base
+                            .color
+                            .scale_alpha(if palette.is_dark { 0.25 } else { 0.2 })
+                            .into(),
+                    ),
+                    text_color: palette.primary.base.color,
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        width: 1.0,
+                        color: palette.primary.base.color,
+                    },
+                    ..Default::default()
+                }
+            } else {
+                toolbar_button_style(theme, status, false)
+            }
+        })
+        .on_press(on_action(SelectionToolbarAction::ToggleSync));
+    let tip_sync = tooltip(
+        sync_btn,
+        Some(if is_synced {
+            "Synced to all charts (Click to make local)"
+        } else {
+            "Sync to all charts"
+        }),
+        iced::widget::tooltip::Position::Top,
+    );
+
+    // 6. Trash button (Delete this drawing)
     let trash_icon = icon_text(Icon::TrashBin, 14);
     let delete_btn = button(trash_icon)
         .padding(4)
@@ -155,6 +197,7 @@ pub fn view<'a, Message: 'a + Clone>(
         }
         r.push(tip_settings)
             .push(tip_lock)
+            .push(tip_sync)
             .push(tip_delete)
             .spacing(4)
             .align_y(Alignment::Center)
@@ -165,6 +208,7 @@ pub fn view<'a, Message: 'a + Clone>(
         }
         r.push(tip_settings)
             .push(tip_lock)
+            .push(tip_sync)
             .push(tip_delete)
             .spacing(3)
             .align_y(Alignment::Center)
@@ -187,7 +231,7 @@ pub fn view<'a, Message: 'a + Clone>(
 
     if show_settings {
         main_container =
-            main_container.width(Length::Fixed(if is_position { 260.0 } else { 252.0 }));
+            main_container.width(Length::Fixed(if is_position { 284.0 } else { 252.0 }));
     }
 
     main_container.into()
@@ -364,17 +408,37 @@ fn view_position_settings<'a, Message: 'a + Clone>(
     };
 
     // --- Take Profit Section ---
-    let tp_rgb = [
-        pos_style.profit_color[0],
-        pos_style.profit_color[1],
-        pos_style.profit_color[2],
-    ];
-    let tp_alpha = pos_style.profit_color[3];
+    let tp_is_auto = pos_style.profit_color.is_none();
+    let tp_col = pos_style
+        .profit_color
+        .unwrap_or(data::chart::drawing::default_profit_color());
+    let tp_rgb = [tp_col[0], tp_col[1], tp_col[2]];
+    let tp_alpha = tp_col[3];
     let tp_alpha_pct = (tp_alpha * 100.0).round() as u8;
 
-    let mut tp_swatches = row![].spacing(3).align_y(Alignment::Center);
+    let tp_auto_btn = button(
+        text("Auto")
+            .size(9)
+            .font(style::AZERET_MONO)
+            .align_x(iced::alignment::Horizontal::Center),
+    )
+    .padding(padding::top(1).bottom(1).left(3).right(3))
+    .style(move |theme: &Theme, status| toolbar_button_style(theme, status, tp_is_auto))
+    .on_press(on_action(SelectionToolbarAction::SetPositionProfitColor(
+        None,
+    )));
+
+    let mut tp_swatches = row![tooltip(
+        tp_auto_btn,
+        Some("Theme Auto (Matches trade colors)"),
+        iced::widget::tooltip::Position::Top,
+    ),]
+    .spacing(3)
+    .align_y(Alignment::Center);
+
     for (rgb, label) in preset_colors {
-        let is_selected = (tp_rgb[0] - rgb[0]).abs() < 0.05
+        let is_selected = !tp_is_auto
+            && (tp_rgb[0] - rgb[0]).abs() < 0.05
             && (tp_rgb[1] - rgb[1]).abs() < 0.05
             && (tp_rgb[2] - rgb[2]).abs() < 0.05;
 
@@ -397,9 +461,9 @@ fn view_position_settings<'a, Message: 'a + Clone>(
         let swatch_btn = button(swatch_box)
             .padding(2)
             .style(move |theme: &Theme, status| toolbar_button_style(theme, status, is_selected))
-            .on_press(on_action(SelectionToolbarAction::SetPositionProfitColor([
-                rgb[0], rgb[1], rgb[2], tp_alpha,
-            ])));
+            .on_press(on_action(SelectionToolbarAction::SetPositionProfitColor(
+                Some([rgb[0], rgb[1], rgb[2], tp_alpha]),
+            )));
 
         tp_swatches = tp_swatches.push(tooltip(
             swatch_btn,
@@ -417,9 +481,9 @@ fn view_position_settings<'a, Message: 'a + Clone>(
 
     let tp_opacity_slider = iced::widget::slider(0..=100, tp_alpha_pct, move |new_pct| {
         let new_alpha = new_pct as f32 / 100.0;
-        on_action(SelectionToolbarAction::SetPositionProfitColor([
+        on_action(SelectionToolbarAction::SetPositionProfitColor(Some([
             tp_rgb[0], tp_rgb[1], tp_rgb[2], new_alpha,
-        ]))
+        ])))
     })
     .step(5u8)
     .width(Length::Fixed(120.0));
@@ -439,17 +503,37 @@ fn view_position_settings<'a, Message: 'a + Clone>(
     .align_y(Alignment::Center);
 
     // --- Stop Loss Section ---
-    let sl_rgb = [
-        pos_style.stop_color[0],
-        pos_style.stop_color[1],
-        pos_style.stop_color[2],
-    ];
-    let sl_alpha = pos_style.stop_color[3];
+    let sl_is_auto = pos_style.stop_color.is_none();
+    let sl_col = pos_style
+        .stop_color
+        .unwrap_or(data::chart::drawing::default_stop_color());
+    let sl_rgb = [sl_col[0], sl_col[1], sl_col[2]];
+    let sl_alpha = sl_col[3];
     let sl_alpha_pct = (sl_alpha * 100.0).round() as u8;
 
-    let mut sl_swatches = row![].spacing(3).align_y(Alignment::Center);
+    let sl_auto_btn = button(
+        text("Auto")
+            .size(9)
+            .font(style::AZERET_MONO)
+            .align_x(iced::alignment::Horizontal::Center),
+    )
+    .padding(padding::top(1).bottom(1).left(3).right(3))
+    .style(move |theme: &Theme, status| toolbar_button_style(theme, status, sl_is_auto))
+    .on_press(on_action(SelectionToolbarAction::SetPositionStopColor(
+        None,
+    )));
+
+    let mut sl_swatches = row![tooltip(
+        sl_auto_btn,
+        Some("Theme Auto (Matches trade colors)"),
+        iced::widget::tooltip::Position::Top,
+    ),]
+    .spacing(3)
+    .align_y(Alignment::Center);
+
     for (rgb, label) in preset_colors {
-        let is_selected = (sl_rgb[0] - rgb[0]).abs() < 0.05
+        let is_selected = !sl_is_auto
+            && (sl_rgb[0] - rgb[0]).abs() < 0.05
             && (sl_rgb[1] - rgb[1]).abs() < 0.05
             && (sl_rgb[2] - rgb[2]).abs() < 0.05;
 
@@ -472,9 +556,9 @@ fn view_position_settings<'a, Message: 'a + Clone>(
         let swatch_btn = button(swatch_box)
             .padding(2)
             .style(move |theme: &Theme, status| toolbar_button_style(theme, status, is_selected))
-            .on_press(on_action(SelectionToolbarAction::SetPositionStopColor([
-                rgb[0], rgb[1], rgb[2], sl_alpha,
-            ])));
+            .on_press(on_action(SelectionToolbarAction::SetPositionStopColor(
+                Some([rgb[0], rgb[1], rgb[2], sl_alpha]),
+            )));
 
         sl_swatches = sl_swatches.push(tooltip(
             swatch_btn,
@@ -492,9 +576,9 @@ fn view_position_settings<'a, Message: 'a + Clone>(
 
     let sl_opacity_slider = iced::widget::slider(0..=100, sl_alpha_pct, move |new_pct| {
         let new_alpha = new_pct as f32 / 100.0;
-        on_action(SelectionToolbarAction::SetPositionStopColor([
+        on_action(SelectionToolbarAction::SetPositionStopColor(Some([
             sl_rgb[0], sl_rgb[1], sl_rgb[2], new_alpha,
-        ]))
+        ])))
     })
     .step(5u8)
     .width(Length::Fixed(120.0));
@@ -591,6 +675,29 @@ fn view_position_settings<'a, Message: 'a + Clone>(
     .spacing(4)
     .align_y(Alignment::Center);
 
+    // Trajectory path toggle
+    let path_active = pos_style.show_price_path;
+    let path_toggle_btn = button(
+        text(if path_active { "Visible" } else { "Hidden" })
+            .size(10)
+            .font(style::AZERET_MONO)
+            .align_x(iced::alignment::Horizontal::Center),
+    )
+    .padding(padding::top(2).bottom(2).left(6).right(6))
+    .style(move |theme: &Theme, status| toolbar_button_style(theme, status, path_active))
+    .on_press(on_action(SelectionToolbarAction::TogglePositionPricePath));
+
+    let path_row = row![
+        container(text("Path:").size(10).font(style::AZERET_MONO)).width(48),
+        tooltip(
+            path_toggle_btn,
+            Some("Toggle Price Trajectory Path"),
+            iced::widget::tooltip::Position::Top,
+        ),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
     column![
         separator(),
         tp_color_row,
@@ -601,6 +708,7 @@ fn view_position_settings<'a, Message: 'a + Clone>(
         separator(),
         entry_color_row,
         width_row,
+        path_row,
     ]
     .spacing(5)
     .padding(padding::top(4).bottom(2).left(2).right(2))
