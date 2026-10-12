@@ -328,16 +328,10 @@ impl HeatmapChart {
 
         let rounded_depth_update = (depth_update / aggregate_time) * aggregate_time;
 
-        {
-            let entry = self
-                .trades
-                .datapoints
-                .entry(rounded_depth_update)
-                .or_default();
-
-            for trade in trades_buffer {
-                entry.add_trade(trade, chart.tick_size);
-            }
+        for trade in trades_buffer {
+            let trade_bucket = (trade.time / aggregate_time) * aggregate_time;
+            let entry = self.trades.datapoints.entry(trade_bucket).or_default();
+            entry.add_trade(trade, chart.tick_size);
         }
 
         self.heatmap
@@ -389,7 +383,7 @@ impl HeatmapChart {
             }
         }
 
-        chart.latest_x = rounded_depth_update;
+        chart.latest_x = chart.latest_x.max(rounded_depth_update);
     }
 
     pub fn visual_config(&self) -> Config {
@@ -771,40 +765,43 @@ impl canvas::Program<Message> for HeatmapChart {
                 .for_each(|(time, dp)| {
                     let x_position = chart.interval_to_x(*time);
 
-                    dp.grouped_trades.iter().for_each(|trade| {
-                        let y_position = chart.price_to_y(trade.price);
+                    if self.visual_config.show_trades {
+                        dp.grouped_trades.iter().for_each(|trade| {
+                            let y_position = chart.price_to_y(trade.price);
 
-                        let trade_size = market_type.qty_in_quote_value(
-                            trade.qty,
-                            trade.price,
-                            size_in_quote_ccy,
-                        );
-
-                        if trade_size > self.visual_config.trade_size_filter {
-                            let color = if trade.is_sell {
-                                palette.danger.base.color
-                            } else {
-                                palette.success.base.color
-                            };
-
-                            let radius = {
-                                if let Some(trade_size_scale) = self.visual_config.trade_size_scale
-                                {
-                                    let scale_factor = (trade_size_scale as f32) / 100.0;
-                                    1.0 + (trade.qty / max_trade_qty)
-                                        * (MAX_CIRCLE_RADIUS - 1.0)
-                                        * scale_factor
-                                } else {
-                                    cell_height / 2.0
-                                }
-                            };
-
-                            frame.fill(
-                                &Path::circle(Point::new(x_position, y_position), radius),
-                                color,
+                            let trade_size = market_type.qty_in_quote_value(
+                                trade.qty,
+                                trade.price,
+                                size_in_quote_ccy,
                             );
-                        }
-                    });
+
+                            if trade_size > self.visual_config.trade_size_filter {
+                                let color = if trade.is_sell {
+                                    palette.danger.base.color
+                                } else {
+                                    palette.success.base.color
+                                };
+
+                                let radius = {
+                                    if let Some(trade_size_scale) =
+                                        self.visual_config.trade_size_scale
+                                    {
+                                        let scale_factor = (trade_size_scale as f32) / 100.0;
+                                        1.0 + (trade.qty / max_trade_qty)
+                                            * (MAX_CIRCLE_RADIUS - 1.0)
+                                            * scale_factor
+                                    } else {
+                                        cell_height / 2.0
+                                    }
+                                };
+
+                                frame.fill(
+                                    &Path::circle(Point::new(x_position, y_position), radius),
+                                    color,
+                                );
+                            }
+                        });
+                    }
 
                     if volume_indicator {
                         let bar_width = (chart.cell_width / 2.0) * 0.9;
@@ -1070,7 +1067,13 @@ impl canvas::Program<Message> for HeatmapChart {
 pub fn calculate_large_volume_threshold(symbol_str: &str, max_depth_qty: f32) -> f32 {
     let is_btc = symbol_str.to_uppercase().starts_with("BTC");
     if is_btc {
-        100.0f32.min(max_depth_qty.max(10.0))
+        // Benchmark large wall at 100.0 BTC.
+        // If max depth is smaller, adapt to actual visible depth to preserve contrast.
+        if max_depth_qty > 0.0 {
+            100.0f32.min(max_depth_qty).max(0.001)
+        } else {
+            1.0
+        }
     } else {
         (max_depth_qty * 0.70).max(0.001)
     }
@@ -1078,8 +1081,6 @@ pub fn calculate_large_volume_threshold(symbol_str: &str, max_depth_qty: f32) ->
 
 pub fn heatmap_run_color(palette: &Extended, is_bid: bool, ratio: f32) -> (Color, f32) {
     let clamped_ratio = ratio.clamp(0.0, 1.0);
-    let curve = clamped_ratio.powf(1.8);
-    let alpha = (curve * 0.96 + 0.04).min(1.0);
 
     let (base_color, highlight_color) = if is_bid {
         (palette.success.base.color, palette.success.strong.color)
@@ -1087,14 +1088,18 @@ pub fn heatmap_run_color(palette: &Extended, is_bid: bool, ratio: f32) -> (Color
         (palette.danger.base.color, palette.danger.strong.color)
     };
 
-    let dark_color = lerp_color(palette.background.base.color, base_color, 0.08);
+    // Minimum alpha (0.18) ensures faint resting liquidity levels are immediately visible
+    // and illuminated against the pitch-black background.
+    // Perceptual gamma (0.70) prevents crushing low-to-mid volume orders into black.
+    let alpha = (0.18 + 0.82 * clamped_ratio.powf(0.70)).min(1.0);
 
     let color = if clamped_ratio >= 0.70 {
         let t = ((clamped_ratio - 0.70) / 0.30).clamp(0.0, 1.0);
         lerp_color(base_color, highlight_color, t)
     } else {
-        let t = (clamped_ratio / 0.70).clamp(0.0, 1.0).powf(1.5);
-        lerp_color(dark_color, base_color, t)
+        let t = (clamped_ratio / 0.70).clamp(0.0, 1.0);
+        let subtle_color = lerp_color(palette.background.base.color, base_color, 0.40);
+        lerp_color(subtle_color, base_color, t)
     };
 
     (color, alpha)
@@ -1263,10 +1268,10 @@ mod tests {
         let theme = iced::Theme::Dark;
         let palette = theme.extended_palette();
 
-        // Low volume (ratio = 0.05): low alpha, significantly darkened tone compared to base color
+        // Low volume (ratio = 0.05): clearly visible with minimum illuminated alpha and recognizable color
         let (color_low, alpha_low) = heatmap_run_color(palette, true, 0.05);
-        assert!(alpha_low < 0.06);
-        assert!(color_low.g < palette.success.base.color.g * 0.5);
+        assert!(alpha_low >= 0.18);
+        assert!(color_low.g > palette.background.base.color.g);
 
         // High volume (ratio >= 1.0): alpha = 1.0, highlight color from palette
         let (color_high, alpha_high) = heatmap_run_color(palette, true, 1.0);
@@ -1278,8 +1283,9 @@ mod tests {
         assert_eq!(alpha_ask, 1.0);
         assert_eq!(color_ask, palette.danger.strong.color);
 
-        // Sell side low volume: significantly darker than base danger color
-        let (color_ask_low, _) = heatmap_run_color(palette, false, 0.05);
-        assert!(color_ask_low.r < palette.danger.base.color.r * 0.5);
+        // Sell side low volume: illuminated and clearly above background
+        let (color_ask_low, alpha_ask_low) = heatmap_run_color(palette, false, 0.05);
+        assert!(alpha_ask_low >= 0.18);
+        assert!(color_ask_low.r > palette.background.base.color.r);
     }
 }

@@ -494,7 +494,7 @@ impl ComparisonChart {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as u64
     }
 
@@ -734,5 +734,23 @@ mod tests {
         // Must not panic on set_basis with tick basis
         let action = chart.set_basis(tick_basis);
         assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_ter05_comparison_now_ms_backwards_clock_drift_safe() {
+        use std::time::UNIX_EPOCH;
+
+        let now = ComparisonChart::now_ms();
+        assert!(now > 0);
+
+        // Pre-UNIX_EPOCH / backward NTP clock drift simulation
+        let past = UNIX_EPOCH.checked_sub(std::time::Duration::from_secs(3600));
+        if let Some(past_time) = past {
+            let res = past_time
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            assert_eq!(res, 0);
+        }
     }
 }

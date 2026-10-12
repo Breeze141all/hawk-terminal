@@ -6,7 +6,7 @@ use crate::chart::kline::{ClusterKind, KlineDataPoint, KlineTrades, NPoc};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use exchange::util::{Price, PriceStep};
-use exchange::{Kline, Timeframe, Trade};
+use exchange::{Exchange, Kline, Timeframe, Trade};
 
 pub trait DataPoint {
     fn add_trade(&mut self, trade: &Trade, step: PriceStep);
@@ -30,9 +30,31 @@ pub struct TimeSeries<D: DataPoint> {
     pub datapoints: BTreeMap<u64, D>,
     pub interval: Timeframe,
     pub tick_size: PriceStep,
+    pub exchange: Option<Exchange>,
 }
 
 impl<D: DataPoint> TimeSeries<D> {
+    pub const MAX_RETAINED_DATAPOINTS: usize = 60_000;
+
+    pub fn enforce_retention_limit(&mut self) {
+        if self.datapoints.len() > Self::MAX_RETAINED_DATAPOINTS {
+            let excess = self.datapoints.len() - Self::MAX_RETAINED_DATAPOINTS;
+            let keys_to_remove: Vec<u64> = self.datapoints.keys().take(excess).copied().collect();
+            for k in keys_to_remove {
+                self.datapoints.remove(&k);
+            }
+        }
+    }
+
+    pub fn set_exchange(&mut self, exchange: Exchange) {
+        self.exchange = Some(exchange);
+    }
+
+    pub fn with_exchange(mut self, exchange: Exchange) -> Self {
+        self.exchange = Some(exchange);
+        self
+    }
+
     pub fn base_price(&self) -> Price {
         self.datapoints
             .values()
@@ -175,6 +197,7 @@ impl TimeSeries<KlineDataPoint> {
             datapoints: BTreeMap::new(),
             interval,
             tick_size,
+            exchange: None,
         };
 
         timeseries.insert_klines(klines);
@@ -186,6 +209,7 @@ impl TimeSeries<KlineDataPoint> {
             datapoints: self.datapoints.clone(),
             interval: self.interval,
             tick_size: self.tick_size,
+            exchange: self.exchange,
         };
 
         new_series.insert_trades_or_create_bucket(trades);
@@ -193,6 +217,11 @@ impl TimeSeries<KlineDataPoint> {
     }
 
     pub fn insert_klines(&mut self, klines: &[Kline]) {
+        let aggr_time = self.interval.to_milliseconds();
+        let now_ms = exchange::clock::server_time_ms(self.exchange);
+        let latest_kline_time = klines.iter().map(|k| k.time).max().unwrap_or(0);
+        let effective_now_ms = now_ms.max(latest_kline_time);
+
         for kline in klines {
             let entry = self
                 .datapoints
@@ -204,6 +233,15 @@ impl TimeSeries<KlineDataPoint> {
                 });
 
             entry.kline = *kline;
+
+            let candle_end = kline.time.saturating_add(aggr_time);
+            if candle_end <= effective_now_ms
+                && !entry.footprint.is_empty()
+                && entry.trades_fetched
+                && !entry.is_trades_coverage_complete(aggr_time, self.tick_size, effective_now_ms)
+            {
+                entry.trades_fetched = false;
+            }
         }
 
         self.update_poc_status();
@@ -215,6 +253,8 @@ impl TimeSeries<KlineDataPoint> {
         }
         let aggr_time = self.interval.to_milliseconds();
         let mut updated_times = FxHashSet::default();
+        let min_trade_time = buffer.first().map(|t| t.time).unwrap_or(0);
+        let max_trade_time = buffer.last().map(|t| t.time).unwrap_or(0);
 
         buffer.iter().for_each(|trade| {
             let rounded_time = (trade.time / aggr_time) * aggr_time;
@@ -234,11 +274,42 @@ impl TimeSeries<KlineDataPoint> {
                         volume: (0.0, 0.0),
                     },
                     footprint: KlineTrades::new(),
-                    trades_fetched: true,
+                    trades_fetched: false,
                 });
 
             entry.add_trade(trade, self.tick_size);
         });
+
+        if aggr_time > 0 && max_trade_time >= min_trade_time && min_trade_time > 0 {
+            let start_bucket = (min_trade_time / aggr_time) * aggr_time;
+            let end_bucket = (max_trade_time / aggr_time) * aggr_time;
+            let latest_ts = self.latest_timestamp();
+            let tolerance = (aggr_time / 10).clamp(500, 120_000).min(aggr_time / 2);
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let effective_now_ms = now_ms.max(max_trade_time);
+
+            for (&time, dp) in self.datapoints.range_mut(start_bucket..=end_bucket) {
+                let is_latest = latest_ts.is_some_and(|latest| time >= latest);
+                let has_trades = !dp.footprint.is_empty();
+                let no_volume = (dp.kline.volume.0 + dp.kline.volume.1) == 0.0;
+
+                if is_latest {
+                    let first_t = dp.first_trade_time().unwrap_or(0);
+                    let is_near_start = has_trades && first_t <= time.saturating_add(tolerance);
+                    let allow_active = is_active_candle_fetch_supported(self.exchange);
+                    if (!allow_active && has_trades) || is_near_start || no_volume {
+                        dp.trades_fetched = true;
+                    }
+                } else if dp.is_trades_coverage_complete(
+                    aggr_time,
+                    self.tick_size,
+                    effective_now_ms,
+                ) || no_volume
+                {
+                    dp.trades_fetched = true;
+                }
+            }
+        }
 
         for time in updated_times {
             if let Some(data_point) = self.datapoints.get_mut(&time) {
@@ -272,23 +343,27 @@ impl TimeSeries<KlineDataPoint> {
             let end_bucket = (max_trade_time / aggr_time) * aggr_time;
             let latest_ts = self.latest_timestamp();
             let tolerance = (aggr_time / 10).clamp(500, 120_000).min(aggr_time / 2);
-            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let now_ms = exchange::clock::server_time_ms(self.exchange);
+            let effective_now_ms = now_ms.max(max_trade_time);
 
             for (&time, dp) in self.datapoints.range_mut(start_bucket..=end_bucket) {
-                let candle_end = time.saturating_add(aggr_time);
                 let is_latest = latest_ts.is_some_and(|latest| time >= latest);
-                let no_volume = (dp.kline.volume.0 + dp.kline.volume.1) == 0.0;
                 let has_trades = !dp.footprint.is_empty();
-                let first_t = dp.first_trade_time().unwrap_or(0);
-                let last_t = dp.last_trade_time().unwrap_or(0);
-                let start_ok = has_trades && first_t <= time.saturating_add(tolerance);
-                let end_ok = if candle_end <= now_ms {
-                    has_trades && last_t >= candle_end.saturating_sub(tolerance)
-                } else {
-                    has_trades && last_t >= now_ms.saturating_sub(tolerance)
-                };
+                let no_volume = (dp.kline.volume.0 + dp.kline.volume.1) == 0.0;
 
-                if (is_latest && has_trades) || (start_ok && end_ok) || no_volume {
+                if is_latest {
+                    let first_t = dp.first_trade_time().unwrap_or(0);
+                    let is_near_start = has_trades && first_t <= time.saturating_add(tolerance);
+                    let allow_active = is_active_candle_fetch_supported(self.exchange);
+                    if (!allow_active && has_trades) || is_near_start || no_volume {
+                        dp.trades_fetched = true;
+                    }
+                } else if dp.is_trades_coverage_complete(
+                    aggr_time,
+                    self.tick_size,
+                    effective_now_ms,
+                ) || no_volume
+                {
                     dp.trades_fetched = true;
                 }
             }
@@ -299,6 +374,67 @@ impl TimeSeries<KlineDataPoint> {
                 data_point.calculate_poc();
             }
         }
+    }
+
+    pub fn rebuild_buckets_from_raw_trades(
+        &mut self,
+        raw_trades: &[Trade],
+        affected_buckets: &rustc_hash::FxHashSet<u64>,
+    ) {
+        if affected_buckets.is_empty() {
+            return;
+        }
+        let aggr_time = self.interval.to_milliseconds();
+        if aggr_time == 0 {
+            return;
+        }
+
+        let now_ms = exchange::clock::server_time_ms(self.exchange);
+        let latest_trade_time = raw_trades.last().map(|t| t.time).unwrap_or(0);
+        let effective_now_ms = now_ms.max(latest_trade_time);
+
+        for &bucket_time in affected_buckets {
+            let candle_end = bucket_time.saturating_add(aggr_time);
+            let start_idx = raw_trades.partition_point(|t| t.time < bucket_time);
+            let end_idx = raw_trades.partition_point(|t| t.time < candle_end);
+            let trades = &raw_trades[start_idx..end_idx];
+
+            if !trades.is_empty() {
+                let entry = self
+                    .datapoints
+                    .entry(bucket_time)
+                    .or_insert_with(|| KlineDataPoint {
+                        kline: Kline {
+                            time: bucket_time,
+                            open: trades[0].price,
+                            high: trades[0].price,
+                            low: trades[0].price,
+                            close: trades[trades.len() - 1].price,
+                            volume: (0.0, 0.0),
+                        },
+                        footprint: KlineTrades::new(),
+                        trades_fetched: false,
+                    });
+
+                entry.clear_trades();
+                for trade in trades {
+                    entry
+                        .footprint
+                        .add_trade_to_nearest_bin(trade, self.tick_size);
+                }
+                entry.calculate_poc();
+
+                if candle_end <= effective_now_ms {
+                    entry.trades_fetched = entry.is_trades_coverage_complete(
+                        aggr_time,
+                        self.tick_size,
+                        effective_now_ms,
+                    );
+                }
+            }
+        }
+
+        self.update_poc_status();
     }
 
     pub fn insert_preaggregated_footprint(&mut self, dps: Vec<(u64, KlineDataPoint)>) {
@@ -324,7 +460,7 @@ impl TimeSeries<KlineDataPoint> {
     }
 
     pub fn mark_trades_fetched(&mut self, from_time: u64, to_time: u64) {
-        if from_time > to_time {
+        if from_time >= to_time {
             return;
         }
         let aggr_time = self.interval.to_milliseconds();
@@ -332,18 +468,34 @@ impl TimeSeries<KlineDataPoint> {
             return;
         }
         let rounded_from = (from_time / aggr_time) * aggr_time;
-        if rounded_from > to_time {
+        if rounded_from >= to_time {
             return;
         }
 
-        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let now_ms = exchange::clock::server_time_ms(self.exchange);
+        let tolerance = (aggr_time / 10).clamp(500, 120_000).min(aggr_time / 2);
 
-        for (&time, dp) in self.datapoints.range_mut(rounded_from..=to_time) {
+        for (&time, dp) in self.datapoints.range_mut(rounded_from..to_time) {
             let candle_end = time.saturating_add(aggr_time);
-            if candle_end <= to_time.saturating_add(aggr_time / 2)
+            if candle_end <= to_time.saturating_add(tolerance)
                 || (candle_end > now_ms && to_time >= now_ms.saturating_sub(120_000))
             {
                 dp.trades_fetched = true;
+            }
+        }
+    }
+
+    pub fn invalidate_unfetched_empty_footprints(&mut self) {
+        let lookback_days = exchange::fetcher::trade_history_lookback_days() as u64;
+        let lookback_ms = lookback_days * 24 * 3600 * 1000;
+        let today_midnight = exchange::clock::today_midnight_ms(self.exchange);
+        let cutoff_ms = today_midnight.saturating_sub(lookback_ms);
+        for (_t, dp) in self.datapoints.range_mut(cutoff_ms..) {
+            if dp.trades_fetched
+                && dp.footprint.is_empty()
+                && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
+            {
+                dp.trades_fetched = false;
             }
         }
     }
@@ -367,7 +519,13 @@ impl TimeSeries<KlineDataPoint> {
                     && rounded_time > prev_latest
                     && let Some(prev_entry) = self.datapoints.get_mut(&prev_latest)
                 {
-                    prev_entry.trades_fetched = true;
+                    let now_ms = exchange::clock::server_time_ms(self.exchange);
+                    let effective_now_ms = now_ms.max(trade.time);
+                    prev_entry.trades_fetched = prev_entry.is_trades_coverage_complete(
+                        aggr_time,
+                        self.tick_size,
+                        effective_now_ms,
+                    );
                 }
 
                 updated_times.insert(rounded_time);
@@ -411,13 +569,12 @@ impl TimeSeries<KlineDataPoint> {
     }
 
     pub fn update_poc_status(&mut self) {
+        self.enforce_retention_limit();
+
         if self.datapoints.is_empty() {
             return;
         }
 
-        // O(n) approach: iterate backwards once, tracking cumulative price range
-        // and the first time where each price level was touched.
-        //
         // Collect keys and bounds first to avoid borrow issues with BTreeMap
         let entries: Vec<(u64, Price, Price, Option<Price>)> = self
             .datapoints
@@ -431,11 +588,9 @@ impl TimeSeries<KlineDataPoint> {
 
         let total_points = entries.len();
 
-        // Track cumulative range and when each boundary was established
+        // Track cumulative range
         let mut cumulative_low: Option<Price> = None;
         let mut cumulative_high: Option<Price> = None;
-        let mut low_established_at: usize = total_points;
-        let mut high_established_at: usize = total_points;
 
         // Collect status updates to apply later
         let mut status_updates: Vec<(u64, NPoc)> = Vec::new();
@@ -446,70 +601,43 @@ impl TimeSeries<KlineDataPoint> {
 
             // Check if this datapoint has a POC and determine its status
             if let Some(poc_price) = poc_price {
-                let npoc = if let (Some(cum_low), Some(cum_high)) =
-                    (cumulative_low, cumulative_high)
-                {
-                    if cum_low <= poc_price && cum_high >= poc_price {
-                        // POC was touched - find the first touch time
-                        let first_touch_time = if poc_price <= entries[low_established_at].2
-                            && poc_price >= entries[low_established_at].1
-                        {
-                            Some(entries[low_established_at].0)
-                        } else if poc_price <= entries[high_established_at].2
-                            && poc_price >= entries[high_established_at].1
-                        {
-                            Some(entries[high_established_at].0)
-                        } else {
-                            // Fallback: scan forward from i+1 to find first touch
-                            let search_end = high_established_at.max(low_established_at);
-                            entries[(i + 1)..=search_end]
+                let npoc =
+                    if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high) {
+                        if cum_low <= poc_price && cum_high >= poc_price {
+                            // POC was touched - find the first chronological touch time in future candles
+                            let first_touch_time = entries[(i + 1)..total_points]
                                 .iter()
                                 .find(|(_, low, high, _)| *low <= poc_price && *high >= poc_price)
-                                .map(|(time, _, _, _)| *time)
-                        };
+                                .map(|(time, _, _, _)| *time);
 
-                        if let Some(touch_time) = first_touch_time {
-                            let mut n = NPoc::default();
-                            n.filled(touch_time);
-                            n
+                            if let Some(touch_time) = first_touch_time {
+                                let mut n = NPoc::default();
+                                n.filled(touch_time);
+                                n
+                            } else {
+                                NPoc::Naked
+                            }
                         } else {
                             NPoc::Naked
                         }
                     } else {
-                        NPoc::Naked
-                    }
-                } else {
-                    // No future candles to check against (this is the last candle)
-                    NPoc::default()
-                };
+                        // No future candles to check against (this is the last candle)
+                        NPoc::default()
+                    };
 
                 status_updates.push((time, npoc));
             }
 
             // Update cumulative range to include this candle for the next iteration
-            match cumulative_low {
-                Some(cl) if dp_low < cl => {
-                    cumulative_low = Some(dp_low);
-                    low_established_at = i;
-                }
-                None => {
-                    cumulative_low = Some(dp_low);
-                    low_established_at = i;
-                }
-                _ => {}
-            }
+            cumulative_low = Some(match cumulative_low {
+                Some(cl) => cl.min(dp_low),
+                None => dp_low,
+            });
 
-            match cumulative_high {
-                Some(ch) if dp_high > ch => {
-                    cumulative_high = Some(dp_high);
-                    high_established_at = i;
-                }
-                None => {
-                    cumulative_high = Some(dp_high);
-                    high_established_at = i;
-                }
-                _ => {}
-            }
+            cumulative_high = Some(match cumulative_high {
+                Some(ch) => ch.max(dp_high),
+                None => dp_high,
+            });
         }
 
         // Apply all status updates
@@ -525,6 +653,34 @@ impl TimeSeries<KlineDataPoint> {
         visible_earliest: u64,
         visible_latest: u64,
     ) -> Option<(u64, u64)> {
+        self.suggest_trade_fetch_range_with_exchange(
+            visible_earliest,
+            visible_latest,
+            self.exchange,
+        )
+    }
+
+    pub fn suggest_trade_fetch_range_with_exchange(
+        &self,
+        visible_earliest: u64,
+        visible_latest: u64,
+        exchange: Option<Exchange>,
+    ) -> Option<(u64, u64)> {
+        self.suggest_trade_fetch_range_with_exchange_and_lookback(
+            visible_earliest,
+            visible_latest,
+            exchange,
+            None,
+        )
+    }
+
+    pub fn suggest_trade_fetch_range_with_exchange_and_lookback(
+        &self,
+        visible_earliest: u64,
+        visible_latest: u64,
+        exchange: Option<Exchange>,
+        custom_lookback_days: Option<u32>,
+    ) -> Option<(u64, u64)> {
         if self.datapoints.is_empty() || visible_earliest >= visible_latest {
             return None;
         }
@@ -534,37 +690,48 @@ impl TimeSeries<KlineDataPoint> {
             return None;
         }
 
-        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-        let today_midnight = chrono::Utc::now()
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .timestamp_millis() as u64;
+        let now_ms = exchange::clock::server_time_ms(exchange);
+        let today_midnight = exchange::clock::today_midnight_ms(exchange);
         let current_candle_start = (now_ms / interval_ms) * interval_ms;
+        let allow_active = is_active_candle_fetch_supported(exchange);
 
         let aligned_earliest = (visible_earliest / interval_ms) * interval_ms;
         let aligned_latest = (visible_latest / interval_ms) * interval_ms;
 
-        // 1. Priority 1: Unfetched past-day candles in visible range [aligned_earliest, aligned_latest]
-        let mut visible_past_unfetched = self
-            .datapoints
-            .range(aligned_earliest..=aligned_latest)
-            .filter(|(t, dp)| {
-                **t < today_midnight
-                    && **t < current_candle_start
-                    && !dp.trades_fetched
-                    && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
-            })
-            .map(|(&t, _)| t);
+        let lookback_days = custom_lookback_days
+            .unwrap_or_else(exchange::fetcher::trade_history_lookback_days)
+            as u64;
+        let lookback_ms = lookback_days * 24 * 3600 * 1000;
+        let is_real_timestamp = aligned_latest >= 1_000_000_000_000;
+        let cutoff_time = if is_real_timestamp {
+            today_midnight.saturating_sub(lookback_ms)
+        } else {
+            0
+        };
 
-        if let Some(first_unfetched) = visible_past_unfetched.next() {
-            let last_unfetched = visible_past_unfetched
-                .next_back()
-                .unwrap_or(first_unfetched);
-            let fetch_from = first_unfetched;
-            let fetch_to = last_unfetched.saturating_add(interval_ms);
-            return Some((fetch_from, fetch_to));
+        // 1. Priority 1: Unfetched past-day candles in visible range [aligned_earliest, aligned_latest]
+        let search_earliest = aligned_earliest.max(cutoff_time);
+        if search_earliest <= aligned_latest {
+            let mut visible_past_unfetched = self
+                .datapoints
+                .range(search_earliest..=aligned_latest)
+                .filter(|(t, dp)| {
+                    **t < today_midnight
+                        && (**t < current_candle_start
+                            || (allow_active && **t == current_candle_start))
+                        && !dp.trades_fetched
+                        && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
+                })
+                .map(|(&t, _)| t);
+
+            if let Some(first_unfetched) = visible_past_unfetched.next() {
+                let last_unfetched = visible_past_unfetched
+                    .next_back()
+                    .unwrap_or(first_unfetched);
+                let fetch_from = first_unfetched;
+                let fetch_to = last_unfetched.saturating_add(interval_ms);
+                return Some((fetch_from, fetch_to));
+            }
         }
 
         // 2. Priority 2: Unfetched past-day candles preceding visible range
@@ -575,7 +742,8 @@ impl TimeSeries<KlineDataPoint> {
             .copied()
             .unwrap_or(aligned_earliest);
         let prefetch_earliest = aligned_earliest
-            .saturating_sub(130 * 24 * 3600 * 1000)
+            .saturating_sub(lookback_ms)
+            .max(cutoff_time)
             .max(earliest_datapoint)
             .min(aligned_earliest);
         let aligned_prefetch_earliest = (prefetch_earliest / interval_ms) * interval_ms;
@@ -605,7 +773,7 @@ impl TimeSeries<KlineDataPoint> {
             .range(aligned_earliest..=aligned_latest)
             .filter(|(t, dp)| {
                 **t >= today_midnight
-                    && **t < current_candle_start
+                    && (**t < current_candle_start || (allow_active && **t == current_candle_start))
                     && !dp.trades_fetched
                     && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
             })
@@ -629,7 +797,7 @@ impl TimeSeries<KlineDataPoint> {
                 .datapoints
                 .range(future_start..=aligned_prefetch_latest)
                 .filter(|(t, dp)| {
-                    **t < current_candle_start
+                    (**t < current_candle_start || (allow_active && **t == current_candle_start))
                         && !dp.trades_fetched
                         && (dp.kline.volume.0 + dp.kline.volume.1) > 0.0
                 })
@@ -671,6 +839,13 @@ impl TimeSeries<KlineDataPoint> {
     }
 }
 
+pub fn is_active_candle_fetch_supported(exchange: Option<Exchange>) -> bool {
+    matches!(
+        exchange,
+        Some(Exchange::BinanceSpot | Exchange::BinanceLinear | Exchange::BinanceInverse)
+    )
+}
+
 pub fn aggregate_trades_for_day(
     trades: &[Trade],
     interval: Timeframe,
@@ -684,10 +859,10 @@ pub fn aggregate_trades_for_day(
         return Vec::new();
     }
 
-    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+    let now_ms = exchange::clock::server_time_ms(None);
 
     let mut map: BTreeMap<u64, KlineDataPoint> = BTreeMap::new();
-    let max_gap_ms = 60_000u64;
+    let max_gap_ms = exchange::trades::cache::INTRADAY_MAX_GAP_MS;
     let mut last_trade_per_bucket: FxHashMap<u64, u64> = FxHashMap::default();
     let mut bucket_has_gap: FxHashMap<u64, bool> = FxHashMap::default();
 
@@ -725,29 +900,16 @@ pub fn aggregate_trades_for_day(
         .and_utc()
         .timestamp_millis() as u64;
 
-    let tolerance = (interval_ms / 10).clamp(500, 120_000).min(interval_ms / 2);
-
     for (&time, dp) in map.iter_mut() {
         dp.calculate_poc();
         let candle_end = time.saturating_add(interval_ms);
         let is_historical_day = time < today_midnight && candle_end <= today_midnight;
-        if is_historical_day {
+        let has_internal_gap = bucket_has_gap.get(&time).copied().unwrap_or(false);
+
+        if is_historical_day
+            || (!has_internal_gap && dp.is_trades_coverage_complete(interval_ms, step, now_ms))
+        {
             dp.trades_fetched = true;
-        } else {
-            let first_t = dp.first_trade_time().unwrap_or(0);
-            let last_t = dp.last_trade_time().unwrap_or(0);
-            let has_trades = !dp.footprint.is_empty();
-            let start_ok = has_trades && first_t <= time.saturating_add(tolerance);
-            let end_ok = if candle_end <= now_ms {
-                has_trades && last_t >= candle_end.saturating_sub(tolerance)
-            } else {
-                has_trades && last_t >= now_ms.saturating_sub(tolerance)
-            };
-            let has_internal_gap = bucket_has_gap.get(&time).copied().unwrap_or(false);
-            let no_volume = (dp.kline.volume.0 + dp.kline.volume.1) == 0.0;
-            if ((start_ok && end_ok) && !has_internal_gap) || no_volume {
-                dp.trades_fetched = true;
-            }
         }
     }
 
@@ -770,6 +932,7 @@ impl TimeSeries<HeatmapDataPoint> {
             datapoints: BTreeMap::new(),
             interval: timeframe,
             tick_size,
+            exchange: None,
         }
     }
 
@@ -1145,6 +1308,178 @@ mod tests {
     }
 
     #[test]
+    fn test_suggest_trade_fetch_range_never_suggests_active_forming_candle() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::M5;
+        let interval_ms = interval.to_milliseconds();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let current_candle_start = (now_ms / interval_ms) * interval_ms;
+
+        let klines = vec![Kline {
+            time: current_candle_start,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+        let ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines);
+
+        // Active/forming candle must NEVER be requested by background trade fetcher
+        assert_eq!(
+            ts.suggest_trade_fetch_range(current_candle_start, current_candle_start + interval_ms,),
+            None
+        );
+    }
+
+    #[test]
+    fn test_suggest_trade_fetch_range_active_candle_supported_exchange() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::M5;
+        let interval_ms = interval.to_milliseconds();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let current_candle_start = (now_ms / interval_ms) * interval_ms;
+
+        let klines = vec![Kline {
+            time: current_candle_start,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+
+        // 1. Unset exchange -> active candle is not suggested
+        let mut ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines);
+        assert_eq!(
+            ts.suggest_trade_fetch_range(current_candle_start, current_candle_start + interval_ms,),
+            None
+        );
+
+        // 2. Unsupported exchanges (Bybit, OKX, Hyperliquid) -> active candle is not suggested
+        for unsupported in [
+            Exchange::BybitLinear,
+            Exchange::BybitSpot,
+            Exchange::OkexLinear,
+            Exchange::HyperliquidLinear,
+        ] {
+            ts.set_exchange(unsupported);
+            assert_eq!(
+                ts.suggest_trade_fetch_range(
+                    current_candle_start,
+                    current_candle_start + interval_ms,
+                ),
+                None,
+                "Exchange {:?} must not suggest active candle",
+                unsupported
+            );
+        }
+
+        // 3. Supported exchange (Binance) -> active forming candle is suggested when unfetched
+        for supported in [
+            Exchange::BinanceSpot,
+            Exchange::BinanceLinear,
+            Exchange::BinanceInverse,
+        ] {
+            ts.datapoints
+                .get_mut(&current_candle_start)
+                .unwrap()
+                .trades_fetched = false;
+            ts.set_exchange(supported);
+            assert_eq!(
+                ts.suggest_trade_fetch_range(
+                    current_candle_start,
+                    current_candle_start + interval_ms,
+                ),
+                Some((current_candle_start, current_candle_start + interval_ms)),
+                "Exchange {:?} must suggest active forming candle",
+                supported
+            );
+
+            // Once marked fetched, it must stop being suggested
+            ts.mark_trades_fetched(current_candle_start, current_candle_start + interval_ms);
+            assert_eq!(
+                ts.suggest_trade_fetch_range(
+                    current_candle_start,
+                    current_candle_start + interval_ms,
+                ),
+                None,
+                "Exchange {:?} must stop suggesting after mark_trades_fetched",
+                supported
+            );
+        }
+    }
+
+    #[test]
+    fn test_rebuild_buckets_from_raw_trades_idempotency() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::M5;
+        let klines = vec![Kline {
+            time: 300_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+        let mut ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines);
+
+        let trades = vec![
+            Trade {
+                time: 301_000,
+                price: Price::from_f32(100.0),
+                qty: 2.0,
+                is_sell: false,
+            },
+            Trade {
+                time: 302_000,
+                price: Price::from_f32(101.0),
+                qty: 3.0,
+                is_sell: true,
+            },
+        ];
+
+        let mut affected = rustc_hash::FxHashSet::default();
+        affected.insert(300_000);
+
+        // First rebuild
+        ts.rebuild_buckets_from_raw_trades(&trades, &affected);
+        let dp_before = ts.datapoints.get(&300_000).unwrap();
+        let total_vol_before: f32 = dp_before
+            .footprint
+            .trades
+            .values()
+            .map(|g| g.total_qty())
+            .sum();
+        let delta_before: f32 = dp_before
+            .footprint
+            .trades
+            .values()
+            .map(|g| g.delta_qty())
+            .sum();
+        assert_eq!(total_vol_before, 5.0);
+        assert_eq!(delta_before, -1.0);
+
+        // Second rebuild with same raw trades must be completely idempotent
+        ts.rebuild_buckets_from_raw_trades(&trades, &affected);
+        let dp_after = ts.datapoints.get(&300_000).unwrap();
+        let total_vol_after: f32 = dp_after
+            .footprint
+            .trades
+            .values()
+            .map(|g| g.total_qty())
+            .sum();
+        let delta_after: f32 = dp_after
+            .footprint
+            .trades
+            .values()
+            .map(|g| g.delta_qty())
+            .sum();
+        assert_eq!(total_vol_after, total_vol_before);
+        assert_eq!(delta_after, delta_before);
+    }
+
+    #[test]
     fn test_daily_footprint_cache_integration() {
         let step = PriceStep::from_f32(10.0);
         let trades = vec![
@@ -1465,5 +1800,446 @@ mod tests {
         let basis = Basis::Tick(crate::aggr::TickCount(50));
         let ts = TimeSeries::<HeatmapDataPoint>::new(basis, step);
         assert_eq!(ts.interval, Timeframe::M1);
+    }
+
+    #[test]
+    fn test_mark_trades_fetched_does_not_mark_next_active_candle() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::H1;
+        let interval_ms = interval.to_milliseconds();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let current_candle_start = (now_ms / interval_ms) * interval_ms;
+        let past_candle_start = current_candle_start - interval_ms;
+
+        let klines = vec![
+            Kline {
+                time: past_candle_start,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: current_candle_start,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(106.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(105.0),
+                volume: (10.0, 10.0),
+            },
+        ];
+
+        let mut ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines);
+        // Historical fetch for the past closed candle ends at current_candle_start
+        ts.mark_trades_fetched(past_candle_start, current_candle_start);
+
+        // Past candle must be marked fetched
+        assert!(
+            ts.datapoints
+                .get(&past_candle_start)
+                .unwrap()
+                .trades_fetched
+        );
+
+        // Active candle must NOT be marked fetched by this fetch
+        assert!(
+            !ts.datapoints
+                .get(&current_candle_start)
+                .unwrap()
+                .trades_fetched,
+            "Active candle starting at current_candle_start must not be marked fetched by a fetch ending at current_candle_start"
+        );
+    }
+
+    #[test]
+    fn test_with_trades_mid_candle_does_not_suppress_active_candle_fetch() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::H1;
+        let interval_ms = interval.to_milliseconds();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let current_candle_start = (now_ms / interval_ms) * interval_ms;
+
+        let klines = vec![Kline {
+            time: current_candle_start,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+
+        // Live trade arrives mid-candle (e.g. 45 minutes into the 1h candle)
+        let mid_candle_trade = Trade {
+            time: current_candle_start + 45 * 60 * 1000,
+            price: Price::from_f32(101.0),
+            qty: 1.0,
+            is_sell: false,
+        };
+
+        let ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines)
+            .with_exchange(Exchange::BinanceLinear)
+            .with_trades(&[mid_candle_trade]);
+
+        // Active candle must NOT be marked trades_fetched because trades started mid-candle!
+        assert!(
+            !ts.datapoints
+                .get(&current_candle_start)
+                .unwrap()
+                .trades_fetched,
+            "Active candle must remain unfetched when trades start mid-candle"
+        );
+
+        // Active candle must be suggested for fetch!
+        assert_eq!(
+            ts.suggest_trade_fetch_range(current_candle_start, current_candle_start + interval_ms),
+            Some((current_candle_start, current_candle_start + interval_ms)),
+            "Mid-candle active candle must be suggested for historical backfill"
+        );
+    }
+
+    #[test]
+    fn test_rollover_clock_skew_preserves_trades_fetched() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::M5;
+        let interval_ms = interval.to_milliseconds();
+        let candle0_start = 300_000u64;
+        let candle1_start = 600_000u64;
+
+        let klines = vec![Kline {
+            time: candle0_start,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+
+        let mut ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines)
+            .with_exchange(Exchange::BinanceLinear);
+
+        // Candle 0 has trades covering from start to end
+        let trades_c0 = vec![
+            Trade {
+                time: candle0_start + 1000,
+                price: Price::from_f32(99.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: candle0_start + 150_000,
+                price: Price::from_f32(105.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: candle0_start + interval_ms - 1000,
+                price: Price::from_f32(102.0),
+                qty: 1.0,
+                is_sell: true,
+            },
+        ];
+        ts.insert_realtime_trades(&trades_c0);
+        ts.datapoints
+            .get_mut(&candle0_start)
+            .unwrap()
+            .trades_fetched = true;
+
+        // Trade arrives in candle 1 (rollover)
+        let trade_c1 = Trade {
+            time: candle1_start + 1000,
+            price: Price::from_f32(102.0),
+            qty: 1.0,
+            is_sell: false,
+        };
+        ts.insert_realtime_trades(&[trade_c1]);
+
+        // Candle 0 must STILL be trades_fetched = true
+        assert!(
+            ts.datapoints.get(&candle0_start).unwrap().trades_fetched,
+            "Candle 0 must preserve trades_fetched = true across rollover even if now_ms has clock skew"
+        );
+    }
+
+    #[test]
+    fn test_clock_skew_over_120s_sync_unblocks_active_candle() {
+        exchange::clock::reset_clock_skews();
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::D1;
+        let interval_ms = interval.to_milliseconds();
+
+        let local_now = chrono::Utc::now().timestamp_millis() as u64;
+
+        // Simulate client clock ahead of exchange server by 150 seconds (> 120 seconds)
+        let delta = -150_000i64;
+        let server_now = (local_now as i64 + delta) as u64;
+
+        let active_candle_start = (server_now / interval_ms) * interval_ms;
+
+        let klines = vec![Kline {
+            time: active_candle_start,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+
+        let mut ts = TimeSeries::<KlineDataPoint>::new(interval, step, &klines)
+            .with_exchange(Exchange::BinanceLinear);
+
+        // Fetched trades up to server_now (e.g. server_now - 5_000)
+        let trades_to_time = server_now - 5_000;
+
+        // 1. Without clock skew correction (delta = 0):
+        // local_now is 150s ahead of server_now.
+        // trades_to_time is ~server_now, which is < (local_now - 120_000).
+        // The active candle cutoff mechanism blocks marking trades_fetched = true!
+        ts.mark_trades_fetched(active_candle_start, trades_to_time);
+        assert!(
+            !ts.datapoints
+                .get(&active_candle_start)
+                .unwrap()
+                .trades_fetched,
+            "Without clock skew tracking, client clock ahead by >120s must fail to mark active candle as fetched"
+        );
+
+        // 2. WITH clock skew tracking (delta = -150_000 ms via exchange ping):
+        exchange::clock::set_clock_skew(Exchange::BinanceLinear, delta);
+
+        // Now mark_trades_fetched uses server_time_ms(exchange) which matches server_now!
+        ts.mark_trades_fetched(active_candle_start, trades_to_time);
+        assert!(
+            ts.datapoints
+                .get(&active_candle_start)
+                .unwrap()
+                .trades_fetched,
+            "With clock skew delta tracking, active candle must be successfully marked trades_fetched = true"
+        );
+
+        exchange::clock::reset_clock_skews();
+    }
+
+    #[test]
+    fn test_dat02_naked_poc_chronological_first_touch() {
+        let step = PriceStep::from_f32(1.0);
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M1, step, &[]);
+
+        let k1 = Kline {
+            time: 60_000,
+            open: Price::from_f32(95.0),
+            high: Price::from_f32(110.0),
+            low: Price::from_f32(90.0),
+            close: Price::from_f32(105.0),
+            volume: (10.0, 10.0),
+        };
+        let k2 = Kline {
+            time: 120_000,
+            open: Price::from_f32(99.0),
+            high: Price::from_f32(102.0),
+            low: Price::from_f32(98.0),
+            close: Price::from_f32(101.0),
+            volume: (5.0, 5.0),
+        };
+        let k3 = Kline {
+            time: 180_000,
+            open: Price::from_f32(50.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(10.0),
+            close: Price::from_f32(40.0),
+            volume: (20.0, 20.0),
+        };
+
+        ts.insert_klines(&[k1, k2, k3]);
+
+        let dp1 = ts.datapoints.get_mut(&60_000).unwrap();
+        dp1.footprint.add_trade_to_nearest_bin(
+            &Trade {
+                time: 60_001,
+                price: Price::from_f32(100.0),
+                qty: 100.0,
+                is_sell: false,
+            },
+            step,
+        );
+        dp1.calculate_poc();
+
+        ts.update_poc_status();
+
+        let npoc = ts
+            .datapoints
+            .get(&60_000)
+            .unwrap()
+            .footprint
+            .poc
+            .as_ref()
+            .unwrap()
+            .status;
+        assert_eq!(npoc, NPoc::Filled { at: 120_000 });
+    }
+
+    #[test]
+    fn test_dat03_timeseries_retention_limit() {
+        let step = PriceStep::from_f32(1.0);
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M1, step, &[]);
+
+        let total_candles = TimeSeries::<KlineDataPoint>::MAX_RETAINED_DATAPOINTS + 50;
+        let mut klines = Vec::with_capacity(total_candles);
+        for i in 0..total_candles {
+            klines.push(Kline {
+                time: (i as u64 + 1) * 60_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(95.0),
+                close: Price::from_f32(100.0),
+                volume: (1.0, 1.0),
+            });
+        }
+
+        ts.insert_klines(&klines);
+
+        assert_eq!(
+            ts.datapoints.len(),
+            TimeSeries::<KlineDataPoint>::MAX_RETAINED_DATAPOINTS
+        );
+        let earliest_key = ts.datapoints.keys().next().copied().unwrap();
+        assert_eq!(earliest_key, 51 * 60_000);
+    }
+
+    #[test]
+    fn test_dat05_historical_closed_day_marks_trades_fetched() {
+        let step = PriceStep::from_f32(1.0);
+        let t1 = 1704110400000u64;
+        let t2 = t1 + 300_000;
+        let trades = vec![
+            Trade {
+                time: t1,
+                price: Price::from_f32(40000.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: t2,
+                price: Price::from_f32(40010.0),
+                qty: 1.0,
+                is_sell: true,
+            },
+        ];
+
+        let result = aggregate_trades_for_day(&trades, Timeframe::H1, step);
+        assert_eq!(result.len(), 1);
+        let (_, dp) = &result[0];
+        assert!(
+            dp.trades_fetched,
+            "Historical closed day candle must be marked trades_fetched=true even with natural pauses > 60s"
+        );
+    }
+
+    #[test]
+    fn test_suggest_trade_fetch_range_respects_custom_lookback() {
+        let step = PriceStep::from_f32(1.0);
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::D1, step, &[]);
+        let now = chrono::Utc::now();
+        let today_midnight = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        // Create candle 100 days ago
+        let candle_100d_ago = today_midnight - (100 * 24 * 3600 * 1000);
+        let dp = KlineDataPoint {
+            kline: Kline {
+                time: candle_100d_ago,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(90.0),
+                close: Price::from_f32(105.0),
+                volume: (10.0, 10.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: false,
+        };
+        ts.datapoints.insert(candle_100d_ago, dp);
+
+        // With 30 days lookback, candle 100 days ago is beyond cutoff and must NOT be suggested
+        exchange::fetcher::set_trade_history_lookback_days(30);
+        let suggested_30d =
+            ts.suggest_trade_fetch_range(candle_100d_ago, candle_100d_ago + 86_400_000);
+        assert_eq!(suggested_30d, None);
+
+        // With 180 days lookback, candle 100 days ago is within cutoff and MUST be suggested
+        exchange::fetcher::set_trade_history_lookback_days(180);
+        let suggested_180d =
+            ts.suggest_trade_fetch_range(candle_100d_ago, candle_100d_ago + 86_400_000);
+        assert_eq!(
+            suggested_180d,
+            Some((candle_100d_ago, candle_100d_ago + 86_400_000))
+        );
+
+        // Per-chart override: when global is 90 days, but chart custom lookback is Some(180), it MUST be suggested
+        exchange::fetcher::set_trade_history_lookback_days(90);
+        let suggested_per_chart_180d = ts.suggest_trade_fetch_range_with_exchange_and_lookback(
+            candle_100d_ago,
+            candle_100d_ago + 86_400_000,
+            None,
+            Some(180),
+        );
+        assert_eq!(
+            suggested_per_chart_180d,
+            Some((candle_100d_ago, candle_100d_ago + 86_400_000))
+        );
+
+        // Per-chart override: when global is 180 days, but chart custom lookback is Some(30), it must NOT be suggested
+        let suggested_per_chart_30d = ts.suggest_trade_fetch_range_with_exchange_and_lookback(
+            candle_100d_ago,
+            candle_100d_ago + 86_400_000,
+            None,
+            Some(30),
+        );
+        assert_eq!(suggested_per_chart_30d, None);
+
+        // Reset default
+        exchange::fetcher::set_trade_history_lookback_days(
+            exchange::fetcher::DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS,
+        );
+    }
+
+    #[test]
+    fn test_invalidate_unfetched_empty_footprints() {
+        let step = PriceStep::from_f32(1.0);
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::D1, step, &[]);
+        let now = chrono::Utc::now();
+        let today_midnight = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis() as u64;
+
+        let candle_time = today_midnight - (50 * 24 * 3600 * 1000);
+        let dp = KlineDataPoint {
+            kline: Kline {
+                time: candle_time,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(90.0),
+                close: Price::from_f32(105.0),
+                volume: (10.0, 10.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: true, // Marked fetched, but footprint is empty!
+        };
+        ts.datapoints.insert(candle_time, dp);
+
+        exchange::fetcher::set_trade_history_lookback_days(90);
+        ts.invalidate_unfetched_empty_footprints();
+
+        assert!(!ts.datapoints.get(&candle_time).unwrap().trades_fetched);
+
+        exchange::fetcher::set_trade_history_lookback_days(
+            exchange::fetcher::DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS,
+        );
     }
 }

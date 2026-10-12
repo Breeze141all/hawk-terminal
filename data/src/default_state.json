@@ -544,6 +544,7 @@
     "volume": 100.0
   },
   "trade_fetch_enabled": true,
+  "trade_history_lookback_days": 90,
   "size_in_quote_ccy": "Base",
   "journal_mode": "Basic",
   "default_kline_config": {

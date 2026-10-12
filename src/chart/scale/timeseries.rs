@@ -91,7 +91,11 @@ fn calc_time_step(
         31.. => &HOURLY_TIME_STEPS,
     };
 
-    let duration = latest - earliest;
+    if earliest >= latest || labels_can_fit <= 0 {
+        return (time_steps[0], earliest);
+    }
+
+    let duration = latest.saturating_sub(earliest);
     let mut selected_step = time_steps[0];
 
     for &step in time_steps {
@@ -111,7 +115,8 @@ fn calc_time_step(
 
 fn calc_x_pos(time_millis: u64, min_millis: u64, max_millis: u64, width: f32) -> f64 {
     if max_millis > min_millis {
-        ((time_millis - min_millis) as f64 / (max_millis - min_millis) as f64) * f64::from(width)
+        ((time_millis as f64 - min_millis as f64) / (max_millis as f64 - min_millis as f64))
+            * f64::from(width)
     } else {
         0.0
     }
@@ -130,6 +135,10 @@ pub fn generate_time_labels(
     x_labels_can_fit: i32,
     palette: &Extended,
 ) -> Vec<AxisLabel> {
+    if x_min >= x_max || x_labels_can_fit <= 0 {
+        return vec![];
+    }
+
     let (time_step, initial_rounded_earliest) =
         calc_time_step(x_min, x_max, x_labels_can_fit, timeframe);
 
@@ -137,7 +146,7 @@ pub fn generate_time_labels(
         return vec![];
     }
 
-    let mut labels = Vec::with_capacity(x_labels_can_fit as usize * 3);
+    let mut labels = Vec::with_capacity(x_labels_can_fit.max(0) as usize * 3);
 
     if time_step >= ONE_DAY_MS {
         let Some(start_utc_dt) = DateTime::from_timestamp_millis(x_min as i64) else {
@@ -417,5 +426,82 @@ where
     move |dt| {
         let dt_in_timezone = to_user_fixed_offset(dt, timezone);
         f(&dt_in_timezone)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ter04_calc_time_step_reverse_interval_underflow_safe() {
+        let (step, rounded) = calc_time_step(2000, 1000, 10, exchange::Timeframe::M1);
+        assert!(step > 0);
+        assert_eq!(rounded, 2000);
+
+        let (step, rounded) = calc_time_step(1000, 1000, 10, exchange::Timeframe::M1);
+        assert!(step > 0);
+        assert_eq!(rounded, 1000);
+
+        let (step, rounded) = calc_time_step(1000, 2000, 0, exchange::Timeframe::M1);
+        assert!(step > 0);
+        assert_eq!(rounded, 1000);
+
+        let (step, rounded) = calc_time_step(1000, 2000, -5, exchange::Timeframe::M1);
+        assert!(step > 0);
+        assert_eq!(rounded, 1000);
+    }
+
+    #[test]
+    fn test_ter04_generate_time_labels_reverse_and_empty_safe() {
+        let palette = iced::theme::Theme::Dark.extended_palette();
+        let bounds =
+            iced_core::Rectangle::new(iced_core::Point::ORIGIN, iced_core::Size::new(800.0, 40.0));
+
+        let labels = generate_time_labels(
+            exchange::Timeframe::M1,
+            UserTimezone::Utc,
+            bounds,
+            2000,
+            1000,
+            10,
+            palette,
+        );
+        assert!(labels.is_empty());
+
+        let labels = generate_time_labels(
+            exchange::Timeframe::M1,
+            UserTimezone::Utc,
+            bounds,
+            1000,
+            2000,
+            0,
+            palette,
+        );
+        assert!(labels.is_empty());
+
+        let labels = generate_time_labels(
+            exchange::Timeframe::M1,
+            UserTimezone::Utc,
+            bounds,
+            1000,
+            2000,
+            -10,
+            palette,
+        );
+        assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn test_ter04_calc_x_pos_pre_min_safe() {
+        let pos = calc_x_pos(900, 1000, 2000, 100.0);
+        assert!(pos < 0.0);
+        assert_eq!(pos, -10.0);
+
+        let pos = calc_x_pos(1500, 1000, 2000, 100.0);
+        assert_eq!(pos, 50.0);
+
+        let pos = calc_x_pos(1500, 2000, 1000, 100.0);
+        assert_eq!(pos, 0.0);
     }
 }

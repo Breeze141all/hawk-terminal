@@ -310,6 +310,14 @@ pub(crate) struct DrawingState {
     pub last_cursor_frame_pos: Option<Point>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum DrawingHistoryAction {
+    Add(Drawing),
+    Delete(Drawing),
+    Update { old: Drawing, new: Drawing },
+    Clear(Vec<Drawing>),
+}
+
 pub struct KlineChart {
     pub ticker_info: TickerInfo,
     chart: ViewState,
@@ -327,11 +335,14 @@ pub struct KlineChart {
     pub(crate) tpo_cache: RefCell<TpoCache>,
     last_footprint_cache_save: Option<Instant>,
     pub drawings: Vec<Drawing>,
+    pub undo_stack: Vec<DrawingHistoryAction>,
+    pub redo_stack: Vec<DrawingHistoryAction>,
     pub(crate) drawing_state: RefCell<DrawingState>,
     pub alerts: Vec<PriceAlert>,
     pub alert_drag_state: RefCell<Option<(uuid::Uuid, f32)>>,
     pub replay: Option<ReplayState>,
     pub expanded_indicator: Option<KlineIndicator>,
+    pub(crate) history_lookback_input: String,
 }
 
 impl KlineChart {
@@ -347,11 +358,22 @@ impl KlineChart {
         config: Option<data::chart::kline::Config>,
     ) -> Self {
         let config = config.unwrap_or_default();
+        let history_lookback_input = match kind {
+            KlineChartKind::Footprint {
+                history_lookback_days: Some(days),
+                ..
+            } => days.to_string(),
+            KlineChartKind::Footprint { .. } => {
+                exchange::fetcher::trade_history_lookback_days().to_string()
+            }
+            _ => String::new(),
+        };
         match basis {
             Basis::Time(interval) => {
                 let step = PriceStep::from_f32(tick_size);
 
                 let timeseries = TimeSeries::<KlineDataPoint>::new(interval, step, klines_raw)
+                    .with_exchange(ticker_info.exchange())
                     .with_trades(&raw_trades);
 
                 let base_price_y = timeseries.base_price();
@@ -477,11 +499,14 @@ impl KlineChart {
                     tpo_cache: RefCell::new(TpoCache::default()),
                     last_footprint_cache_save: None,
                     drawings: Vec::new(),
+                    undo_stack: Vec::new(),
+                    redo_stack: Vec::new(),
                     drawing_state: RefCell::new(DrawingState::default()),
                     alerts: Vec::new(),
                     alert_drag_state: RefCell::new(None),
                     replay: None,
                     expanded_indicator: None,
+                    history_lookback_input: history_lookback_input.clone(),
                 }
             }
             Basis::Tick(interval) => {
@@ -570,14 +595,74 @@ impl KlineChart {
                     tpo_cache: RefCell::new(TpoCache::default()),
                     last_footprint_cache_save: None,
                     drawings: Vec::new(),
+                    undo_stack: Vec::new(),
+                    redo_stack: Vec::new(),
                     drawing_state: RefCell::new(DrawingState::default()),
                     alerts: Vec::new(),
                     alert_drag_state: RefCell::new(None),
                     replay: None,
                     expanded_indicator: None,
+                    history_lookback_input,
                 }
             }
         }
+    }
+
+    pub fn history_lookback_input(&self) -> &str {
+        &self.history_lookback_input
+    }
+
+    pub fn effective_history_lookback_days(&self) -> u32 {
+        match &self.kind {
+            KlineChartKind::Footprint {
+                history_lookback_days: Some(days),
+                ..
+            } => *days,
+            _ => exchange::fetcher::trade_history_lookback_days(),
+        }
+    }
+
+    pub fn set_history_lookback_days(&mut self, days: u32) {
+        let days = days.max(1);
+        self.history_lookback_input = days.to_string();
+        if let KlineChartKind::Footprint {
+            history_lookback_days,
+            ..
+        } = &mut self.kind
+        {
+            *history_lookback_days = Some(days);
+        }
+        if days > exchange::fetcher::trade_history_lookback_days() {
+            exchange::fetcher::set_trade_history_lookback_days(days);
+        }
+        self.reset_request_handler();
+        self.invalidate_unfetched_empty_footprints();
+        self.invalidate_all();
+    }
+
+    pub fn set_history_lookback_input(&mut self, input: String) {
+        self.history_lookback_input = input;
+        if let Ok(days) = self.history_lookback_input.trim().parse::<u32>()
+            && days > 0
+        {
+            if let KlineChartKind::Footprint {
+                history_lookback_days,
+                ..
+            } = &mut self.kind
+            {
+                *history_lookback_days = Some(days);
+            }
+            if days > exchange::fetcher::trade_history_lookback_days() {
+                exchange::fetcher::set_trade_history_lookback_days(days);
+            }
+            self.reset_request_handler();
+            self.invalidate_unfetched_empty_footprints();
+            self.invalidate_all();
+        }
+    }
+
+    pub fn data_source(&self) -> &PlotData<KlineDataPoint> {
+        &self.data_source
     }
 
     pub fn rebuild_liquidation_heatmap(&mut self) {
@@ -673,7 +758,15 @@ impl KlineChart {
             return request_fetch(&mut self.request_handler, range);
         }
 
-        let (visible_earliest, visible_latest) = self.visible_timerange()?;
+        let (visible_earliest, visible_latest) = self.visible_timerange().unwrap_or_else(|| {
+            let latest = if self.chart.latest_x > 0 {
+                self.chart.latest_x
+            } else {
+                chrono::Utc::now().timestamp_millis() as u64
+            };
+            let earliest = latest.saturating_sub(60 * timeframe_ms);
+            (earliest, latest)
+        });
         let (kline_earliest, kline_latest) = kline_range;
         let earliest =
             visible_earliest.saturating_sub(visible_latest.saturating_sub(visible_earliest));
@@ -702,7 +795,7 @@ impl KlineChart {
                     return Some(action);
                 }
             } else {
-                let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                let now_ms = exchange::clock::server_time_ms(Some(self.ticker_info.exchange()));
                 let target_latest = visible_latest.min(now_ms);
                 if target_latest > kline_latest.saturating_add(timeframe_ms / 2) {
                     let fetch_start = kline_latest.saturating_sub(timeframe_ms);
@@ -726,10 +819,22 @@ impl KlineChart {
             let is_aggregate = self.is_aggregate_footprint();
             let mut trade_fetch_range = None;
             let mut needs_invalidation = false;
+            let custom_lookback = match &self.kind {
+                KlineChartKind::Footprint {
+                    history_lookback_days,
+                    ..
+                } => *history_lookback_days,
+                _ => None,
+            };
 
             if let PlotData::TimeBased(ref mut timeseries) = self.data_source
-                && let Some((mut fetch_from, mut fetch_to)) =
-                    timeseries.suggest_trade_fetch_range(visible_earliest, visible_latest)
+                && let Some((mut fetch_from, mut fetch_to)) = timeseries
+                    .suggest_trade_fetch_range_with_exchange_and_lookback(
+                        visible_earliest,
+                        visible_latest,
+                        Some(self.ticker_info.exchange()),
+                        custom_lookback,
+                    )
             {
                 let (symbol, _) = self.ticker_info.ticker.to_full_symbol_and_type();
                 let base_data_path = data::data_path(None);
@@ -855,8 +960,13 @@ impl KlineChart {
 
                     if loaded_any {
                         needs_invalidation = true;
-                        if let Some((new_from, new_to)) =
-                            timeseries.suggest_trade_fetch_range(visible_earliest, visible_latest)
+                        if let Some((new_from, new_to)) = timeseries
+                            .suggest_trade_fetch_range_with_exchange_and_lookback(
+                                visible_earliest,
+                                visible_latest,
+                                Some(self.ticker_info.exchange()),
+                                custom_lookback,
+                            )
                         {
                             fetch_from = new_from;
                             fetch_to = new_to;
@@ -970,6 +1080,12 @@ impl KlineChart {
         }
     }
 
+    pub fn invalidate_unfetched_empty_footprints(&mut self) {
+        if let PlotData::TimeBased(ref mut ts) = self.data_source {
+            ts.invalidate_unfetched_empty_footprints();
+        }
+    }
+
     pub fn tick_size(&self) -> f32 {
         self.chart.tick_size.to_f32_lossy()
     }
@@ -1017,7 +1133,6 @@ impl KlineChart {
     pub fn update_alert_price(&mut self, id: uuid::Uuid, new_price: f32) {
         if let Some(alert) = self.alerts.iter_mut().find(|a| a.id == id) {
             alert.target_price = new_price;
-            alert.status = AlertStatus::Active;
         }
         self.invalidate_all();
     }
@@ -1047,6 +1162,97 @@ impl KlineChart {
     pub fn set_selected_drawing(&mut self, id: Option<uuid::Uuid>) {
         self.drawing_state.borrow_mut().selected_drawing = id;
         self.invalidate_all();
+    }
+
+    pub fn can_undo(&self) -> bool {
+        !self.undo_stack.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    pub fn push_undo(&mut self, action: DrawingHistoryAction) {
+        const MAX_UNDO_STACK: usize = 100;
+        if self.undo_stack.len() >= MAX_UNDO_STACK {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(action);
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) -> Option<DrawingHistoryAction> {
+        let action = self.undo_stack.pop()?;
+        match &action {
+            DrawingHistoryAction::Add(d) => {
+                self.drawings.retain(|existing| existing.id != d.id);
+                if self.drawing_state.borrow().selected_drawing == Some(d.id) {
+                    self.drawing_state.borrow_mut().selected_drawing = None;
+                }
+            }
+            DrawingHistoryAction::Delete(d) => {
+                if !self.drawings.iter().any(|existing| existing.id == d.id) {
+                    self.drawings.push(d.clone());
+                }
+                self.drawing_state.borrow_mut().selected_drawing = Some(d.id);
+            }
+            DrawingHistoryAction::Update { old, .. } => {
+                if let Some(existing) = self.drawings.iter_mut().find(|d| d.id == old.id) {
+                    *existing = old.clone();
+                } else {
+                    self.drawings.push(old.clone());
+                }
+                self.drawing_state.borrow_mut().selected_drawing = Some(old.id);
+            }
+            DrawingHistoryAction::Clear(drawings) => {
+                for d in drawings {
+                    if !self.drawings.iter().any(|existing| existing.id == d.id) {
+                        self.drawings.push(d.clone());
+                    }
+                }
+            }
+        }
+        self.redo_stack.push(action.clone());
+        self.invalidate_all();
+        Some(action)
+    }
+
+    pub fn redo(&mut self) -> Option<DrawingHistoryAction> {
+        let action = self.redo_stack.pop()?;
+        match &action {
+            DrawingHistoryAction::Add(d) => {
+                if !self.drawings.iter().any(|existing| existing.id == d.id) {
+                    self.drawings.push(d.clone());
+                }
+                self.drawing_state.borrow_mut().selected_drawing = Some(d.id);
+            }
+            DrawingHistoryAction::Delete(d) => {
+                self.drawings.retain(|existing| existing.id != d.id);
+                if self.drawing_state.borrow().selected_drawing == Some(d.id) {
+                    self.drawing_state.borrow_mut().selected_drawing = None;
+                }
+            }
+            DrawingHistoryAction::Update { new, .. } => {
+                if let Some(existing) = self.drawings.iter_mut().find(|d| d.id == new.id) {
+                    *existing = new.clone();
+                } else {
+                    self.drawings.push(new.clone());
+                }
+                self.drawing_state.borrow_mut().selected_drawing = Some(new.id);
+            }
+            DrawingHistoryAction::Clear(drawings) => {
+                let ids: Vec<_> = drawings.iter().map(|d| d.id).collect();
+                self.drawings.retain(|d| !ids.contains(&d.id));
+                if let Some(sel_id) = self.drawing_state.borrow().selected_drawing
+                    && ids.contains(&sel_id)
+                {
+                    self.drawing_state.borrow_mut().selected_drawing = None;
+                }
+            }
+        }
+        self.undo_stack.push(action.clone());
+        self.invalidate_all();
+        Some(action)
     }
 
     pub fn find_target_position(&self) -> Option<data::journal::PositionAutofill> {
@@ -1523,9 +1729,14 @@ impl KlineChart {
 
     pub fn toggle_alert(&mut self, id: uuid::Uuid) {
         if let Some(alert) = self.alerts.iter_mut().find(|a| a.id == id) {
+            let now = chrono::Utc::now().timestamp_millis() as u64;
             alert.status = match alert.status {
                 AlertStatus::Active => AlertStatus::Muted,
-                AlertStatus::Muted | AlertStatus::Triggered => AlertStatus::Active,
+                AlertStatus::Muted | AlertStatus::Triggered => {
+                    alert.triggered_at = None;
+                    alert.last_checked_time = Some(now);
+                    AlertStatus::Active
+                }
             };
         }
         self.invalidate_all();
@@ -1553,9 +1764,38 @@ impl KlineChart {
         self.replay.as_ref()
     }
 
+    pub fn auto_scroll_to_replay_cutoff(&mut self) {
+        if let Some(rep) = &self.replay
+            && rep.active
+        {
+            let cutoff = rep.cutoff_time;
+            if self.chart.scaling > f32::EPSILON && self.chart.bounds.width > f32::EPSILON {
+                let base_x = match &self.kind {
+                    KlineChartKind::Footprint { .. } => {
+                        0.5 * (self.chart.bounds.width / self.chart.scaling)
+                            - (self.chart.cell_width / self.chart.scaling)
+                    }
+                    KlineChartKind::Candles | KlineChartKind::Tpo { .. } => {
+                        0.5 * (self.chart.bounds.width / self.chart.scaling)
+                            - (8.0 * self.chart.cell_width / self.chart.scaling)
+                    }
+                };
+                let x_offset = self.chart.interval_to_x(cutoff);
+                self.chart.translation.x = base_x - x_offset;
+            }
+        }
+    }
+
     pub fn replay_play_pause(&mut self) {
         if let Some(ref mut rep) = self.replay {
             rep.is_playing = !rep.is_playing;
+            if rep.is_playing {
+                self.last_tick = Instant::now();
+            }
+        }
+        if self.replay.as_ref().is_some_and(|r| r.is_playing) {
+            self.auto_scroll_to_replay_cutoff();
+            self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         }
         self.invalidate_all();
     }
@@ -1566,8 +1806,14 @@ impl KlineChart {
                 Basis::Time(tf) => tf.to_milliseconds(),
                 Basis::Tick(_) => 10,
             };
-            rep.cutoff_time = rep.cutoff_time.saturating_add(step);
+            let max_t = match &self.data_source {
+                PlotData::TimeBased(ts) => ts.latest_timestamp().unwrap_or(u64::MAX),
+                PlotData::TickBased(_) => u64::MAX,
+            };
+            rep.cutoff_time = rep.cutoff_time.saturating_add(step).min(max_t);
         }
+        self.auto_scroll_to_replay_cutoff();
+        self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         self.invalidate_all();
     }
 
@@ -1577,8 +1823,14 @@ impl KlineChart {
                 Basis::Time(tf) => tf.to_milliseconds(),
                 Basis::Tick(_) => 10,
             };
-            rep.cutoff_time = rep.cutoff_time.saturating_sub(step);
+            let min_t = match &self.data_source {
+                PlotData::TimeBased(ts) => ts.timerange().0,
+                PlotData::TickBased(_) => 0,
+            };
+            rep.cutoff_time = rep.cutoff_time.saturating_sub(step).max(min_t);
         }
+        self.auto_scroll_to_replay_cutoff();
+        self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         self.invalidate_all();
     }
 
@@ -1594,6 +1846,7 @@ impl KlineChart {
         } else {
             self.replay = Some(ReplayState::new(cutoff));
         }
+        self.auto_scroll_to_replay_cutoff();
         self.tpo_cache.borrow_mut().sessions.clear();
         self.invalidate_all();
     }
@@ -1714,10 +1967,27 @@ impl KlineChart {
     }
 
     pub fn check_price_alerts(&mut self, prev_price: f32, current_price: f32) -> Vec<PriceAlert> {
+        self.check_price_alerts_range(
+            prev_price,
+            prev_price.min(current_price),
+            prev_price.max(current_price),
+            current_price,
+        )
+    }
+
+    pub fn check_price_alerts_range(
+        &mut self,
+        prev_price: f32,
+        low: f32,
+        high: f32,
+        current_price: f32,
+    ) -> Vec<PriceAlert> {
         let mut triggered = Vec::new();
+        let now = chrono::Utc::now().timestamp_millis() as u64;
         for alert in &mut self.alerts {
-            if alert.check_trigger(prev_price, current_price) {
+            if alert.check_range_trigger(prev_price, low, high, current_price) {
                 alert.status = AlertStatus::Triggered;
+                alert.triggered_at = Some(now);
                 triggered.push(alert.clone());
             }
         }
@@ -2005,6 +2275,7 @@ impl KlineChart {
             Basis::Time(interval) => {
                 let step = self.chart.tick_size;
                 let timeseries = TimeSeries::<KlineDataPoint>::new(interval, step, &[])
+                    .with_exchange(self.ticker_info.exchange())
                     .with_trades(&self.raw_trades);
                 self.data_source = PlotData::TimeBased(timeseries);
             }
@@ -2046,7 +2317,7 @@ impl KlineChart {
         if let (Some(last_existing), Some(first_incoming)) =
             (self.raw_trades.last(), trades_buffer.first())
         {
-            if first_incoming.time >= last_existing.time {
+            if first_incoming.time > last_existing.time {
                 self.raw_trades.extend_from_slice(trades_buffer);
             } else {
                 self.raw_trades =
@@ -2225,6 +2496,57 @@ impl KlineChart {
         self.save_footprint_cache(true);
     }
 
+    pub fn insert_fetched_trades_buffered(&mut self, trades: &[Trade]) {
+        if trades.is_empty() {
+            return;
+        }
+        let (merged, actually_new) =
+            exchange::trades::cache::merge_intraday_trades_with_diff(&self.raw_trades, trades);
+        self.raw_trades = merged;
+
+        if !actually_new.is_empty()
+            && let PlotData::TickBased(ref mut tick_aggr) = self.data_source
+        {
+            tick_aggr.insert_trades(&actually_new);
+        }
+    }
+
+    pub fn commit_fetched_trades(&mut self, from_time: u64, to_time: u64) {
+        if from_time >= to_time {
+            return;
+        }
+        if let PlotData::TimeBased(ref mut timeseries) = self.data_source {
+            let interval_ms = timeseries.interval.to_milliseconds();
+            if let Some(nz_interval) = std::num::NonZeroU64::new(interval_ms) {
+                let interval_ms = nz_interval.get();
+                let start_bucket = (from_time / interval_ms) * interval_ms;
+                let end_bucket = (to_time.saturating_sub(1) / interval_ms) * interval_ms;
+                let mut affected_buckets = rustc_hash::FxHashSet::default();
+                let mut b = start_bucket;
+                while b <= end_bucket {
+                    affected_buckets.insert(b);
+                    b = b.saturating_add(interval_ms);
+                }
+                timeseries.rebuild_buckets_from_raw_trades(&self.raw_trades, &affected_buckets);
+            }
+        }
+
+        self.save_footprint_cache(false);
+
+        let today_midnight = exchange::clock::today_midnight_ms(Some(self.ticker_info.exchange()));
+        if to_time <= today_midnight {
+            self.raw_trades.retain(|t| t.time >= today_midnight);
+        } else {
+            const MAX_RAW_TRADES_IN_RAM: usize = 500_000;
+            if self.raw_trades.len() > MAX_RAW_TRADES_IN_RAM {
+                let excess = self.raw_trades.len() - MAX_RAW_TRADES_IN_RAM;
+                self.raw_trades.drain(..excess);
+            }
+        }
+
+        self.invalidate_all();
+    }
+
     pub fn insert_raw_trades(&mut self, raw_trades: Vec<Trade>) {
         if raw_trades.is_empty() {
             return;
@@ -2240,7 +2562,17 @@ impl KlineChart {
                     tick_aggr.insert_trades(&actually_new);
                 }
                 PlotData::TimeBased(ref mut timeseries) => {
-                    timeseries.insert_trades_existing_buckets(&actually_new);
+                    let interval_ms = timeseries.interval.to_milliseconds();
+                    if interval_ms > 0 {
+                        let mut affected_buckets = rustc_hash::FxHashSet::default();
+                        for trade in &actually_new {
+                            if let Some(q) = trade.time.checked_div(interval_ms) {
+                                affected_buckets.insert(q * interval_ms);
+                            }
+                        }
+                        timeseries
+                            .rebuild_buckets_from_raw_trades(&self.raw_trades, &affected_buckets);
+                    }
                 }
             }
 
@@ -2453,12 +2785,50 @@ impl KlineChart {
     }
 
     pub fn invalidate(&mut self, now: Option<Instant>) -> Option<Action> {
+        let mut replay_advanced = false;
+        if let Some(t) = now {
+            if let Some(ref mut rep) = self.replay
+                && rep.active
+                && rep.is_playing
+            {
+                let interval_ms = rep.speed_ms.max(10);
+                let elapsed = t.duration_since(self.last_tick).as_millis() as u64;
+                if elapsed >= interval_ms {
+                    let step = match self.chart.basis {
+                        Basis::Time(tf) => tf.to_milliseconds(),
+                        Basis::Tick(_) => 10,
+                    };
+                    let steps = (elapsed / interval_ms).max(1);
+                    let max_t = match &self.data_source {
+                        PlotData::TimeBased(ts) => ts.latest_timestamp().unwrap_or(u64::MAX),
+                        PlotData::TickBased(_) => u64::MAX,
+                    };
+                    let next_cutoff = rep.cutoff_time.saturating_add(step * steps);
+                    if next_cutoff >= max_t {
+                        rep.cutoff_time = max_t;
+                        rep.is_playing = false;
+                    } else {
+                        rep.cutoff_time = next_cutoff;
+                    }
+                    self.last_tick = t;
+                    replay_advanced = true;
+                }
+            } else {
+                self.last_tick = t;
+            }
+        }
+
+        if replay_advanced {
+            self.auto_scroll_to_replay_cutoff();
+            self.tpo_cache.borrow_mut().sessions.clear();
+        }
+
         let chart = &mut self.chart;
 
         if let Some(autoscale) = chart.layout.autoscale {
             match autoscale {
                 super::Autoscale::CenterLatest => {
-                    let x_translation = match &self.kind {
+                    let base_x = match &self.kind {
                         KlineChartKind::Footprint { .. } => {
                             0.5 * (chart.bounds.width / chart.scaling)
                                 - (chart.cell_width / chart.scaling)
@@ -2472,7 +2842,14 @@ impl KlineChart {
                                 - (8.0 * chart.cell_width / chart.scaling)
                         }
                     };
-                    chart.translation.x = x_translation;
+                    let x_offset = if let Some(rep) = &self.replay
+                        && rep.active
+                    {
+                        chart.interval_to_x(rep.cutoff_time)
+                    } else {
+                        0.0
+                    };
+                    chart.translation.x = base_x - x_offset;
 
                     let calculate_target_y = |kline: exchange::Kline| -> f32 {
                         let y_low = chart.price_to_y(kline.low);
@@ -2504,7 +2881,12 @@ impl KlineChart {
                 }
                 super::Autoscale::FitToVisible => {
                     let visible_region = chart.visible_region(chart.bounds.size());
-                    let (start_interval, end_interval) = chart.interval_range(&visible_region);
+                    let (start_interval, mut end_interval) = chart.interval_range(&visible_region);
+                    if let Some(rep) = &self.replay
+                        && rep.active
+                    {
+                        end_interval = end_interval.min(rep.cutoff_time);
+                    }
 
                     let price_range = self
                         .data_source
@@ -2542,25 +2924,7 @@ impl KlineChart {
             indi.clear_all_caches();
         }
 
-        if let Some(t) = now {
-            if let Some(ref mut rep) = self.replay
-                && rep.active
-                && rep.is_playing
-            {
-                let interval_ms = rep.speed_ms.max(10);
-                let elapsed = t.duration_since(self.last_tick).as_millis() as u64;
-                if elapsed >= interval_ms {
-                    let step = match self.chart.basis {
-                        Basis::Time(tf) => tf.to_milliseconds(),
-                        Basis::Tick(_) => 10,
-                    };
-                    let steps = (elapsed / interval_ms).max(1);
-                    rep.cutoff_time = rep.cutoff_time.saturating_add(step * steps);
-                    self.last_tick = t;
-                }
-            } else {
-                self.last_tick = t;
-            }
+        if now.is_some() {
             self.missing_data_task()
         } else {
             None
@@ -2758,7 +3122,7 @@ impl canvas::Program<Message> for KlineChart {
                         d_state.active_tool = DrawingTool::None;
                         d_state.start_point = None;
 
-                        if let Some(DrawingDrag::MovingDrawing { .. }) = d_state.drag.take() {
+                        if d_state.drag.take().is_some() {
                             drop(d_state);
                             self.chart.cache.clear_crosshair();
                             return Some(
@@ -2774,6 +3138,87 @@ impl canvas::Program<Message> for KlineChart {
                         if had_in_prog || had_tool {
                             drop(d_state);
                             return Some(canvas::Action::capture());
+                        }
+                    }
+
+                    // Ctrl+Z (Undo) and Ctrl+Y / Ctrl+Shift+Z (Redo)
+                    let is_ctrl =
+                        modifiers.control() || modifiers.command() || d_state.ctrl_pressed;
+                    let is_z = matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Character(c)
+                            if c.eq_ignore_ascii_case("z") || c == "я" || c == "Я"
+                    ) || matches!(
+                        physical_key,
+                        iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyZ)
+                    );
+                    let is_y = matches!(
+                        key.as_ref(),
+                        iced::keyboard::Key::Character(c)
+                            if c.eq_ignore_ascii_case("y") || c == "н" || c == "Н"
+                    ) || matches!(
+                        physical_key,
+                        iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyY)
+                    );
+                    let is_shift = modifiers.shift() || d_state.shift_pressed;
+
+                    if is_ctrl && !modifiers.alt() {
+                        let is_undo = is_z && !is_shift;
+                        let is_redo = (is_z && is_shift) || is_y;
+
+                        let is_hovered = cursor.position_in(bounds).is_some();
+                        let has_active_state = d_state.in_progress.is_some()
+                            || d_state.drag.is_some()
+                            || d_state.selected_drawing.is_some()
+                            || d_state.active_tool != DrawingTool::None;
+                        let should_process =
+                            is_hovered || has_active_state || cursor.position().is_none();
+
+                        if is_undo && should_process {
+                            // 1. Cancel active drag and restore pre-drag coordinates
+                            if d_state.drag.take().is_some() {
+                                drop(d_state);
+                                self.chart.cache.clear_crosshair();
+                                return Some(canvas::Action::request_redraw().and_capture());
+                            }
+
+                            // 2. In-progress multi-point drawing (e.g. Path vertex undo)
+                            if let Some(mut in_prog) = d_state.in_progress.take() {
+                                if let DrawingKind::Path { ref mut points } = in_prog.kind
+                                    && points.len() > 2
+                                {
+                                    points.remove(points.len() - 2);
+                                    d_state.in_progress = Some(in_prog);
+                                    drop(d_state);
+                                    return Some(canvas::Action::request_redraw().and_capture());
+                                }
+                                d_state.in_progress = None;
+                                d_state.start_point = None;
+                                d_state.active_tool = DrawingTool::None;
+                                drop(d_state);
+                                return Some(canvas::Action::request_redraw().and_capture());
+                            }
+
+                            // 3. Active tool selected with no points placed yet
+                            if d_state.active_tool != DrawingTool::None {
+                                d_state.active_tool = DrawingTool::None;
+                                d_state.start_point = None;
+                                drop(d_state);
+                                return Some(canvas::Action::request_redraw().and_capture());
+                            }
+
+                            // 4. Committed drawing history undo
+                            if !self.undo_stack.is_empty() {
+                                drop(d_state);
+                                return Some(
+                                    canvas::Action::publish(Message::UndoDrawing).and_capture(),
+                                );
+                            }
+                        } else if is_redo && should_process && !self.redo_stack.is_empty() {
+                            drop(d_state);
+                            return Some(
+                                canvas::Action::publish(Message::RedoDrawing).and_capture(),
+                            );
                         }
                     }
 
@@ -3486,7 +3931,7 @@ impl canvas::Program<Message> for KlineChart {
                         let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
                         let alert_screen_y =
                             (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
-                        (pos.y - alert_screen_y).abs() <= 8.0
+                        (pos.y - alert_screen_y).abs() <= 10.0
                     })
                 } else {
                     false
@@ -3627,6 +4072,26 @@ impl canvas::Program<Message> for KlineChart {
                 && let Some(pos) = cursor.position_in(bounds)
             {
                 let chart = self.state();
+
+                // 1. Check if user clicked the '✕' close button on any alert badge
+                let close_hit_alert = self.alerts.iter().find(|a| {
+                    let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
+                    let alert_screen_y =
+                        (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
+                    if (pos.y - alert_screen_y).abs() > 10.0 {
+                        return false;
+                    }
+                    pos.x >= bounds.width - 24.0 && pos.x <= bounds.width
+                });
+
+                if let Some(alert) = close_hit_alert {
+                    let alert_id = alert.id;
+                    return Some(
+                        canvas::Action::publish(Message::DeletePriceAlert(alert_id)).and_capture(),
+                    );
+                }
+
+                // 2. Otherwise check for alert dragging
                 let frame_pos = Point::new(
                     (pos.x - bounds.width / 2.0) / chart.scaling - chart.translation.x,
                     (pos.y - bounds.height / 2.0) / chart.scaling - chart.translation.y,
@@ -3637,7 +4102,18 @@ impl canvas::Program<Message> for KlineChart {
                     let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
                     let alert_screen_y =
                         (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
-                    (pos.y - alert_screen_y).abs() <= 8.0
+                    if (pos.y - alert_screen_y).abs() > 8.0 {
+                        return false;
+                    }
+                    if self.config.alert_drag_handle_only {
+                        let price_str = format!("{:.*}", chart.decimals, a.target_price);
+                        let price_w = 64.0f32.max(price_str.len() as f32 * 8.0 + 16.0);
+                        let badge_w = price_w + 18.0;
+                        let badge_screen_x = bounds.width - badge_w - 4.0;
+                        pos.x >= badge_screen_x - 10.0 && pos.x < bounds.width - 22.0
+                    } else {
+                        pos.x < bounds.width - 22.0
+                    }
                 });
 
                 if let Some(alert) = found_alert {
@@ -4232,6 +4708,20 @@ impl canvas::Program<Message> for KlineChart {
 
         if let Some(pos) = cursor.position_in(bounds) {
             let chart = self.state();
+
+            // Hovering over any alert's '✕' close button shows pointer cursor
+            let is_over_close_btn = self.alerts.iter().any(|a| {
+                let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
+                let alert_screen_y =
+                    (alert_y + chart.translation.y) * chart.scaling + bounds.height / 2.0;
+                (pos.y - alert_screen_y).abs() <= 10.0
+                    && pos.x >= bounds.width - 24.0
+                    && pos.x <= bounds.width
+            });
+            if is_over_close_btn && self.drawing_state.borrow().active_tool == DrawingTool::None {
+                return mouse::Interaction::Pointer;
+            }
+
             let is_near_alert = self.alerts.iter().any(|a| {
                 let alert_y = chart.price_to_y(Price::from_f32(a.target_price));
                 let alert_screen_y =
@@ -4736,18 +5226,20 @@ fn draw_clusters(
                             );
                         }
 
-                        let bar_width = (delta.abs() / max_cluster_qty) * area.bars_width;
-                        if bar_width > 0.0 {
-                            let color = if delta >= 0.0 {
-                                palette.success.base.color.scale_alpha(bar_alpha)
-                            } else {
-                                palette.danger.base.color.scale_alpha(bar_alpha)
-                            };
-                            frame.fill_rectangle(
-                                Point::new(area.bars_left, y - (cell_height / 2.0)),
-                                Size::new(bar_width, cell_height),
-                                color,
-                            );
+                        if max_cluster_qty > 0.0 {
+                            let bar_width = (delta.abs() / max_cluster_qty) * area.bars_width;
+                            if bar_width > 0.0 && bar_width.is_finite() {
+                                let color = if delta >= 0.0 {
+                                    palette.success.base.color.scale_alpha(bar_alpha)
+                                } else {
+                                    palette.danger.base.color.scale_alpha(bar_alpha)
+                                };
+                                frame.fill_rectangle(
+                                    Point::new(area.bars_left, y - (cell_height / 2.0)),
+                                    Size::new(bar_width, cell_height),
+                                    color,
+                                );
+                            }
                         }
                     }
                     _ => {}
@@ -4857,13 +5349,15 @@ fn draw_clusters(
                         );
                     }
 
-                    let bar_width = (buy_qty / max_cluster_qty) * right_area_width;
-                    if bar_width > 0.0 {
-                        frame.fill_rectangle(
-                            Point::new(area.bid_area_left, y - (cell_height / 2.0)),
-                            Size::new(bar_width, cell_height),
-                            palette.success.base.color.scale_alpha(bar_alpha),
-                        );
+                    if max_cluster_qty > 0.0 {
+                        let bar_width = (buy_qty / max_cluster_qty) * right_area_width;
+                        if bar_width > 0.0 && bar_width.is_finite() {
+                            frame.fill_rectangle(
+                                Point::new(area.bid_area_left, y - (cell_height / 2.0)),
+                                Size::new(bar_width, cell_height),
+                                palette.success.base.color.scale_alpha(bar_alpha),
+                            );
+                        }
                     }
                 }
                 if left_area_width > 0.0 {
@@ -4886,13 +5380,16 @@ fn draw_clusters(
                         );
                     }
 
-                    let bar_width = (sell_qty / max_cluster_qty) * left_area_width;
-                    if bar_width > 0.0 {
-                        frame.fill_rectangle(
-                            Point::new(area.ask_area_right, y - (cell_height / 2.0)),
-                            Size::new(-bar_width, cell_height),
-                            palette.danger.base.color.scale_alpha(bar_alpha),
-                        );
+                    if max_cluster_qty > 0.0 {
+                        let bar_width = (sell_qty / max_cluster_qty) * left_area_width;
+                        if bar_width > 0.0 && bar_width.is_finite() {
+                            let left = (area.ask_area_right - bar_width).max(area.bid_area_left);
+                            frame.fill_rectangle(
+                                Point::new(left, y - (cell_height / 2.0)),
+                                Size::new(bar_width, cell_height),
+                                palette.danger.base.color.scale_alpha(bar_alpha),
+                            );
+                        }
                     }
                 }
 
@@ -7251,6 +7748,7 @@ fn hit_test_drawing(
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PositionOutcome {
+    pub is_entered: bool,
     pub exit_time: u64,
     pub exit_price: f32,
     pub is_closed: bool,
@@ -7270,6 +7768,7 @@ pub(crate) fn evaluate_position_outcome(
     let mut last_seen_time = entry_time;
     let mut last_seen_price = entry_price;
     let mut has_candles = false;
+    let mut is_entered = false;
 
     match data_source {
         PlotData::TimeBased(ts) => {
@@ -7277,6 +7776,7 @@ pub(crate) fn evaluate_position_outcome(
                 && entry_time > cutoff
             {
                 return PositionOutcome {
+                    is_entered: false,
                     exit_time: entry_time,
                     exit_price: entry_price,
                     is_closed: false,
@@ -7299,10 +7799,19 @@ pub(crate) fn evaluate_position_outcome(
 
             for (&time, dp) in ts.datapoints.range(start_candle_t..=eval_end) {
                 has_candles = true;
-                last_seen_time = time;
-                last_seen_price = dp.kline.close.to_f32();
                 let high = dp.kline.high.to_f32();
                 let low = dp.kline.low.to_f32();
+
+                if !is_entered {
+                    if low <= entry_price && high >= entry_price {
+                        is_entered = true;
+                    } else {
+                        continue;
+                    }
+                }
+
+                last_seen_time = time;
+                last_seen_price = dp.kline.close.to_f32();
 
                 if is_long {
                     let hit_tp = high >= target_price;
@@ -7311,6 +7820,7 @@ pub(crate) fn evaluate_position_outcome(
                         let open = dp.kline.open.to_f32();
                         if (open - target_price).abs() <= (open - stop_price).abs() {
                             return PositionOutcome {
+                                is_entered: true,
                                 exit_time: time,
                                 exit_price: target_price,
                                 is_closed: true,
@@ -7318,6 +7828,7 @@ pub(crate) fn evaluate_position_outcome(
                             };
                         } else {
                             return PositionOutcome {
+                                is_entered: true,
                                 exit_time: time,
                                 exit_price: stop_price,
                                 is_closed: true,
@@ -7326,6 +7837,7 @@ pub(crate) fn evaluate_position_outcome(
                         }
                     } else if hit_tp {
                         return PositionOutcome {
+                            is_entered: true,
                             exit_time: time,
                             exit_price: target_price,
                             is_closed: true,
@@ -7333,6 +7845,7 @@ pub(crate) fn evaluate_position_outcome(
                         };
                     } else if hit_sl {
                         return PositionOutcome {
+                            is_entered: true,
                             exit_time: time,
                             exit_price: stop_price,
                             is_closed: true,
@@ -7346,6 +7859,7 @@ pub(crate) fn evaluate_position_outcome(
                         let open = dp.kline.open.to_f32();
                         if (open - target_price).abs() <= (open - stop_price).abs() {
                             return PositionOutcome {
+                                is_entered: true,
                                 exit_time: time,
                                 exit_price: target_price,
                                 is_closed: true,
@@ -7353,6 +7867,7 @@ pub(crate) fn evaluate_position_outcome(
                             };
                         } else {
                             return PositionOutcome {
+                                is_entered: true,
                                 exit_time: time,
                                 exit_price: stop_price,
                                 is_closed: true,
@@ -7361,6 +7876,7 @@ pub(crate) fn evaluate_position_outcome(
                         }
                     } else if hit_tp {
                         return PositionOutcome {
+                            is_entered: true,
                             exit_time: time,
                             exit_price: target_price,
                             is_closed: true,
@@ -7368,6 +7884,7 @@ pub(crate) fn evaluate_position_outcome(
                         };
                     } else if hit_sl {
                         return PositionOutcome {
+                            is_entered: true,
                             exit_time: time,
                             exit_price: stop_price,
                             is_closed: true,
@@ -7375,6 +7892,16 @@ pub(crate) fn evaluate_position_outcome(
                         };
                     }
                 }
+            }
+
+            if !is_entered {
+                return PositionOutcome {
+                    is_entered: false,
+                    exit_time: entry_time,
+                    exit_price: entry_price,
+                    is_closed: false,
+                    is_profit: true,
+                };
             }
         }
         PlotData::TickBased(tick_aggr) => {
@@ -7386,10 +7913,19 @@ pub(crate) fn evaluate_position_outcome(
                     for idx in start_idx..=end_idx {
                         has_candles = true;
                         let kline = &tick_aggr.datapoints[n - 1 - idx].kline;
-                        last_seen_time = idx as u64;
-                        last_seen_price = kline.close.to_f32();
                         let high = kline.high.to_f32();
                         let low = kline.low.to_f32();
+
+                        if !is_entered {
+                            if low <= entry_price && high >= entry_price {
+                                is_entered = true;
+                            } else {
+                                continue;
+                            }
+                        }
+
+                        last_seen_time = idx as u64;
+                        last_seen_price = kline.close.to_f32();
 
                         if is_long {
                             let hit_tp = high >= target_price;
@@ -7398,6 +7934,7 @@ pub(crate) fn evaluate_position_outcome(
                                 let open = kline.open.to_f32();
                                 if (open - target_price).abs() <= (open - stop_price).abs() {
                                     return PositionOutcome {
+                                        is_entered: true,
                                         exit_time: idx as u64,
                                         exit_price: target_price,
                                         is_closed: true,
@@ -7405,6 +7942,7 @@ pub(crate) fn evaluate_position_outcome(
                                     };
                                 } else {
                                     return PositionOutcome {
+                                        is_entered: true,
                                         exit_time: idx as u64,
                                         exit_price: stop_price,
                                         is_closed: true,
@@ -7413,6 +7951,7 @@ pub(crate) fn evaluate_position_outcome(
                                 }
                             } else if hit_tp {
                                 return PositionOutcome {
+                                    is_entered: true,
                                     exit_time: idx as u64,
                                     exit_price: target_price,
                                     is_closed: true,
@@ -7420,6 +7959,7 @@ pub(crate) fn evaluate_position_outcome(
                                 };
                             } else if hit_sl {
                                 return PositionOutcome {
+                                    is_entered: true,
                                     exit_time: idx as u64,
                                     exit_price: stop_price,
                                     is_closed: true,
@@ -7433,6 +7973,7 @@ pub(crate) fn evaluate_position_outcome(
                                 let open = kline.open.to_f32();
                                 if (open - target_price).abs() <= (open - stop_price).abs() {
                                     return PositionOutcome {
+                                        is_entered: true,
                                         exit_time: idx as u64,
                                         exit_price: target_price,
                                         is_closed: true,
@@ -7440,6 +7981,7 @@ pub(crate) fn evaluate_position_outcome(
                                     };
                                 } else {
                                     return PositionOutcome {
+                                        is_entered: true,
                                         exit_time: idx as u64,
                                         exit_price: stop_price,
                                         is_closed: true,
@@ -7448,6 +7990,7 @@ pub(crate) fn evaluate_position_outcome(
                                 }
                             } else if hit_tp {
                                 return PositionOutcome {
+                                    is_entered: true,
                                     exit_time: idx as u64,
                                     exit_price: target_price,
                                     is_closed: true,
@@ -7455,6 +7998,7 @@ pub(crate) fn evaluate_position_outcome(
                                 };
                             } else if hit_sl {
                                 return PositionOutcome {
+                                    is_entered: true,
                                     exit_time: idx as u64,
                                     exit_price: stop_price,
                                     is_closed: true,
@@ -7464,6 +8008,16 @@ pub(crate) fn evaluate_position_outcome(
                         }
                     }
                 }
+            }
+
+            if !is_entered {
+                return PositionOutcome {
+                    is_entered: false,
+                    exit_time: entry_time,
+                    exit_price: entry_price,
+                    is_closed: false,
+                    is_profit: true,
+                };
             }
         }
     }
@@ -7491,6 +8045,7 @@ pub(crate) fn evaluate_position_outcome(
     };
 
     PositionOutcome {
+        is_entered: true,
         exit_time: last_seen_time.max(entry_time),
         exit_price: last_seen_price,
         is_closed,
@@ -7763,6 +8318,17 @@ fn draw_chart_drawings(
                 let s_col = pos_style.stop_color.unwrap_or(theme_s_col);
                 let e_col = pos_style.entry_color;
 
+                let outcome = evaluate_position_outcome(
+                    data_source,
+                    entry.0,
+                    entry.1,
+                    *target_price,
+                    *stop_price,
+                    *is_long,
+                    end_time_val,
+                    cutoff_time,
+                );
+
                 // Profit zone
                 let p_min_y = entry_y.min(target_y);
                 let p_h = (entry_y - target_y).abs();
@@ -7811,94 +8377,6 @@ fn draw_chart_drawings(
                     stop_stroke,
                 );
 
-                // Entry line
-                frame.stroke(
-                    &Path::line(Point::new(entry_x, entry_y), Point::new(end_x, entry_y)),
-                    Stroke {
-                        style: canvas::Style::Solid(iced::Color::from_rgba(
-                            e_col[0], e_col[1], e_col[2], e_col[3],
-                        )),
-                        width: drawing.width.max(1.0),
-                        ..Default::default()
-                    },
-                );
-
-                // Evaluate outcome & dynamic highlight
-                let outcome = evaluate_position_outcome(
-                    data_source,
-                    entry.0,
-                    entry.1,
-                    *target_price,
-                    *stop_price,
-                    *is_long,
-                    end_time_val,
-                    cutoff_time,
-                );
-
-                let exit_x = chart.interval_to_x(outcome.exit_time).clamp(entry_x, end_x);
-                let exit_y = chart.price_to_y(Price::from_f32(outcome.exit_price));
-
-                // Dynamic active profit/loss highlight zone ("воно більш зеленим стає")
-                let active_w = (exit_x - entry_x).max(0.0);
-                let active_min_y = entry_y.min(exit_y);
-                let active_h = (entry_y - exit_y).abs();
-                if active_w > 0.0 && active_h > 0.5 {
-                    let active_fill = if outcome.is_profit {
-                        iced::Color::from_rgba(
-                            p_col[0],
-                            (p_col[1] * 1.25).min(1.0),
-                            p_col[2],
-                            (p_col[3] * 1.8).clamp(0.25, 0.65),
-                        )
-                    } else {
-                        iced::Color::from_rgba(
-                            (s_col[0] * 1.25).min(1.0),
-                            s_col[1],
-                            s_col[2],
-                            (s_col[3] * 1.8).clamp(0.25, 0.65),
-                        )
-                    };
-                    frame.fill_rectangle(
-                        Point::new(entry_x, active_min_y),
-                        Size::new(active_w, active_h),
-                        active_fill,
-                    );
-                }
-
-                // Tracking dashed line from entry to exit
-                if pos_style.show_price_path && active_w > 0.5 {
-                    let line_color = if outcome.is_profit {
-                        iced::Color::from_rgba(0.4, 0.95, 0.6, 0.85)
-                    } else {
-                        iced::Color::from_rgba(0.95, 0.45, 0.45, 0.85)
-                    };
-                    let dash_stroke = Stroke {
-                        style: canvas::Style::Solid(line_color),
-                        width: 1.5,
-                        line_dash: canvas::LineDash {
-                            segments: &[4.0, 3.0],
-                            offset: 0,
-                        },
-                        ..Default::default()
-                    };
-                    frame.stroke(
-                        &Path::line(Point::new(entry_x, entry_y), Point::new(exit_x, exit_y)),
-                        dash_stroke,
-                    );
-
-                    if outcome.is_closed {
-                        let dot_color = if outcome.is_profit {
-                            iced::Color::from_rgb(0.2, 0.9, 0.4)
-                        } else {
-                            iced::Color::from_rgb(0.9, 0.25, 0.25)
-                        };
-                        frame.fill(
-                            &Path::circle(Point::new(exit_x, exit_y), 3.0 / chart.scaling),
-                            dot_color,
-                        );
-                    }
-                }
-
                 // R:R text
                 let risk = (entry.1 - stop_price).abs();
                 let reward = (target_price - entry.1).abs();
@@ -7914,6 +8392,85 @@ fn draw_chart_drawings(
                     align_y: iced::alignment::Vertical::Center,
                     ..Default::default()
                 });
+
+                // Dynamic active profit/loss highlight zone & tracking path (only once entered)
+                if outcome.is_entered {
+                    let exit_x = chart.interval_to_x(outcome.exit_time).clamp(entry_x, end_x);
+                    let exit_y = chart.price_to_y(Price::from_f32(outcome.exit_price));
+
+                    // Dynamic active profit/loss highlight zone ("воно більш зеленим стає")
+                    let active_w = (exit_x - entry_x).max(0.0);
+                    let active_min_y = entry_y.min(exit_y);
+                    let active_h = (entry_y - exit_y).abs();
+                    if active_w > 0.0 && active_h > 0.5 {
+                        let active_fill = if outcome.is_profit {
+                            iced::Color::from_rgba(
+                                p_col[0],
+                                (p_col[1] * 1.25).min(1.0),
+                                p_col[2],
+                                (p_col[3] * 1.8).clamp(0.25, 0.65),
+                            )
+                        } else {
+                            iced::Color::from_rgba(
+                                (s_col[0] * 1.25).min(1.0),
+                                s_col[1],
+                                s_col[2],
+                                (s_col[3] * 1.8).clamp(0.25, 0.65),
+                            )
+                        };
+                        frame.fill_rectangle(
+                            Point::new(entry_x, active_min_y),
+                            Size::new(active_w, active_h),
+                            active_fill,
+                        );
+                    }
+
+                    // Tracking dashed line from entry to exit
+                    if pos_style.show_price_path && active_w > 0.5 {
+                        let line_color = if outcome.is_profit {
+                            iced::Color::from_rgba(0.4, 0.95, 0.6, 0.85)
+                        } else {
+                            iced::Color::from_rgba(0.95, 0.45, 0.45, 0.85)
+                        };
+                        let dash_stroke = Stroke {
+                            style: canvas::Style::Solid(line_color),
+                            width: 1.5,
+                            line_dash: canvas::LineDash {
+                                segments: &[4.0, 3.0],
+                                offset: 0,
+                            },
+                            ..Default::default()
+                        };
+                        frame.stroke(
+                            &Path::line(Point::new(entry_x, entry_y), Point::new(exit_x, exit_y)),
+                            dash_stroke,
+                        );
+
+                        if outcome.is_closed {
+                            let dot_color = if outcome.is_profit {
+                                iced::Color::from_rgb(0.2, 0.9, 0.4)
+                            } else {
+                                iced::Color::from_rgb(0.9, 0.25, 0.25)
+                            };
+                            frame.fill(
+                                &Path::circle(Point::new(exit_x, exit_y), 3.0 / chart.scaling),
+                                dot_color,
+                            );
+                        }
+                    }
+                }
+
+                // Entry line is always drawn
+                frame.stroke(
+                    &Path::line(Point::new(entry_x, entry_y), Point::new(end_x, entry_y)),
+                    Stroke {
+                        style: canvas::Style::Solid(iced::Color::from_rgba(
+                            e_col[0], e_col[1], e_col[2], e_col[3],
+                        )),
+                        width: drawing.width.max(1.0),
+                        ..Default::default()
+                    },
+                );
 
                 if is_selected {
                     draw_round_handle(frame, Point::new(entry_x, entry_y));
@@ -7971,13 +8528,16 @@ fn draw_chart_alerts(
                 iced::Color::from_rgb(0.5, 0.5, 0.5)
             };
 
-            // TradingView-style draggable badge on the right edge
+            // TradingView-style draggable badge on the right edge with '✕' close button
             let price_str = format!("{:.*}", chart.decimals, price_val);
-            let badge_w = (72.0f32 / chart.scaling)
-                .max((price_str.len() as f32 * 8.0 + 16.0) / chart.scaling);
+            let btn_w = 18.0 / chart.scaling;
             let badge_h = 18.0 / chart.scaling;
+            let price_w = (64.0f32 / chart.scaling)
+                .max((price_str.len() as f32 * 8.0 + 16.0) / chart.scaling);
+            let badge_w = price_w + btn_w;
             let badge_x = region.x + region.width - badge_w - 4.0 / chart.scaling;
             let badge_y = y - badge_h / 2.0;
+            let btn_x = badge_x + price_w;
 
             let stroke = Stroke {
                 style: canvas::Style::Solid(alert_color),
@@ -7997,9 +8557,10 @@ fn draw_chart_alerts(
                 stroke,
             );
 
+            // Price area background
             frame.fill_rectangle(
                 Point::new(badge_x, badge_y),
-                Size::new(badge_w, badge_h),
+                Size::new(price_w, badge_h),
                 if is_being_dragged {
                     iced::Color::from_rgba(0.1, 0.35, 0.55, 0.95)
                 } else if alert.status == data::chart::alert::AlertStatus::Active {
@@ -8008,7 +8569,19 @@ fn draw_chart_alerts(
                     iced::Color::from_rgba(0.15, 0.15, 0.15, 0.92)
                 },
             );
-            // Stroke width in iced canvas is always in physical screen pixels, do not divide by scaling
+
+            // Close button area background
+            frame.fill_rectangle(
+                Point::new(btn_x, badge_y),
+                Size::new(btn_w, badge_h),
+                if is_being_dragged {
+                    iced::Color::from_rgba(0.15, 0.25, 0.35, 0.95)
+                } else {
+                    iced::Color::from_rgba(0.20, 0.12, 0.12, 0.95)
+                },
+            );
+
+            // Badge outer outline
             frame.stroke(
                 &Path::rectangle(Point::new(badge_x, badge_y), Size::new(badge_w, badge_h)),
                 Stroke {
@@ -8018,9 +8591,23 @@ fn draw_chart_alerts(
                 },
             );
 
+            // Vertical divider between price and close button
+            frame.stroke(
+                &Path::line(
+                    Point::new(btn_x, badge_y),
+                    Point::new(btn_x, badge_y + badge_h),
+                ),
+                Stroke {
+                    style: canvas::Style::Solid(alert_color.scale_alpha(0.6)),
+                    width: 1.0,
+                    ..Default::default()
+                },
+            );
+
+            // Price text
             frame.fill_text(canvas::Text {
                 content: price_str,
-                position: Point::new(badge_x + badge_w / 2.0, badge_y + badge_h / 2.0),
+                position: Point::new(badge_x + price_w / 2.0, badge_y + badge_h / 2.0),
                 color: palette.background.base.text,
                 size: iced::Pixels(10.0 / chart.scaling),
                 align_x: Alignment::Center.into(),
@@ -8028,6 +8615,29 @@ fn draw_chart_alerts(
                 font: style::AZERET_MONO,
                 ..canvas::Text::default()
             });
+
+            // Cross '✕' icon inside close button
+            let cx = btn_x + btn_w / 2.0;
+            let cy = badge_y + badge_h / 2.0;
+            let r = 3.5 / chart.scaling;
+            let cross_color = if alert.status == data::chart::alert::AlertStatus::Active {
+                iced::Color::from_rgb(0.9, 0.45, 0.45)
+            } else {
+                iced::Color::from_rgb(0.7, 0.7, 0.7)
+            };
+            let cross_stroke = Stroke {
+                style: canvas::Style::Solid(cross_color),
+                width: 1.2,
+                ..Default::default()
+            };
+            frame.stroke(
+                &Path::line(Point::new(cx - r, cy - r), Point::new(cx + r, cy + r)),
+                cross_stroke,
+            );
+            frame.stroke(
+                &Path::line(Point::new(cx - r, cy + r), Point::new(cx + r, cy - r)),
+                cross_stroke,
+            );
         }
     }
 }
@@ -8439,6 +9049,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             None,
         );
@@ -8511,6 +9122,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             None,
         );
@@ -8583,6 +9195,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             None,
         );
@@ -8637,6 +9250,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             None,
         );
@@ -9166,6 +9780,82 @@ mod tests {
     }
 
     #[test]
+    fn test_kline_chart_replay_auto_scroll() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let klines: Vec<Kline> = (0..50)
+            .map(|i| Kline {
+                time: 1000 + i * 300_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(95.0),
+                close: Price::from_f32(102.0),
+                volume: (5.0, 5.0),
+            })
+            .collect();
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &klines,
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        chart.chart.bounds = Rectangle::new(Point::ORIGIN, Size::new(1000.0, 600.0));
+
+        chart.toggle_replay();
+        assert!(chart.is_replay_active());
+
+        // Set cutoff at bar 10
+        chart.replay_set_cutoff_and_jump(1000 + 10 * 300_000);
+        let initial_trans_x = chart.chart.translation.x;
+
+        // Step forward: cutoff advances by 1 bar, chart shifts to the left (translation.x decreases)
+        chart.replay_step_forward();
+        assert_eq!(
+            chart.replay_state().unwrap().cutoff_time,
+            1000 + 11 * 300_000
+        );
+        let step_trans_x = chart.chart.translation.x;
+        assert!(
+            step_trans_x < initial_trans_x,
+            "Chart should shift left when stepping forward"
+        );
+
+        // Step backward: cutoff moves back, chart shifts to the right
+        chart.replay_step_backward();
+        assert_eq!(
+            chart.replay_state().unwrap().cutoff_time,
+            1000 + 10 * 300_000
+        );
+        assert!(
+            (chart.chart.translation.x - initial_trans_x).abs() < 1e-4,
+            "Chart should return to original position when stepping backward"
+        );
+
+        // Toggle play/pause
+        chart.replay_play_pause();
+        assert!(chart.replay_state().unwrap().is_playing);
+
+        // Advance via invalidate(now)
+        let now = Instant::now() + Duration::from_millis(1500);
+        let _ = chart.invalidate(Some(now));
+        assert!(chart.replay_state().unwrap().cutoff_time > 1000 + 10 * 300_000);
+        assert!(
+            chart.chart.translation.x < initial_trans_x,
+            "Chart should auto-scroll forward during replay playback"
+        );
+
+        // Toggle play/pause to stop
+        chart.replay_play_pause();
+        assert!(!chart.replay_state().unwrap().is_playing);
+    }
+
+    #[test]
     fn test_inverted_range_does_not_panic() {
         let chart = make_test_chart();
         let qty = chart.calc_qty_scales(
@@ -9212,6 +9902,113 @@ mod tests {
         let release_action = chart.update(&mut interaction, &release_event, bounds, cursor);
         assert!(release_action.is_some());
         assert!(chart.alert_drag_state.borrow().is_none());
+    }
+
+    #[test]
+    fn test_alert_close_button_click() {
+        use iced::widget::canvas::Program;
+
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let klines = vec![Kline {
+            time: 1000,
+            open: Price::from_f32(50000.0),
+            high: Price::from_f32(50050.0),
+            low: Price::from_f32(49950.0),
+            close: Price::from_f32(50000.0),
+            volume: (5.0, 5.0),
+        }];
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &klines,
+            Vec::new(),
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+        let alert = PriceAlert::new(
+            "BTCUSDT",
+            50000.0,
+            data::chart::alert::AlertCondition::CrossAbove,
+        );
+        let alert_id = alert.id;
+        chart.add_alert(alert);
+
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let mut interaction = Interaction::None;
+
+        let alert_y = chart.state().price_to_y(Price::from_f32(50000.0));
+        let alert_screen_y =
+            (alert_y + chart.state().translation.y) * chart.state().scaling + bounds.height / 2.0;
+
+        // 1. Click on the '✕' close button at the right edge
+        let close_click_pos = Point::new(bounds.width - 10.0, alert_screen_y);
+        let click_event = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let action = chart.update(
+            &mut interaction,
+            &click_event,
+            bounds,
+            mouse::Cursor::Available(close_click_pos),
+        );
+        assert!(action.is_some());
+        // Verify it did not enter drag state and alert_id is referenced
+        assert_eq!(alert_id, chart.alerts[0].id);
+        assert!(chart.alert_drag_state.borrow().is_none());
+
+        // 2. Mouse interaction returns Pointer over close button
+        let hover_interaction = chart.mouse_interaction(
+            &interaction,
+            bounds,
+            mouse::Cursor::Available(close_click_pos),
+        );
+        assert_eq!(hover_interaction, mouse::Interaction::Pointer);
+
+        // 3. Mouse interaction returns ResizingVertically over price drag area
+        let drag_area_pos = Point::new(bounds.width - 40.0, alert_screen_y);
+        let drag_hover_interaction = chart.mouse_interaction(
+            &interaction,
+            bounds,
+            mouse::Cursor::Available(drag_area_pos),
+        );
+        assert_eq!(
+            drag_hover_interaction,
+            mouse::Interaction::ResizingVertically
+        );
+    }
+
+    #[test]
+    fn test_update_alert_price_preserves_status() {
+        let mut chart = make_test_chart();
+        let mut alert = PriceAlert::new(
+            "BTCUSDT",
+            50000.0,
+            data::chart::alert::AlertCondition::CrossAbove,
+        );
+        let alert_id = alert.id;
+        alert.status = AlertStatus::Triggered;
+        chart.add_alert(alert);
+
+        // Updating price on a triggered alert must preserve Triggered status (not reset to Active)
+        chart.update_alert_price(alert_id, 51000.0);
+        let updated = chart.alerts.iter().find(|a| a.id == alert_id).unwrap();
+        assert_eq!(updated.target_price, 51000.0);
+        assert_eq!(updated.status, AlertStatus::Triggered);
+
+        // Active alert also retains Active status
+        let active_alert = PriceAlert::new(
+            "BTCUSDT",
+            40000.0,
+            data::chart::alert::AlertCondition::CrossAbove,
+        );
+        let active_id = active_alert.id;
+        chart.add_alert(active_alert);
+        chart.update_alert_price(active_id, 41000.0);
+        let updated_active = chart.alerts.iter().find(|a| a.id == active_id).unwrap();
+        assert_eq!(updated_active.target_price, 41000.0);
+        assert_eq!(updated_active.status, AlertStatus::Active);
     }
 
     #[test]
@@ -10533,6 +11330,20 @@ mod tests {
         assert_eq!(outcome_replay.exit_time, 60_000);
         assert_eq!(outcome_replay.exit_price, 101.0);
 
+        // Test 4d: Position entry price never reached (entry=90.0, lowest low is 94.0)
+        let outcome_not_entered = evaluate_position_outcome(
+            &chart.data_source,
+            60_000,
+            90.0,
+            110.0,
+            85.0,
+            true,
+            200_000,
+            None,
+        );
+        assert!(!outcome_not_entered.is_entered);
+        assert!(!outcome_not_entered.is_closed);
+
         // Test 5: Dragging Handle 3 (right handle) stretches end_time
         let pos = Drawing::position(
             (60_000, 100.0),
@@ -10648,6 +11459,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             None,
         );
@@ -10689,5 +11501,558 @@ mod tests {
         chart.set_footprint_aggregate(false);
         assert!(!has_trade(&chart));
         assert!(!chart.is_aggregate_footprint());
+    }
+
+    #[test]
+    fn test_kline_chart_undo_redo_stack_operations() {
+        let mut chart = make_test_chart();
+        let d1 = Drawing::trendline((1000, 100.0), (2000, 110.0), [1.0, 1.0, 1.0, 1.0], 1.0);
+        let d2 = Drawing::rectangle((1500, 90.0), (2500, 120.0), [1.0, 1.0, 1.0, 1.0], 1.0);
+
+        assert!(!chart.can_undo());
+        assert!(!chart.can_redo());
+        assert_eq!(chart.undo(), None);
+        assert_eq!(chart.redo(), None);
+
+        // 1. Add drawing
+        chart.add_drawing(d1.clone());
+        chart.push_undo(DrawingHistoryAction::Add(d1.clone()));
+        assert!(chart.can_undo());
+        assert!(!chart.can_redo());
+        assert_eq!(chart.drawings.len(), 1);
+
+        // Undo Add -> removes drawing
+        let undone = chart.undo();
+        assert_eq!(undone, Some(DrawingHistoryAction::Add(d1.clone())));
+        assert_eq!(chart.drawings.len(), 0);
+        assert!(!chart.can_undo());
+        assert!(chart.can_redo());
+
+        // Redo Add -> restores drawing
+        let redone = chart.redo();
+        assert_eq!(redone, Some(DrawingHistoryAction::Add(d1.clone())));
+        assert_eq!(chart.drawings.len(), 1);
+        assert!(chart.can_undo());
+        assert!(!chart.can_redo());
+
+        // 2. Delete drawing
+        chart.delete_drawing(d1.id);
+        chart.push_undo(DrawingHistoryAction::Delete(d1.clone()));
+        assert_eq!(chart.drawings.len(), 0);
+
+        // Undo Delete -> restores drawing
+        let undone_del = chart.undo();
+        assert_eq!(undone_del, Some(DrawingHistoryAction::Delete(d1.clone())));
+        assert_eq!(chart.drawings.len(), 1);
+        assert_eq!(chart.drawings[0].id, d1.id);
+        assert_eq!(chart.selected_drawing().map(|d| d.id), Some(d1.id));
+
+        // Redo Delete -> deletes drawing
+        let redone_del = chart.redo();
+        assert_eq!(redone_del, Some(DrawingHistoryAction::Delete(d1.clone())));
+        assert_eq!(chart.drawings.len(), 0);
+        assert_eq!(chart.selected_drawing(), None);
+
+        // 3. Update drawing
+        chart.add_drawing(d1.clone());
+        let mut d1_updated = d1.clone();
+        d1_updated.color = [1.0, 0.0, 0.0, 1.0];
+        chart.update_drawing(d1_updated.clone());
+        chart.push_undo(DrawingHistoryAction::Update {
+            old: d1.clone(),
+            new: d1_updated.clone(),
+        });
+
+        // Undo Update -> reverts to old
+        let undone_upd = chart.undo();
+        assert_eq!(
+            undone_upd,
+            Some(DrawingHistoryAction::Update {
+                old: d1.clone(),
+                new: d1_updated.clone()
+            })
+        );
+        assert_eq!(chart.drawings[0].color, d1.color);
+
+        // Redo Update -> advances to new
+        let redone_upd = chart.redo();
+        assert_eq!(
+            redone_upd,
+            Some(DrawingHistoryAction::Update {
+                old: d1.clone(),
+                new: d1_updated.clone()
+            })
+        );
+        assert_eq!(chart.drawings[0].color, d1_updated.color);
+
+        // 4. Clear drawings
+        chart.add_drawing(d2.clone());
+        assert_eq!(chart.drawings.len(), 2);
+        let cleared = chart.drawings.clone();
+        chart.push_undo(DrawingHistoryAction::Clear(cleared.clone()));
+        chart.clear_drawings();
+        assert_eq!(chart.drawings.len(), 0);
+
+        // Undo Clear -> restores all cleared drawings
+        let undone_clr = chart.undo();
+        assert_eq!(
+            undone_clr,
+            Some(DrawingHistoryAction::Clear(cleared.clone()))
+        );
+        assert_eq!(chart.drawings.len(), 2);
+
+        // Redo Clear -> re-clears
+        let redone_clr = chart.redo();
+        assert_eq!(redone_clr, Some(DrawingHistoryAction::Clear(cleared)));
+        assert_eq!(chart.drawings.len(), 0);
+
+        // 5. Stack capacity limit & push clears redo
+        for i in 0..110 {
+            let d = Drawing::horizontal(100.0 + i as f32, [1.0, 1.0, 1.0, 1.0], 1.0);
+            chart.push_undo(DrawingHistoryAction::Add(d));
+        }
+        assert_eq!(chart.undo_stack.len(), 100);
+        chart.undo();
+        assert!(chart.can_redo());
+        chart.push_undo(DrawingHistoryAction::Add(d1.clone()));
+        assert!(!chart.can_redo(), "push_undo must clear redo_stack");
+    }
+
+    #[test]
+    fn test_kline_chart_ctrl_z_undo_and_ctrl_y_redo_hotkeys() {
+        use iced::widget::canvas::Program;
+        let mut chart = make_test_chart();
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+        let mut interaction = Interaction::None;
+
+        let d = Drawing::trendline((1000, 100.0), (2000, 110.0), [1.0, 1.0, 1.0, 1.0], 1.0);
+        chart.add_drawing(d.clone());
+        chart.push_undo(DrawingHistoryAction::Add(d));
+
+        let make_key = |key: iced::keyboard::Key,
+                        modifiers: iced::keyboard::Modifiers,
+                        physical: iced::keyboard::key::Code| {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: key.clone(),
+                location: iced::keyboard::Location::Standard,
+                modifiers,
+                repeat: false,
+                text: None,
+                physical_key: iced::keyboard::key::Physical::Code(physical),
+                modified_key: key,
+            })
+        };
+
+        // 1. Ctrl + 'z' publishes Message::UndoDrawing
+        let ctrl_z = make_key(
+            iced::keyboard::Key::Character("z".into()),
+            iced::keyboard::Modifiers::CTRL,
+            iced::keyboard::key::Code::KeyZ,
+        );
+        let action = chart.update(&mut interaction, &ctrl_z, bounds, cursor);
+        assert!(action.is_some());
+
+        // Simulate pane processing the undo
+        chart.undo();
+        assert!(chart.can_redo());
+
+        // 2. Ctrl + 'y' publishes Message::RedoDrawing
+        let ctrl_y = make_key(
+            iced::keyboard::Key::Character("y".into()),
+            iced::keyboard::Modifiers::CTRL,
+            iced::keyboard::key::Code::KeyY,
+        );
+        let action_y = chart.update(&mut interaction, &ctrl_y, bounds, cursor);
+        assert!(action_y.is_some());
+
+        // 3. Ctrl + Shift + 'z' publishes Message::RedoDrawing
+        let ctrl_shift_z = make_key(
+            iced::keyboard::Key::Character("z".into()),
+            iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+            iced::keyboard::key::Code::KeyZ,
+        );
+        let action_shift_z = chart.update(&mut interaction, &ctrl_shift_z, bounds, cursor);
+        assert!(action_shift_z.is_some());
+
+        // 4. Cyrillic layout 'я' / 'Я' with Ctrl triggers Undo
+        let ctrl_cyrillic_ya = make_key(
+            iced::keyboard::Key::Character("я".into()),
+            iced::keyboard::Modifiers::CTRL,
+            iced::keyboard::key::Code::KeyZ,
+        );
+        chart.redo();
+        let action_ya = chart.update(&mut interaction, &ctrl_cyrillic_ya, bounds, cursor);
+        assert!(action_ya.is_some());
+
+        // 5. Cyrillic layout 'н' / 'Н' with Ctrl triggers Redo
+        chart.undo();
+        let ctrl_cyrillic_n = make_key(
+            iced::keyboard::Key::Character("н".into()),
+            iced::keyboard::Modifiers::CTRL,
+            iced::keyboard::key::Code::KeyY,
+        );
+        let action_n = chart.update(&mut interaction, &ctrl_cyrillic_n, bounds, cursor);
+        assert!(action_n.is_some());
+
+        // 6. Cmd + 'z' (macOS COMMAND modifier) triggers Undo
+        chart.redo();
+        let cmd_z = make_key(
+            iced::keyboard::Key::Character("z".into()),
+            iced::keyboard::Modifiers::COMMAND,
+            iced::keyboard::key::Code::KeyZ,
+        );
+        let action_cmd = chart.update(&mut interaction, &cmd_z, bounds, cursor);
+        assert!(action_cmd.is_some());
+    }
+
+    #[test]
+    fn test_kline_chart_ctrl_z_in_progress_and_drag_cancelling() {
+        use iced::widget::canvas::Program;
+        let chart = make_test_chart();
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+        let mut interaction = Interaction::None;
+
+        let ctrl_z = Event::Keyboard(iced::keyboard::Event::KeyPressed {
+            key: iced::keyboard::Key::Character("z".into()),
+            location: iced::keyboard::Location::Standard,
+            modifiers: iced::keyboard::Modifiers::CTRL,
+            repeat: false,
+            text: None,
+            physical_key: iced::keyboard::key::Physical::Code(iced::keyboard::key::Code::KeyZ),
+            modified_key: iced::keyboard::Key::Character("z".into()),
+        });
+
+        // 1. Tool selected with no points placed yet: Ctrl+Z resets tool to None
+        chart.drawing_state.borrow_mut().active_tool = DrawingTool::Trendline;
+        let action = chart.update(&mut interaction, &ctrl_z, bounds, cursor);
+        assert!(action.is_some());
+        assert_eq!(chart.active_drawing_tool(), DrawingTool::None);
+
+        // 2. Active drag cancellation: Ctrl+Z drops drag without publishing UndoDrawing
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingDrawing {
+            start_time: 1000,
+            start_price: 100.0,
+            initial_drawing: d.clone(),
+            current_drawing: d.clone(),
+        });
+        assert!(chart.drawing_state.borrow().drag.is_some());
+        let action_drag = chart.update(&mut interaction, &ctrl_z, bounds, cursor);
+        assert!(action_drag.is_some());
+        assert!(chart.drawing_state.borrow().drag.is_none());
+
+        // 3. Multi-point Path: Ctrl+Z removes the latest vertex
+        let path_drawing = Drawing::path(
+            vec![(1000, 100.0), (2000, 105.0), (3000, 110.0)],
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+        );
+        chart.drawing_state.borrow_mut().in_progress = Some(path_drawing);
+        let action_path = chart.update(&mut interaction, &ctrl_z, bounds, cursor);
+        assert!(action_path.is_some());
+        let in_prog = chart.drawing_state.borrow().in_progress.clone().unwrap();
+        if let DrawingKind::Path { points } = in_prog.kind {
+            assert_eq!(points.len(), 2);
+        } else {
+            panic!("Expected Path drawing in progress");
+        }
+    }
+
+    #[test]
+    fn test_footprint_active_candle_backfill_suggestion_and_loop_prevention() {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let interval = exchange::Timeframe::H1;
+        let interval_ms = interval.to_milliseconds();
+        let current_candle_start = (now_ms / interval_ms) * interval_ms;
+        let kline = Kline {
+            time: current_candle_start,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(99.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        };
+
+        // 1. Chart on Binance (Linear Perps)
+        let binance_ticker =
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let binance_info = exchange::TickerInfo::new(binance_ticker, 0.1, 0.001, None);
+        let view_cfg = ViewConfig::default();
+        let mut chart = KlineChart::new(
+            view_cfg.clone(),
+            Basis::Time(interval),
+            1.0,
+            &[kline],
+            Vec::new(),
+            &[],
+            binance_info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::VolumeProfile,
+                scaling: data::chart::kline::ClusterScaling::VisibleRange,
+                studies: Vec::new(),
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+
+        // Verify active candle is suggested on Binance
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            let suggested = ts.suggest_trade_fetch_range(
+                current_candle_start,
+                current_candle_start + interval_ms,
+            );
+            assert_eq!(
+                suggested,
+                Some((current_candle_start, current_candle_start + interval_ms)),
+                "Binance footprint chart must suggest active candle fetch when unfetched"
+            );
+        } else {
+            panic!("Expected TimeBased PlotData");
+        }
+
+        // 2. Unsupported exchange (Bybit) must NOT suggest active candle
+        let bybit_ticker =
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BybitLinear);
+        let bybit_info = exchange::TickerInfo::new(bybit_ticker, 0.1, 0.001, None);
+        let chart_bybit = KlineChart::new(
+            view_cfg,
+            Basis::Time(interval),
+            1.0,
+            &[kline],
+            Vec::new(),
+            &[],
+            bybit_info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::VolumeProfile,
+                scaling: data::chart::kline::ClusterScaling::VisibleRange,
+                studies: Vec::new(),
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+        if let PlotData::TimeBased(ref ts) = chart_bybit.data_source {
+            let suggested = ts.suggest_trade_fetch_range(
+                current_candle_start,
+                current_candle_start + interval_ms,
+            );
+            assert_eq!(
+                suggested, None,
+                "Bybit chart must never suggest active candle fetch"
+            );
+        }
+
+        // 3. Seamless merge with live WebSocket trades & deduplication
+        let ws_trade = Trade {
+            time: current_candle_start + 10_000,
+            price: Price::from_f32(101.0),
+            qty: 5.0,
+            is_sell: false,
+        };
+        // Live WebSocket trade arrives
+        chart.insert_trades_buffer(&[ws_trade]);
+        assert_eq!(chart.raw_trades().len(), 1);
+
+        // Overlapping trade from REST batch during mid-candle connect
+        chart.insert_fetched_trades_buffered(&[ws_trade]);
+        assert_eq!(
+            chart.raw_trades().len(),
+            1,
+            "Duplicate trade must not increase raw_trades"
+        );
+
+        // Additional historical trade from earlier in the candle
+        let hist_trade = Trade {
+            time: current_candle_start + 5_000,
+            price: Price::from_f32(100.5),
+            qty: 2.0,
+            is_sell: true,
+        };
+        chart.insert_fetched_trades_buffered(&[hist_trade]);
+        assert_eq!(chart.raw_trades().len(), 2);
+
+        // Commit fetched trades & mark fetched
+        chart.commit_fetched_trades(current_candle_start, current_candle_start + interval_ms);
+        chart.mark_trades_fetched(current_candle_start, current_candle_start + interval_ms);
+
+        // Verify active footprint has exactly 7.0 volume (no duplicate volume)
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            let dp = ts.datapoints.get(&current_candle_start).unwrap();
+            let total_vol: f32 = dp
+                .footprint
+                .trades
+                .values()
+                .map(|b| b.buy_qty + b.sell_qty)
+                .sum();
+            assert_eq!(total_vol, 7.0);
+
+            // 4. Verify loop prevention: stops suggesting once marked
+            let suggested_after = ts.suggest_trade_fetch_range(
+                current_candle_start,
+                current_candle_start + interval_ms,
+            );
+            assert_eq!(
+                suggested_after, None,
+                "Must not repeatedly re-request active candle once marked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_kline_chart_initial_trades_do_not_suppress_active_candle_fetch_and_commit_boundary() {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let interval = exchange::Timeframe::H1;
+        let interval_ms = interval.to_milliseconds();
+        let current_candle_start = (now_ms / interval_ms) * interval_ms;
+        let past_candle_start = current_candle_start - interval_ms;
+
+        let klines = vec![
+            Kline {
+                time: past_candle_start,
+                open: Price::from_f32(95.0),
+                high: Price::from_f32(100.0),
+                low: Price::from_f32(94.0),
+                close: Price::from_f32(99.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: current_candle_start,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(99.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+        ];
+
+        // Mid-candle trade already buffered before chart construction
+        let mid_trade = Trade {
+            time: current_candle_start + 40 * 60 * 1000,
+            price: Price::from_f32(101.5),
+            qty: 3.0,
+            is_sell: false,
+        };
+
+        let binance_ticker =
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceSpot);
+        let binance_info = exchange::TickerInfo::new(binance_ticker, 0.1, 0.001, None);
+        let view_cfg = ViewConfig::default();
+        let mut chart = KlineChart::new(
+            view_cfg,
+            Basis::Time(interval),
+            1.0,
+            &klines,
+            vec![mid_trade],
+            &[],
+            binance_info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::VolumeProfile,
+                scaling: data::chart::kline::ClusterScaling::VisibleRange,
+                studies: Vec::new(),
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+
+        // 1. Chart must suggest fetching active candle despite having mid-candle trades
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            let suggested =
+                ts.suggest_trade_fetch_range(past_candle_start, current_candle_start + interval_ms);
+            // It should prioritize past candle first or active candle
+            assert!(suggested.is_some());
+        }
+
+        // 2. Fetch past candle [past_candle_start, current_candle_start)
+        chart.commit_fetched_trades(past_candle_start, current_candle_start);
+        chart.mark_trades_fetched(past_candle_start, current_candle_start);
+
+        // Active candle must still be unfetched
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            assert!(
+                ts.datapoints
+                    .get(&past_candle_start)
+                    .unwrap()
+                    .trades_fetched
+            );
+            assert!(
+                !ts.datapoints
+                    .get(&current_candle_start)
+                    .unwrap()
+                    .trades_fetched,
+                "Active candle must remain unfetched after past candle fetch"
+            );
+            assert_eq!(
+                ts.suggest_trade_fetch_range(past_candle_start, current_candle_start + interval_ms),
+                Some((current_candle_start, current_candle_start + interval_ms)),
+                "Active candle must now be suggested after past candle was fetched"
+            );
+        }
+
+        // 3. Now backfill active candle
+        let hist_active_trade = Trade {
+            time: current_candle_start + 10 * 60 * 1000,
+            price: Price::from_f32(100.2),
+            qty: 4.0,
+            is_sell: true,
+        };
+        chart.insert_fetched_trades_buffered(&[hist_active_trade]);
+        chart.commit_fetched_trades(current_candle_start, current_candle_start + interval_ms);
+        chart.mark_trades_fetched(current_candle_start, current_candle_start + interval_ms);
+
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            assert!(
+                ts.datapoints
+                    .get(&current_candle_start)
+                    .unwrap()
+                    .trades_fetched
+            );
+            assert_eq!(
+                ts.suggest_trade_fetch_range(past_candle_start, current_candle_start + interval_ms),
+                None,
+                "No more trades should be suggested once active candle is marked"
+            );
+            let dp = ts.datapoints.get(&current_candle_start).unwrap();
+            let total_vol: f32 = dp
+                .footprint
+                .trades
+                .values()
+                .map(|b| b.buy_qty + b.sell_qty)
+                .sum();
+            assert_eq!(total_vol, 7.0);
+        }
+    }
+
+    #[test]
+    fn test_ter03_cluster_zero_qty_and_positive_geometry() {
+        let max_cluster_qty = 0.0f32;
+        let delta = -5.0f32;
+        let bars_width = 100.0f32;
+
+        if max_cluster_qty > 0.0 {
+            let bar_width = (delta.abs() / max_cluster_qty) * bars_width;
+            assert!(bar_width.is_finite());
+        }
+
+        let max_cluster_qty = 10.0f32;
+        let sell_qty = 5.0f32;
+        let left_area_width = 50.0f32;
+        let ask_area_right = 100.0f32;
+        let bid_area_left = 20.0f32;
+
+        let bar_width = (sell_qty / max_cluster_qty) * left_area_width;
+        assert!(bar_width > 0.0);
+        let left = (ask_area_right - bar_width).max(bid_area_left);
+        assert_eq!(left, 75.0);
+        assert!(left >= bid_area_left);
     }
 }

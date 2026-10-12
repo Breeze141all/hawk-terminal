@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use super::tpo::{SessionCluster, SessionPeriod};
 use crate::aggr::time::DataPoint;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct KlineDataPoint {
     pub kline: Kline,
     pub footprint: KlineTrades,
@@ -77,6 +77,62 @@ impl KlineDataPoint {
 
     pub fn first_trade_time(&self) -> Option<u64> {
         self.footprint.first_trade_t()
+    }
+
+    pub fn is_trades_coverage_complete(
+        &self,
+        interval_ms: u64,
+        tick_size: PriceStep,
+        now_ms: u64,
+    ) -> bool {
+        let total_vol = self.kline.volume.0 + self.kline.volume.1;
+        if total_vol == 0.0 {
+            return true;
+        }
+        if self.footprint.is_empty() {
+            return false;
+        }
+
+        let candle_start = self.kline.time;
+        let candle_end = candle_start.saturating_add(interval_ms);
+        if candle_end > now_ms {
+            return false;
+        }
+
+        let tolerance = (interval_ms / 10).clamp(500, 120_000).min(interval_ms / 2);
+        let first_t = self.footprint.first_trade_t().unwrap_or(0);
+        let last_t = self.footprint.last_trade_t().unwrap_or(0);
+
+        let start_ok = first_t <= candle_start.saturating_add(tolerance);
+        let end_ok = last_t >= candle_end.saturating_sub(tolerance);
+        if !start_ok || !end_ok {
+            return false;
+        }
+
+        let has_kline_extremes = self.kline.high.units > 0 && self.kline.low.units > 0;
+        if !has_kline_extremes {
+            return true;
+        }
+
+        let step_units = tick_size.units.max(1);
+        let tolerance_units = step_units.saturating_mul(2);
+        let low_bound = self
+            .kline
+            .low
+            .round_to_step(tick_size)
+            .units
+            .saturating_add(tolerance_units);
+        let high_bound = self
+            .kline
+            .high
+            .round_to_step(tick_size)
+            .units
+            .saturating_sub(tolerance_units);
+
+        match (self.footprint.min_price(), self.footprint.max_price()) {
+            (Some(min_p), Some(max_p)) => min_p.units <= low_bound && max_p.units >= high_bound,
+            _ => false,
+        }
     }
 }
 
@@ -188,6 +244,14 @@ impl KlineTrades {
 
     pub fn last_trade_t(&self) -> Option<u64> {
         self.cached_last_time
+    }
+
+    pub fn min_price(&self) -> Option<Price> {
+        self.trades.keys().copied().min()
+    }
+
+    pub fn max_price(&self) -> Option<Price> {
+        self.trades.keys().copied().max()
     }
 
     /// Add trade to the bin at the step multiple computed with side-based rounding.
@@ -411,6 +475,8 @@ pub enum KlineChartKind {
         aggregate: bool,
         #[serde(default = "default_aggregate_exchanges")]
         aggregate_exchanges: Vec<Exchange>,
+        #[serde(default)]
+        history_lookback_days: Option<u32>,
     },
     Tpo {
         #[serde(default = "default_true")]
@@ -465,6 +531,31 @@ impl KlineChartKind {
             KlineChartKind::Tpo { period, .. } => *period,
             _ => SessionPeriod::Daily,
         }
+    }
+
+    pub fn history_lookback_days(&self) -> Option<u32> {
+        match self {
+            KlineChartKind::Footprint {
+                history_lookback_days,
+                ..
+            } => *history_lookback_days,
+            _ => None,
+        }
+    }
+
+    pub fn set_history_lookback_days(&mut self, days: Option<u32>) {
+        if let KlineChartKind::Footprint {
+            history_lookback_days,
+            ..
+        } = self
+        {
+            *history_lookback_days = days;
+        }
+    }
+
+    pub fn effective_history_lookback_days(&self) -> u32 {
+        self.history_lookback_days()
+            .unwrap_or_else(exchange::fetcher::trade_history_lookback_days)
     }
 
     pub fn min_scaling(&self) -> f32 {
@@ -692,6 +783,8 @@ pub struct Config {
     pub liq_show_histogram: bool,
     #[serde(default = "default_true")]
     pub magnet_mode: bool,
+    #[serde(default = "default_true")]
+    pub alert_drag_handle_only: bool,
 }
 
 static USER_DEFAULT_CONFIG: std::sync::LazyLock<std::sync::RwLock<Option<Config>>> =
@@ -721,6 +814,7 @@ impl Config {
             liq_show_bands: true,
             liq_show_histogram: true,
             magnet_mode: true,
+            alert_drag_handle_only: true,
         }
     }
 }
@@ -1247,6 +1341,14 @@ pub fn decode_footprint_datapoints(
     let _version = u16::from_le_bytes(decompressed[4..6].try_into().unwrap());
     let count = u32::from_le_bytes(decompressed[6..10].try_into().unwrap()) as usize;
 
+    const MIN_CANDLE_HEADER_BYTES: usize = 66;
+    let max_possible_count = decompressed.len().saturating_sub(10) / MIN_CANDLE_HEADER_BYTES;
+    if count > max_possible_count {
+        return Err(format!(
+            "Corrupt footprint cache: count {count} exceeds buffer bounds"
+        ));
+    }
+
     let mut cursor = 10;
     let mut datapoints = Vec::with_capacity(count);
 
@@ -1591,6 +1693,7 @@ mod tests {
             show_bottom_volume: false,
             aggregate: false,
             aggregate_exchanges: default_aggregate_exchanges(),
+            history_lookback_days: None,
         };
 
         assert_eq!(footprint.min_cell_width(), 2.0);
@@ -1729,5 +1832,89 @@ mod tests {
         assert!(!fp_file.exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_is_trades_coverage_complete_validates_extremes_and_gap() {
+        let step = PriceStep::from_f32(0.1);
+        let interval_ms = 1_800_000; // 30m
+        let candle_time = 1_700_000_000_000; // past closed candle
+        let now_ms = candle_time + interval_ms + 100_000;
+
+        let mut dp = KlineDataPoint {
+            kline: Kline {
+                time: candle_time,
+                open: Price::from_f32(83000.0),
+                high: Price::from_f32(83443.0),
+                low: Price::from_f32(82500.1),
+                close: Price::from_f32(82800.0),
+                volume: (100.0, 100.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: false,
+        };
+
+        // 1. Incomplete footprint (bare wick below 82660.0, low is 82500.1)
+        dp.add_trade(
+            &Trade {
+                time: candle_time + 1000,
+                is_sell: false,
+                price: Price::from_f32(83443.0),
+                qty: 1.0,
+            },
+            step,
+        );
+        dp.add_trade(
+            &Trade {
+                time: candle_time + interval_ms - 1000,
+                is_sell: true,
+                price: Price::from_f32(82660.0), // Does not reach 82500.1
+                qty: 1.0,
+            },
+            step,
+        );
+
+        assert!(
+            !dp.is_trades_coverage_complete(interval_ms, step, now_ms),
+            "Footprint terminating at 82660.0 must NOT be complete when kline low is 82500.1"
+        );
+
+        // 2. Add trade covering the low wick down to 82500.1
+        dp.add_trade(
+            &Trade {
+                time: candle_time + 500_000,
+                is_sell: true,
+                price: Price::from_f32(82500.1),
+                qty: 1.0,
+            },
+            step,
+        );
+
+        assert!(
+            dp.is_trades_coverage_complete(interval_ms, step, now_ms),
+            "Footprint covering both high and low extremes and timestamps must be complete"
+        );
+
+        // 3. Active/forming candle (candle_end > now_ms) must never be finalized as complete
+        let active_now_ms = candle_time + interval_ms / 2;
+        assert!(
+            !dp.is_trades_coverage_complete(interval_ms, step, active_now_ms),
+            "Active candle must not be finalized as complete"
+        );
+    }
+
+    #[test]
+    fn test_dat04_footprint_cache_corrupted_count_bounds() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(FOOTPRINT_CACHE_MAGIC);
+        raw.extend_from_slice(&1u16.to_le_bytes());
+        raw.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+
+        let compressed = lz4_flex::compress_prepend_size(&raw);
+        let result = decode_footprint_datapoints(&compressed);
+        match result {
+            Err(err) => assert!(err.contains("exceeds buffer bounds")),
+            Ok(_) => panic!("expected Err on corrupted count"),
+        }
     }
 }

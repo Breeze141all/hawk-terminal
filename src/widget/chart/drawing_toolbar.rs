@@ -13,6 +13,7 @@ pub enum ToolbarAction {
     SelectTool(DrawingTool),
     ClearDrawings,
     ToggleMagnet,
+    Undo,
 }
 
 struct ToolIconProgram {
@@ -269,6 +270,7 @@ pub fn view<'a, Message: 'a + Clone>(
     active_tool: DrawingTool,
     has_drawings: bool,
     magnet_mode: bool,
+    can_undo: bool,
     on_action: impl Fn(ToolbarAction) -> Message + 'a + Copy,
 ) -> Element<'a, Message> {
     let tools = [
@@ -331,6 +333,22 @@ pub fn view<'a, Message: 'a + Clone>(
     );
 
     row_items = row_items.push(tip_magnet);
+
+    if can_undo {
+        let return_icon = icon_text(Icon::Return, 13);
+        let undo_btn = button(return_icon)
+            .padding(4)
+            .style(|theme: &Theme, status| toolbar_button_style(theme, status, false))
+            .on_press(on_action(ToolbarAction::Undo));
+
+        let tip_undo = tooltip(
+            undo_btn,
+            Some("Undo (Ctrl+Z)"),
+            iced::widget::tooltip::Position::Top,
+        );
+
+        row_items = row_items.push(tip_undo);
+    }
 
     if has_drawings {
         let trash_icon = icon_text(Icon::TrashBin, 13);

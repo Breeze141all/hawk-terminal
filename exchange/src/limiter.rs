@@ -53,11 +53,13 @@ pub async fn http_request_with_limiter<L: RateLimiter>(
     if limiter_guard.should_exit_on_response(&response) {
         let status = response.status();
         log::error!(
-            "HTTP error {} for: {}. Exiting. (This may be a rate limit, geo-block, or other access issue.)",
+            "HTTP error {} for: {}. Returning RateLimited error.",
             status,
             url
         );
-        std::process::exit(1);
+        return Err(AdapterError::InvalidRequest(format!(
+            "HTTP {status} Rate Limited or Blocked: {url}"
+        )));
     }
 
     limiter_guard.update_from_response(&response, weight);
@@ -251,5 +253,20 @@ impl DynamicBucket {
             None => (None, None),
             Some(wait_time) => (Some(wait_time), Some(DynamicLimitReason::FixedWindowRate)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ex01_rate_limited_error_format() {
+        let status = 429;
+        let url = "https://api.binance.com/api/v3/klines";
+        let err =
+            AdapterError::InvalidRequest(format!("HTTP {status} Rate Limited or Blocked: {url}"));
+        assert!(err.to_string().contains("429"));
+        assert!(err.to_string().contains("Rate Limited or Blocked"));
     }
 }

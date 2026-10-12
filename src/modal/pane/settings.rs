@@ -31,6 +31,162 @@ use iced::{
 };
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsCategory {
+    #[default]
+    General,
+    Aggregation,
+    Studies,
+    Indicators,
+    Drawings,
+    Colors,
+}
+
+impl SettingsCategory {
+    pub fn title(&self) -> &'static str {
+        match self {
+            SettingsCategory::General => "General",
+            SettingsCategory::Aggregation => "Aggregation",
+            SettingsCategory::Studies => "Studies & Panels",
+            SettingsCategory::Indicators => "Indicators",
+            SettingsCategory::Drawings => "Drawings & Alerts",
+            SettingsCategory::Colors => "Colors & Styling",
+        }
+    }
+
+    pub fn icon(&self) -> Icon {
+        match self {
+            SettingsCategory::General => Icon::Cog,
+            SettingsCategory::Aggregation => Icon::Clone,
+            SettingsCategory::Studies => Icon::Layout,
+            SettingsCategory::Indicators => Icon::ChartOutline,
+            SettingsCategory::Drawings => Icon::Edit,
+            SettingsCategory::Colors => Icon::StarFilled,
+        }
+    }
+}
+
+pub fn settings_modal_layout<'a>(
+    pane: pane_grid::Pane,
+    categories: &'a [SettingsCategory],
+    selected_category: SettingsCategory,
+    category_content: Element<'a, Message>,
+    sync_all: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let active_category = if categories.contains(&selected_category) {
+        selected_category
+    } else {
+        categories
+            .first()
+            .copied()
+            .unwrap_or(SettingsCategory::General)
+    };
+
+    // Left Sidebar: Category navigation
+    let mut sidebar_col = column![
+        text("Settings").size(14),
+        rule::horizontal(1.0).style(style::split_ruler),
+    ]
+    .spacing(8);
+
+    let mut cat_buttons = column![].spacing(3);
+    for &cat in categories {
+        let is_selected = cat == active_category;
+
+        let btn_label = row![icon_text(cat.icon(), 13), text(cat.title()).size(12),]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+        let btn = button(btn_label)
+            .width(Length::Fill)
+            .padding([6, 8])
+            .on_press(Message::PaneEvent(pane, Event::SelectSettingsCategory(cat)))
+            .style(move |theme, status| {
+                let palette = theme.extended_palette();
+                iced::widget::button::Style {
+                    text_color: if is_selected {
+                        palette.primary.base.color
+                    } else {
+                        palette.background.base.text
+                    },
+                    border: iced::Border {
+                        radius: 4.0.into(),
+                        width: if is_selected { 1.0 } else { 0.0 },
+                        color: if is_selected {
+                            palette.primary.strong.color
+                        } else {
+                            iced::Color::TRANSPARENT
+                        },
+                    },
+                    background: match status {
+                        iced::widget::button::Status::Active => {
+                            if is_selected {
+                                Some(palette.background.weak.color.into())
+                            } else {
+                                None
+                            }
+                        }
+                        iced::widget::button::Status::Hovered => {
+                            Some(palette.background.weak.color.into())
+                        }
+                        iced::widget::button::Status::Pressed => {
+                            Some(palette.background.strong.color.into())
+                        }
+                        iced::widget::button::Status::Disabled => None,
+                    },
+                    ..Default::default()
+                }
+            });
+
+        cat_buttons = cat_buttons.push(btn);
+    }
+
+    sidebar_col = sidebar_col.push(cat_buttons);
+
+    let sidebar = container(sidebar_col)
+        .width(Length::Fixed(150.0))
+        .padding(iced::padding::right(10));
+
+    // Right Content Area
+    let right_header = row![text(active_category.title()).size(14),].align_y(Alignment::Center);
+
+    let mut right_col = column![
+        right_header,
+        rule::horizontal(1.0).style(style::split_ruler),
+        container(scrollable_content(category_content))
+            .width(Length::Fill)
+            .height(Length::Fill),
+    ]
+    .spacing(8)
+    .width(Length::Fill)
+    .height(Length::Fill);
+
+    if let Some(sync_btn) = sync_all {
+        right_col = right_col.push(rule::horizontal(1.0).style(style::split_ruler));
+        right_col = right_col.push(row![space::horizontal(), sync_btn]);
+    }
+
+    let right_area = container(right_col)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .padding(iced::padding::left(10));
+
+    let layout_row = row![
+        sidebar,
+        rule::vertical(1.0).style(style::split_ruler),
+        right_area,
+    ]
+    .height(Length::Fill)
+    .spacing(0);
+
+    container(layout_row)
+        .width(Length::Fixed(560.0))
+        .height(Length::Fixed(440.0))
+        .padding(14)
+        .style(style::chart_modal)
+        .into()
+}
+
 fn cfg_view_container<'a, T>(max_width: u32, content: T) -> Element<'a, Message>
 where
     T: Into<Element<'a, Message>>,
@@ -51,6 +207,7 @@ pub fn heatmap_cfg_view<'a>(
     basis: data::chart::Basis,
     trade_size_input: &'a str,
     order_size_input: &'a str,
+    selected_category: SettingsCategory,
 ) -> Element<'a, Message> {
     let id = pane;
 
@@ -222,23 +379,43 @@ pub fn heatmap_cfg_view<'a>(
     };
 
     let trade_viz_column = {
-        let dyn_checkbox = checkbox(cfg.trade_size_scale.is_some())
-            .label("Dynamic circle radius")
+        let show_trades_checkbox = checkbox(cfg.show_trades)
+            .label("Show executed trades")
             .on_toggle(move |value| {
                 Message::VisualConfigChanged(
                     pane,
                     VisualConfig::Heatmap(heatmap::Config {
-                        trade_size_scale: if value { Some(100) } else { None },
+                        show_trades: value,
                         ..cfg
                     }),
                     false,
                 )
             });
 
-        let mut col = column![text("Trade visualization").size(14), dyn_checkbox].spacing(8);
-        if let Some(slider) = circle_scaling_slider {
-            col = col.push(slider);
+        let mut col =
+            column![text("Trade visualization").size(14), show_trades_checkbox].spacing(8);
+
+        if cfg.show_trades {
+            let dyn_checkbox = checkbox(cfg.trade_size_scale.is_some())
+                .label("Dynamic circle radius")
+                .on_toggle(move |value| {
+                    Message::VisualConfigChanged(
+                        pane,
+                        VisualConfig::Heatmap(heatmap::Config {
+                            trade_size_scale: if value { Some(100) } else { None },
+                            ..cfg
+                        }),
+                        false,
+                    )
+                });
+
+            col = col.push(dyn_checkbox);
+
+            if let Some(slider) = circle_scaling_slider {
+                col = col.push(slider);
+            }
         }
+
         col
     };
 
@@ -249,19 +426,34 @@ pub fn heatmap_cfg_view<'a>(
         )
     });
 
-    let content = split_column![
-        size_filters_column,
-        noise_filters_column,
-        trade_viz_column,
-        column![text("Studies").size(14), study_cfg].spacing(8),
-        row![
-            space::horizontal(),
-            sync_all_button(pane, VisualConfig::Heatmap(cfg))
-        ]
-        ; spacing = 12, align_x = Alignment::Start
+    const HEATMAP_CATS: &[SettingsCategory] = &[
+        SettingsCategory::General,
+        SettingsCategory::Aggregation,
+        SettingsCategory::Studies,
     ];
+    let active_category = if HEATMAP_CATS.contains(&selected_category) {
+        selected_category
+    } else {
+        SettingsCategory::General
+    };
 
-    cfg_view_container(360, content)
+    let content: Element<'a, Message> = match active_category {
+        SettingsCategory::General => column![size_filters_column, trade_viz_column,]
+            .spacing(12)
+            .into(),
+        SettingsCategory::Aggregation => noise_filters_column.into(),
+        _ => column![text("Studies").size(14), study_cfg]
+            .spacing(8)
+            .into(),
+    };
+
+    settings_modal_layout(
+        pane,
+        HEATMAP_CATS,
+        selected_category,
+        content,
+        Some(sync_all_button(pane, VisualConfig::Heatmap(cfg))),
+    )
 }
 
 pub fn timesales_cfg_view<'a>(
@@ -529,9 +721,21 @@ fn drawing_tools_section<'a>(
             Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
         });
 
-    column![text("Drawing Tools").size(14), cb_magnet,]
-        .spacing(8)
-        .into()
+    let cb_alert_handle = checkbox(cfg.alert_drag_handle_only)
+        .label("Price Alerts: Drag by handle only")
+        .on_toggle(move |val| {
+            let mut new_cfg = cfg;
+            new_cfg.alert_drag_handle_only = val;
+            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+        });
+
+    column![
+        text("Drawing & Alert Tools").size(14),
+        cb_magnet,
+        cb_alert_handle,
+    ]
+    .spacing(8)
+    .into()
 }
 
 fn indicator_settings_section<'a>(
@@ -782,25 +986,57 @@ pub fn kline_cfg_view<'a>(
     basis: data::chart::Basis,
     indicators: &'a [KlineIndicator],
     expanded_indicator: Option<KlineIndicator>,
+    selected_category: SettingsCategory,
+    history_lookback_input: &'a str,
 ) -> Element<'a, Message> {
-    let content = match kind {
+    match kind {
         KlineChartKind::Candles => {
-            let mut col = column![drawing_tools_section(cfg, pane)].spacing(12);
+            const CANDLES_CATS: &[SettingsCategory] = &[
+                SettingsCategory::General,
+                SettingsCategory::Drawings,
+                SettingsCategory::Indicators,
+            ];
+            let active_category = if CANDLES_CATS.contains(&selected_category) {
+                selected_category
+            } else {
+                SettingsCategory::General
+            };
 
-            if let Some(indicator_sec) =
-                indicator_settings_section(cfg, pane, indicators, expanded_indicator)
-            {
-                col = col.push(rule::horizontal(1.0).style(style::split_ruler));
-                col = col.push(indicator_sec);
-            }
+            let has_volume = indicators.contains(&KlineIndicator::Volume);
+            let volume_panel_checkbox =
+                checkbox(has_volume)
+                    .label("Show Volume Panel")
+                    .on_toggle(move |_| {
+                        Message::PaneEvent(
+                            pane,
+                            Event::ToggleIndicator(UiIndicator::Kline(KlineIndicator::Volume)),
+                        )
+                    });
 
-            col = col.push(rule::horizontal(1.0).style(style::split_ruler));
-            col = col.push(row![
-                space::horizontal(),
-                sync_all_button(pane, VisualConfig::Kline(cfg))
-            ]);
+            let general_content =
+                column![text("Panels & Overlays").size(14), volume_panel_checkbox,].spacing(8);
 
-            col
+            let content: Element<'a, Message> = match active_category {
+                SettingsCategory::General => general_content.into(),
+                SettingsCategory::Drawings => drawing_tools_section(cfg, pane),
+                SettingsCategory::Indicators => {
+                    indicator_settings_section(cfg, pane, indicators, expanded_indicator)
+                        .unwrap_or_else(|| {
+                            container(text("No configurable indicators enabled (PositionFlow, Rolling VWAP, Liquidation Heatmap).").size(13))
+                                .padding(8)
+                                .into()
+                        })
+                }
+                _ => general_content.into(),
+            };
+
+            settings_modal_layout(
+                pane,
+                CANDLES_CATS,
+                selected_category,
+                content,
+                Some(sync_all_button(pane, VisualConfig::Kline(cfg))),
+            )
         }
         KlineChartKind::Tpo {
             show_candles,
@@ -1292,52 +1528,69 @@ pub fn kline_cfg_view<'a>(
                     )
                 });
 
-            let mut col = column![
-                text("TPO / Market Profile Settings").size(14),
-                period_row,
-                step_row,
-                clusters_row,
-                scheme_row,
-            ]
-            .spacing(10);
+            const TPO_CATS: &[SettingsCategory] = &[
+                SettingsCategory::General,
+                SettingsCategory::Colors,
+                SettingsCategory::Drawings,
+                SettingsCategory::Indicators,
+            ];
+            let active_category = if TPO_CATS.contains(&selected_category) {
+                selected_category
+            } else {
+                SettingsCategory::General
+            };
 
-            if let Some(custom_rgb) = custom_rgb_rows {
-                col = col.push(custom_rgb);
-            }
+            let content: Element<'a, Message> = match active_category {
+                SettingsCategory::General => {
+                    column![
+                        period_row,
+                        step_row,
+                        clusters_row,
+                        c_candles,
+                        c_letters,
+                        c_va,
+                        c_poc_box,
+                        c_ib_box,
+                        c_sp_box,
+                    ]
+                    .spacing(10)
+                    .into()
+                }
+                SettingsCategory::Colors => {
+                    let mut col = column![scheme_row].spacing(10);
+                    if let Some(custom_rgb) = custom_rgb_rows {
+                        col = col.push(custom_rgb);
+                    }
+                    if spoc {
+                        col = col.push(poc_color_ui);
+                    }
+                    if sib {
+                        col = col.push(ib_color_ui);
+                    }
+                    if ssp {
+                        col = col.push(sp_color_ui);
+                    }
+                    col.into()
+                }
+                SettingsCategory::Drawings => drawing_tools_section(cfg, pane),
+                SettingsCategory::Indicators => {
+                    indicator_settings_section(cfg, pane, indicators, expanded_indicator)
+                        .unwrap_or_else(|| {
+                            container(text("No configurable indicators enabled (PositionFlow, Rolling VWAP, Liquidation Heatmap).").size(13))
+                                .padding(8)
+                                .into()
+                        })
+                }
+                _ => drawing_tools_section(cfg, pane),
+            };
 
-            col = col
-                .push(c_candles)
-                .push(c_letters)
-                .push(c_va)
-                .push(c_poc_box);
-
-            if spoc {
-                col = col.push(poc_color_ui);
-            }
-
-            col = col.push(c_ib_box);
-
-            if sib {
-                col = col.push(ib_color_ui);
-            }
-
-            col = col.push(c_sp_box);
-
-            if ssp {
-                col = col.push(sp_color_ui);
-            }
-
-            col = col.push(rule::horizontal(1.0).style(style::split_ruler));
-            col = col.push(drawing_tools_section(cfg, pane));
-
-            if let Some(indicator_sec) =
-                indicator_settings_section(cfg, pane, indicators, expanded_indicator)
-            {
-                col = col.push(rule::horizontal(1.0).style(style::split_ruler));
-                col = col.push(indicator_sec);
-            }
-
-            col
+            settings_modal_layout(
+                pane,
+                TPO_CATS,
+                selected_category,
+                content,
+                Some(sync_all_button(pane, VisualConfig::Kline(cfg))),
+            )
         }
         KlineChartKind::Footprint {
             clusters,
@@ -1346,6 +1599,7 @@ pub fn kline_cfg_view<'a>(
             show_bottom_volume,
             aggregate,
             aggregate_exchanges,
+            history_lookback_days,
         } => {
             let cluster_picklist =
                 pick_list(ClusterKind::ALL, Some(clusters), move |new_cluster_kind| {
@@ -1382,6 +1636,77 @@ pub fn kline_cfg_view<'a>(
                     column![picklist].spacing(8)
                 }
             };
+
+            let effective_days = history_lookback_days.unwrap_or(30);
+            let input_widget = text_input("30", history_lookback_input)
+                .on_input(move |val| {
+                    Message::PaneEvent(pane, Event::FootprintHistoryLookbackInput(val))
+                })
+                .width(Length::Fixed(80.0))
+                .padding([4, 8]);
+
+            let preset_buttons = row![
+                button(text("30d").size(12))
+                    .style(move |theme, status| style::button::modifier(
+                        theme,
+                        status,
+                        effective_days == 30
+                    ))
+                    .on_press(Message::PaneEvent(
+                        pane,
+                        Event::FootprintHistoryLookbackSet(30)
+                    )),
+                button(text("90d").size(12))
+                    .style(move |theme, status| style::button::modifier(
+                        theme,
+                        status,
+                        effective_days == 90
+                    ))
+                    .on_press(Message::PaneEvent(
+                        pane,
+                        Event::FootprintHistoryLookbackSet(90)
+                    )),
+                button(text("180d").size(12))
+                    .style(move |theme, status| style::button::modifier(
+                        theme,
+                        status,
+                        effective_days == 180
+                    ))
+                    .on_press(Message::PaneEvent(
+                        pane,
+                        Event::FootprintHistoryLookbackSet(180)
+                    )),
+                button(text("365d").size(12))
+                    .style(move |theme, status| style::button::modifier(
+                        theme,
+                        status,
+                        effective_days == 365
+                    ))
+                    .on_press(Message::PaneEvent(
+                        pane,
+                        Event::FootprintHistoryLookbackSet(365)
+                    )),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
+
+            let lookback_section = column![
+                row![
+                    text("Trade History Lookback").size(14),
+                    tooltip(
+                        button("i").style(style::button::info),
+                        Some("Number of days of trade history to fetch and cache for this footprint chart."),
+                        TooltipPosition::Top,
+                    ),
+                ]
+                .spacing(4)
+                .align_y(Alignment::Center),
+                row![input_widget, text("days").size(13), preset_buttons,]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                text(format!("Active depth: {} days", effective_days)).size(12),
+            ]
+            .spacing(8);
 
             let is_agg = *aggregate;
             let agg_toggler =
@@ -1437,38 +1762,64 @@ pub fn kline_cfg_view<'a>(
                         )
                     });
 
-            let mut col = split_column![
-                column![text("Cluster type").size(14), cluster_picklist].spacing(8),
-                column![text("Cluster scaling").size(14), scaling].spacing(8),
-                aggregation_section,
-                column![text("Studies").size(14), study_cfg].spacing(8),
-                column![
-                    text("Panels & Overlays").size(14),
-                    bottom_volume_checkbox,
-                    volume_panel_checkbox,
-                ].spacing(8),
-                drawing_tools_section(cfg, pane),
-                ; spacing = 12, align_x = Alignment::Start
+            const FOOTPRINT_CATS: &[SettingsCategory] = &[
+                SettingsCategory::General,
+                SettingsCategory::Aggregation,
+                SettingsCategory::Studies,
+                SettingsCategory::Drawings,
+                SettingsCategory::Indicators,
             ];
+            let active_category = if FOOTPRINT_CATS.contains(&selected_category) {
+                selected_category
+            } else {
+                SettingsCategory::General
+            };
 
-            if let Some(indicator_sec) =
-                indicator_settings_section(cfg, pane, indicators, expanded_indicator)
-            {
-                col = col.push(rule::horizontal(1.0).style(style::split_ruler));
-                col = col.push(indicator_sec);
-            }
+            let content: Element<'a, Message> = match active_category {
+                SettingsCategory::General => {
+                    column![
+                        column![text("Cluster type").size(14), cluster_picklist].spacing(8),
+                        column![text("Cluster scaling").size(14), scaling].spacing(8),
+                        lookback_section,
+                    ]
+                    .spacing(12)
+                    .into()
+                }
+                SettingsCategory::Aggregation => aggregation_section.into(),
+                SettingsCategory::Studies => {
+                    column![
+                        column![text("Studies").size(14), study_cfg].spacing(8),
+                        column![
+                            text("Panels & Overlays").size(14),
+                            bottom_volume_checkbox,
+                            volume_panel_checkbox,
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(12)
+                    .into()
+                }
+                SettingsCategory::Drawings => drawing_tools_section(cfg, pane),
+                SettingsCategory::Indicators => {
+                    indicator_settings_section(cfg, pane, indicators, expanded_indicator)
+                        .unwrap_or_else(|| {
+                            container(text("No configurable indicators enabled (PositionFlow, Rolling VWAP, Liquidation Heatmap).").size(13))
+                                .padding(8)
+                                .into()
+                        })
+                }
+                _ => drawing_tools_section(cfg, pane),
+            };
 
-            col = col.push(rule::horizontal(1.0).style(style::split_ruler));
-            col = col.push(row![
-                space::horizontal(),
-                sync_all_button(pane, VisualConfig::Kline(cfg))
-            ]);
-
-            col
+            settings_modal_layout(
+                pane,
+                FOOTPRINT_CATS,
+                selected_category,
+                content,
+                Some(sync_all_button(pane, VisualConfig::Kline(cfg))),
+            )
         }
-    };
-
-    cfg_view_container(360, content)
+    }
 }
 
 pub fn ladder_cfg_view<'a>(cfg: ladder::Config, pane: pane_grid::Pane) -> Element<'a, Message> {
@@ -2357,5 +2708,65 @@ pub mod study {
 
             container(column).style(style::modal_container).into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_settings_categories_metadata() {
+        let cats = [
+            SettingsCategory::General,
+            SettingsCategory::Aggregation,
+            SettingsCategory::Studies,
+            SettingsCategory::Indicators,
+            SettingsCategory::Drawings,
+            SettingsCategory::Colors,
+        ];
+
+        for cat in cats {
+            assert!(!cat.title().is_empty());
+        }
+        assert_eq!(SettingsCategory::default(), SettingsCategory::General);
+    }
+
+    #[test]
+    fn test_category_selection_fallback() {
+        let allowed = [SettingsCategory::General, SettingsCategory::Indicators];
+        let selected = SettingsCategory::Colors;
+        let active = if allowed.contains(&selected) {
+            selected
+        } else {
+            allowed
+                .first()
+                .copied()
+                .unwrap_or(SettingsCategory::General)
+        };
+        assert_eq!(active, SettingsCategory::General);
+    }
+
+    #[test]
+    fn test_candles_and_heatmap_categories() {
+        const CANDLES_CATS: &[SettingsCategory] = &[
+            SettingsCategory::General,
+            SettingsCategory::Drawings,
+            SettingsCategory::Indicators,
+        ];
+        assert_eq!(CANDLES_CATS.len(), 3);
+        assert!(CANDLES_CATS.contains(&SettingsCategory::General));
+        assert!(CANDLES_CATS.contains(&SettingsCategory::Drawings));
+        assert!(CANDLES_CATS.contains(&SettingsCategory::Indicators));
+
+        const HEATMAP_CATS: &[SettingsCategory] = &[
+            SettingsCategory::General,
+            SettingsCategory::Aggregation,
+            SettingsCategory::Studies,
+        ];
+        assert_eq!(HEATMAP_CATS.len(), 3);
+        assert!(HEATMAP_CATS.contains(&SettingsCategory::General));
+        assert!(HEATMAP_CATS.contains(&SettingsCategory::Aggregation));
+        assert!(HEATMAP_CATS.contains(&SettingsCategory::Studies));
     }
 }

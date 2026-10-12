@@ -1,8 +1,12 @@
 pub mod audio;
+pub mod global_settings;
 pub mod layout_manager;
 pub mod pane;
 pub mod theme_editor;
+#[cfg(feature = "volume-search")]
+pub mod volume_search;
 
+pub use global_settings::{GlobalSettingsCategory, global_settings_modal_view};
 use iced::widget::{center, container, mouse_area, opaque, stack};
 use iced::{Alignment, Color, Element, Length, padding};
 pub use layout_manager::LayoutManager;

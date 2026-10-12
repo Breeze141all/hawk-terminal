@@ -335,6 +335,7 @@ pub fn state_to_saved_state(state: data::State) -> SavedState {
     };
 
     exchange::fetcher::toggle_trade_fetch(state.trade_fetch_enabled);
+    exchange::fetcher::set_trade_history_lookback_days(state.trade_history_lookback_days);
     exchange::set_preferred_currency(state.size_in_quote_ccy);
 
     if let Some(kline_cfg) = state.default_kline_config {
@@ -359,23 +360,20 @@ pub fn load_saved_state() -> SavedState {
     match data::read_from_file(data::SAVED_STATE_PATH) {
         Ok(mut state) => {
             let mut modified = false;
-            if !state
-                .layout_manager
-                .layouts
-                .iter()
-                .any(|l| l.name == "Hawk")
-            {
-                log::info!(
-                    "Hawk template not found in existing state ({} layout(s)). Injecting default Hawk template...",
-                    state.layout_manager.layouts.len()
-                );
+            if state.layout_manager.layouts.is_empty() {
                 let hawk_layout = data::default_hawk_layout();
-                state.layout_manager.layouts.insert(0, hawk_layout);
-                modified = true;
-            }
-
-            if state.layout_manager.active_layout.is_none() {
+                state.layout_manager.layouts.push(hawk_layout);
                 state.layout_manager.active_layout = Some("Hawk".to_string());
+                modified = true;
+            } else if state.layout_manager.active_layout.is_none()
+                || !state
+                    .layout_manager
+                    .layouts
+                    .iter()
+                    .any(|l| state.layout_manager.active_layout.as_ref() == Some(&l.name))
+            {
+                state.layout_manager.active_layout =
+                    state.layout_manager.layouts.first().map(|l| l.name.clone());
                 modified = true;
             }
 
@@ -410,42 +408,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_hawk_template_injection_when_missing() {
+    fn test_no_phantom_hawk_injection_when_layouts_exist() {
         let mut state = data::State::default();
         state.layout_manager.layouts = vec![data::Layout {
             name: "CustomLayout".to_string(),
             dashboard: data::Dashboard::default(),
         }];
-        assert!(
-            !state
+        state.layout_manager.active_layout = Some("CustomLayout".to_string());
+
+        // Simulate logic in load_saved_state:
+        if state.layout_manager.layouts.is_empty() {
+            let hawk_layout = data::default_hawk_layout();
+            state.layout_manager.layouts.push(hawk_layout);
+            state.layout_manager.active_layout = Some("Hawk".to_string());
+        } else if state.layout_manager.active_layout.is_none()
+            || !state
                 .layout_manager
                 .layouts
                 .iter()
-                .any(|l| l.name == "Hawk")
+                .any(|l| state.layout_manager.active_layout.as_ref() == Some(&l.name))
+        {
+            state.layout_manager.active_layout =
+                state.layout_manager.layouts.first().map(|l| l.name.clone());
+        }
+
+        assert_eq!(state.layout_manager.layouts.len(), 1);
+        assert_eq!(state.layout_manager.layouts[0].name, "CustomLayout");
+        assert_eq!(
+            state.layout_manager.active_layout.as_deref(),
+            Some("CustomLayout")
         );
 
-        // Simulate logic in load_saved_state:
-        if !state
-            .layout_manager
-            .layouts
-            .iter()
-            .any(|l| l.name == "Hawk")
-        {
-            let hawk_layout = data::default_hawk_layout();
-            state.layout_manager.layouts.insert(0, hawk_layout);
-        }
-        if state.layout_manager.active_layout.is_none() {
-            state.layout_manager.active_layout = Some("Hawk".to_string());
-        }
-
-        assert_eq!(state.layout_manager.layouts.len(), 2);
-        assert_eq!(state.layout_manager.layouts[0].name, "Hawk");
-        assert_eq!(state.layout_manager.layouts[1].name, "CustomLayout");
-        assert_eq!(state.layout_manager.active_layout.as_deref(), Some("Hawk"));
-
         let saved = state_to_saved_state(state);
-        assert_eq!(saved.layout_manager.layouts.len(), 2);
+        assert_eq!(saved.layout_manager.layouts.len(), 1);
         let active = saved.layout_manager.active_layout_id().unwrap();
-        assert_eq!(active.name, "Hawk");
+        assert_eq!(active.name, "CustomLayout");
     }
 }

@@ -6,13 +6,13 @@ pub mod journal_media;
 mod layout;
 mod logger;
 mod modal;
+pub mod notification;
 pub mod profile;
 mod screen;
 mod style;
 mod widget;
 mod window;
 
-use data::config::theme::{breez_theme, deeptrades_theme, default_theme, flowsurface_legacy_theme};
 use data::{layout::WindowSpec, sidebar};
 use layout::{LayoutId, configuration};
 use modal::{LayoutManager, ThemeEditor, audio::AudioStream};
@@ -25,10 +25,9 @@ use widget::{
 };
 
 use iced::{
-    Alignment, Element, Subscription, Task, keyboard, padding,
+    Alignment, Element, Length, Subscription, Task, keyboard, padding,
     widget::{
-        button, column, container, pane_grid, pick_list, row, rule, scrollable, text,
-        tooltip::Position as TooltipPosition,
+        button, column, container, pane_grid, row, rule, text, tooltip::Position as TooltipPosition,
     },
 };
 use std::{borrow::Cow, collections::HashMap, vec};
@@ -40,8 +39,6 @@ enum AppScreen {
 
 fn main() {
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
-
-    std::thread::spawn(data::cleanup_old_market_data);
 
     let _ = iced::daemon(HawkTerminal::new, HawkTerminal::update, HawkTerminal::view)
         .settings(iced::Settings {
@@ -75,6 +72,9 @@ struct HawkTerminal {
     notifications: Vec<Toast>,
     journal_window: Option<window::Id>,
     journal_mode: data::JournalMode,
+    global_settings_category: modal::GlobalSettingsCategory,
+    #[cfg(feature = "volume-search")]
+    volume_search_modal: modal::volume_search::VolumeSearchModal,
 }
 
 #[derive(Debug, Clone)]
@@ -99,17 +99,25 @@ enum Message {
     ToggleTradeFetch(bool),
     ApplyVolumeSizeUnit(exchange::SizeUnit),
     RemoveNotification(usize),
+    SelectGlobalSettingsCategory(modal::GlobalSettingsCategory),
     ToggleDialogModal(Option<screen::ConfirmDialog<Message>>),
     ThemeEditor(modal::theme_editor::Message),
     Layouts(modal::layout_manager::Message),
     AudioStream(modal::audio::Message),
     OfflineAlertsChecked(Vec<data::chart::alert::PriceAlert>),
     AutofillJournalFromActiveChart,
+    ToggleActiveReplayPlayPause,
+    ClockSyncTick,
+    #[cfg(feature = "volume-search")]
+    VolumeSearch(modal::volume_search::Message),
+    #[cfg(feature = "volume-search")]
+    ToggleVolumeSearchSidebar(bool),
 }
 
 impl HawkTerminal {
     fn new() -> (Self, Task<Message>) {
         let saved_state = layout::load_saved_state();
+        std::thread::spawn(data::cleanup_old_market_data);
 
         let (main_window_id, open_main_window) = {
             let (position, size) = saved_state.window();
@@ -153,6 +161,9 @@ impl HawkTerminal {
             notifications: vec![],
             journal_window: None,
             journal_mode: saved_state.journal_mode,
+            global_settings_category: modal::GlobalSettingsCategory::default(),
+            #[cfg(feature = "volume-search")]
+            volume_search_modal: modal::volume_search::VolumeSearchModal::new(None, Vec::new()),
         };
 
         let edit_layouts = std::env::var("HAWK_EDIT_LAYOUTS")
@@ -197,6 +208,12 @@ impl HawkTerminal {
                 match event {
                     exchange::Event::Connected(exchange) => {
                         log::info!("a stream connected to {exchange} WS");
+                        return Task::perform(
+                            async move {
+                                let _ = exchange::clock::ping_server_time(exchange).await;
+                            },
+                            |_| Message::Tick(std::time::Instant::now()),
+                        );
                     }
                     exchange::Event::Disconnected(exchange, reason) => {
                         log::info!("a stream disconnected from {exchange} WS: {reason:?}");
@@ -254,6 +271,23 @@ impl HawkTerminal {
                         layout_id: None,
                         event: msg,
                     });
+            }
+            Message::ClockSyncTick => {
+                return Task::perform(
+                    async {
+                        for ex in [
+                            exchange::Exchange::BinanceLinear,
+                            exchange::Exchange::BybitLinear,
+                            exchange::Exchange::OkexLinear,
+                            exchange::Exchange::HyperliquidLinear,
+                        ] {
+                            if exchange::clock::is_sync_needed(ex, 60_000) {
+                                let _ = exchange::clock::ping_server_time(ex).await;
+                            }
+                        }
+                    },
+                    |_| Message::Tick(std::time::Instant::now()),
+                );
             }
             Message::WindowEvent(event) => match event {
                 window::Event::CloseRequested(window) => {
@@ -405,6 +439,9 @@ impl HawkTerminal {
                 if index < self.notifications.len() {
                     self.notifications.remove(index);
                 }
+            }
+            Message::SelectGlobalSettingsCategory(cat) => {
+                self.global_settings_category = cat;
             }
             Message::SetTimezone(tz) => {
                 self.timezone = tz;
@@ -653,7 +690,62 @@ impl HawkTerminal {
                     None => {}
                 }
 
+                #[cfg(feature = "volume-search")]
+                if self.sidebar.is_menu_active(sidebar::Menu::VolumeSearch) {
+                    let catalog: Vec<exchange::TickerInfo> = self
+                        .sidebar
+                        .tickers_info()
+                        .values()
+                        .flatten()
+                        .copied()
+                        .collect();
+
+                    if self.volume_search_modal.selected_ticker.is_none() {
+                        let active_pane_ticker = self
+                            .layout_manager
+                            .active_layout_id()
+                            .and_then(|id| self.layout_manager.get(id.unique))
+                            .and_then(|l| {
+                                l.dashboard.panes.iter().find_map(|(_, p)| p.stream_pair())
+                            });
+                        if let Some(ti) = active_pane_ticker {
+                            self.volume_search_modal.selected_ticker = Some(ti);
+                        }
+                    }
+
+                    if !catalog.is_empty() {
+                        self.volume_search_modal.update_available_tickers(catalog);
+                    }
+                }
+
                 return task.map(Message::Sidebar);
+            }
+            #[cfg(feature = "volume-search")]
+            Message::VolumeSearch(msg) => {
+                if let modal::volume_search::Message::Close = &msg {
+                    self.sidebar.set_menu(None);
+                    return Task::none();
+                } else {
+                    let active_id = self.layout_manager.active_layout_id();
+                    let dashboard = active_id
+                        .and_then(|id| self.layout_manager.get(id.unique))
+                        .map(|l| &l.dashboard);
+                    let action = self.volume_search_modal.update(msg, dashboard);
+                    match action {
+                        Some(modal::volume_search::Action::Close) => {
+                            self.sidebar.set_menu(None);
+                            return Task::none();
+                        }
+                        Some(modal::volume_search::Action::Task(task)) => {
+                            return task.map(Message::VolumeSearch);
+                        }
+                        None => return Task::none(),
+                    }
+                }
+            }
+            #[cfg(feature = "volume-search")]
+            Message::ToggleVolumeSearchSidebar(enabled) => {
+                self.sidebar.state.show_volume_search = enabled;
             }
             Message::ApplyVolumeSizeUnit(pref) => {
                 self.volume_size_unit = pref;
@@ -674,10 +766,16 @@ impl HawkTerminal {
                     } else {
                         "--".to_string()
                     };
-                    self.notifications.push(Toast::info(format!(
-                        "🔔 Offline Price Alert: {} reached {:.2} ({}) at {}",
+                    let notif_body = format!(
+                        "{} reached {:.2} ({}) at {}",
                         alert.ticker_symbol, alert.target_price, alert.condition, time_str
-                    )));
+                    );
+                    self.notifications
+                        .push(Toast::info(format!("🔔 Offline Price Alert: {notif_body}")));
+                    crate::notification::send_desktop_notification(
+                        "🔔 Offline Price Alert",
+                        &notif_body,
+                    );
                 }
                 return Task::none();
             }
@@ -691,6 +789,21 @@ impl HawkTerminal {
                     ));
                     return Task::none();
                 }
+            }
+            Message::ToggleActiveReplayPlayPause => {
+                if self.confirm_dialog.is_some()
+                    || self.sidebar.active_menu().is_some()
+                    || self.journal_window.is_some()
+                {
+                    return Task::none();
+                }
+                let active_layout_id = self.layout_manager.active_layout_id().map(|id| id.unique);
+                if let Some(uid) = active_layout_id
+                    && let Some(dashboard) = self.layout_manager.mut_dashboard(uid)
+                {
+                    dashboard.toggle_replay_play_pause_active();
+                }
+                return Task::none();
             }
         }
         Task::none()
@@ -778,6 +891,24 @@ impl HawkTerminal {
                     event: msg,
                 });
 
+            #[cfg(feature = "volume-search")]
+            let is_volume_search = self.sidebar.is_menu_active(sidebar::Menu::VolumeSearch);
+            #[cfg(not(feature = "volume-search"))]
+            let is_volume_search = false;
+
+            let main_area_view: Element<Message> = if is_volume_search {
+                #[cfg(feature = "volume-search")]
+                {
+                    self.volume_search_modal.view().map(Message::VolumeSearch)
+                }
+                #[cfg(not(feature = "volume-search"))]
+                {
+                    dashboard_view
+                }
+            } else {
+                dashboard_view
+            };
+
             let header_title = {
                 #[cfg(target_os = "macos")]
                 {
@@ -803,12 +934,16 @@ impl HawkTerminal {
             let base = column![
                 header_title,
                 match sidebar_pos {
-                    sidebar::Position::Left => row![sidebar_view, dashboard_view,],
-                    sidebar::Position::Right => row![dashboard_view, sidebar_view],
+                    sidebar::Position::Left => row![sidebar_view, main_area_view,],
+                    sidebar::Position::Right => row![main_area_view, sidebar_view],
                 }
                 .spacing(4)
-                .padding(8),
-            ];
+                .padding(8)
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill);
 
             let content_with_menu = if let Some(menu) = self.sidebar.active_menu() {
                 self.view_with_modal(base.into(), dashboard, menu)
@@ -924,11 +1059,26 @@ impl HawkTerminal {
                     screen::dashboard::journal::Message::PasteScreenshotFromHotkey,
                 )));
             }
+            let is_space = !modifiers.control()
+                && !modifiers.alt()
+                && !modifiers.command()
+                && !modifiers.shift()
+                && (matches!(&key, keyboard::Key::Named(keyboard::key::Named::Space))
+                    || matches!(
+                        physical_key,
+                        keyboard::key::Physical::Code(keyboard::key::Code::Space)
+                    ));
+            if is_space {
+                return Some(Message::ToggleActiveReplayPlayPause);
+            }
             match key {
                 keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::GoBack),
                 _ => None,
             }
         });
+
+        let clock_sync =
+            iced::time::every(std::time::Duration::from_secs(60)).map(|_| Message::ClockSyncTick);
 
         Subscription::batch(vec![
             exchange_streams,
@@ -936,6 +1086,7 @@ impl HawkTerminal {
             window_events,
             tick,
             hotkeys,
+            clock_sync,
         ])
     }
 
@@ -1154,189 +1305,32 @@ impl HawkTerminal {
 
         match menu {
             sidebar::Menu::Settings => {
-                let settings_modal = {
-                    let theme_picklist = {
-                        let default_theme = iced_core::Theme::Custom(default_theme().into());
-                        let breez = iced_core::Theme::Custom(breez_theme().into());
-                        let deeptrades = iced_core::Theme::Custom(deeptrades_theme().into());
-                        let flowsurface_classic =
-                            iced_core::Theme::Custom(flowsurface_legacy_theme().into());
-
-                        let mut themes: Vec<iced::Theme> =
-                            vec![default_theme, breez, deeptrades, flowsurface_classic];
-
-                        if let Some(custom_theme) = &self.theme_editor.custom_theme {
-                            themes.push(custom_theme.clone());
-                        }
-
-                        themes.extend(iced_core::Theme::ALL.iter().cloned());
-
-                        pick_list(themes, Some(self.theme.0.clone()), |theme| {
-                            Message::ThemeSelected(data::Theme(theme))
-                        })
-                    };
-
-                    let toggle_theme_editor = button(text("Theme editor")).on_press(
-                        Message::Sidebar(dashboard::sidebar::Message::ToggleSidebarMenu(Some(
-                            sidebar::Menu::ThemeEditor,
-                        ))),
-                    );
-
-                    let timezone_picklist = pick_list(
-                        [data::UserTimezone::Utc, data::UserTimezone::Local],
-                        Some(self.timezone),
-                        Message::SetTimezone,
-                    );
-
-                    let journal_mode_picklist = pick_list(
-                        data::JournalMode::ALL,
-                        Some(self.journal_mode),
-                        Message::SetJournalMode,
-                    );
-
-                    let size_in_quote_currency_checkbox = {
-                        let is_active = match self.volume_size_unit {
-                            exchange::SizeUnit::Quote => true,
-                            exchange::SizeUnit::Base => false,
-                        };
-
-                        let checkbox = iced::widget::checkbox(is_active)
-                            .label("Size in quote currency")
-                            .on_toggle(|checked| {
-                                let on_dialog_confirm = Message::ApplyVolumeSizeUnit(if checked {
-                                    exchange::SizeUnit::Quote
-                                } else {
-                                    exchange::SizeUnit::Base
-                                });
-
-                                let confirm_dialog = screen::ConfirmDialog::new(
-                                    "Changing size display currency requires application restart"
-                                        .to_string(),
-                                    Box::new(on_dialog_confirm.clone()),
-                                )
-                                .with_confirm_btn_text("Restart now".to_string());
-
-                                Message::ToggleDialogModal(Some(confirm_dialog))
-                            });
-
-                        tooltip(
-                            checkbox,
-                            Some(
-                                "Display sizes/volumes in quote currency (USD)\nHas no effect on inverse perps or open interest",
-                            ),
-                            TooltipPosition::Top,
-                        )
-                    };
-
-                    let sidebar_pos = pick_list(
-                        [sidebar::Position::Left, sidebar::Position::Right],
-                        Some(sidebar_pos),
-                        |pos| {
-                            Message::Sidebar(dashboard::sidebar::Message::SetSidebarPosition(pos))
-                        },
-                    );
-
-                    let scale_factor = {
-                        let current_value: f32 = self.ui_scale_factor.into();
-
-                        let decrease_btn = if current_value > data::config::MIN_SCALE {
-                            button(text("-"))
-                                .on_press(Message::ScaleFactorChanged((current_value - 0.1).into()))
-                        } else {
-                            button(text("-"))
-                        };
-
-                        let increase_btn = if current_value < data::config::MAX_SCALE {
-                            button(text("+"))
-                                .on_press(Message::ScaleFactorChanged((current_value + 0.1).into()))
-                        } else {
-                            button(text("+"))
-                        };
-
-                        container(
-                            row![
-                                decrease_btn,
-                                text(format!("{:.0}%", current_value * 100.0)).size(14),
-                                increase_btn,
-                            ]
-                            .align_y(Alignment::Center)
-                            .spacing(8)
-                            .padding(4),
-                        )
-                        .style(style::modal_container)
-                    };
-
-                    let trade_fetch_checkbox = {
-                        let is_active = exchange::fetcher::is_trade_fetch_enabled();
-
-                        let checkbox = iced::widget::checkbox(is_active)
-                            .label("Fetch trades")
-                            .on_toggle(|checked| {
-                                if checked {
-                                    let confirm_dialog = screen::ConfirmDialog::new(
-                                        "Fetching historical trades may download large archives and take some time to complete. Proceed?"
-                                            .to_string(),
-                                        Box::new(Message::ToggleTradeFetch(true)),
-                                    );
-                                    Message::ToggleDialogModal(Some(confirm_dialog))
-                                } else {
-                                    Message::ToggleTradeFetch(false)
-                                }
-                            });
-
-                        tooltip(
-                            checkbox,
-                            Some(
-                                "Fetch historical and intraday trades for footprint charts (Binance, Bybit, OKX, Hyperliquid)",
-                            ),
-                            TooltipPosition::Top,
-                        )
-                    };
-
-                    let open_data_folder = {
-                        let button =
-                            button(text("Open data folder")).on_press(Message::DataFolderRequested);
-
-                        tooltip(
-                            button,
-                            Some("Open the folder where the data & config is stored"),
-                            TooltipPosition::Top,
-                        )
-                    };
-
-                    let column_content = split_column![
-                        column![open_data_folder,].spacing(8),
-                        column![text("Sidebar position").size(14), sidebar_pos,].spacing(12),
-                        column![text("Time zone").size(14), timezone_picklist,].spacing(12),
-                        column![text("Trade journal").size(14), journal_mode_picklist,].spacing(12),
-                        column![text("Market data").size(14), size_in_quote_currency_checkbox,].spacing(12),
-                        column![text("Theme").size(14), theme_picklist,].spacing(12),
-                        column![text("Interface scale").size(14), scale_factor,].spacing(12),
-                        column![
-                            text("Experimental").size(14),
-                            column![trade_fetch_checkbox, toggle_theme_editor,].spacing(8),
-                        ]
-                        .spacing(12),
-                        ; spacing = 16, align_x = Alignment::Start
-                    ];
-
-                    let content = scrollable::Scrollable::with_direction(
-                        column_content,
-                        scrollable::Direction::Vertical(
-                            scrollable::Scrollbar::new().width(8).scroller_width(6),
-                        ),
-                    );
-
-                    container(content)
-                        .align_x(Alignment::Start)
-                        .max_width(240)
-                        .padding(24)
-                        .style(style::dashboard_modal)
-                };
+                let settings_modal = modal::global_settings_modal_view(
+                    self.global_settings_category,
+                    self.timezone,
+                    sidebar_pos,
+                    self.journal_mode,
+                    self.volume_size_unit,
+                    &self.theme,
+                    self.theme_editor.custom_theme.as_ref(),
+                    self.ui_scale_factor,
+                    #[cfg(feature = "volume-search")]
+                    self.sidebar.state.show_volume_search,
+                );
 
                 let (align_x, padding) = match sidebar_pos {
-                    sidebar::Position::Left => (Alignment::Start, padding::left(44).bottom(4)),
-                    sidebar::Position::Right => (Alignment::End, padding::right(44).bottom(4)),
+                    sidebar::Position::Left => (
+                        Alignment::Start,
+                        padding::left(44)
+                            .bottom(4)
+                            .top(style::TITLE_PADDING_TOP + 4.0),
+                    ),
+                    sidebar::Position::Right => (
+                        Alignment::End,
+                        padding::right(44)
+                            .bottom(4)
+                            .top(style::TITLE_PADDING_TOP + 4.0),
+                    ),
                 };
 
                 let base_content = dashboard_modal(
@@ -1508,6 +1502,8 @@ impl HawkTerminal {
                     align_x,
                 )
             }
+            #[cfg(feature = "volume-search")]
+            sidebar::Menu::VolumeSearch => base,
         }
     }
 

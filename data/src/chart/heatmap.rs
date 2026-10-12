@@ -10,9 +10,9 @@ use std::collections::BTreeMap;
 
 pub const CLEANUP_THRESHOLD: usize = 4800;
 
-/// Allow up to 500ms delay in order updates before starting a new order run.
-/// Prevents fragmentation(e.g. network latency) when qty and is_bid remain unchanged.
-const GRACE_PERIOD_MS: u64 = 500;
+/// Maximum continuous gap tolerance (10 seconds).
+/// Updates within this window maintain continuity across network jitter and variable broadcast intervals.
+const MAX_CONTINUITY_GAP_MS: u64 = 10_000;
 
 #[derive(Debug, Copy, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Config {
@@ -20,6 +20,12 @@ pub struct Config {
     pub order_size_filter: f32,
     pub trade_size_scale: Option<i32>,
     pub coalescing: Option<CoalesceKind>,
+    #[serde(default = "default_show_trades")]
+    pub show_trades: bool,
+}
+
+fn default_show_trades() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -29,6 +35,7 @@ impl Default for Config {
             order_size_filter: 0.0,
             trade_size_scale: Some(100),
             coalescing: Some(CoalesceKind::Average(0.15)),
+            show_trades: true,
         }
     }
 }
@@ -53,7 +60,7 @@ impl DataPoint for HeatmapDataPoint {
 
         match self
             .grouped_trades
-            .binary_search_by(|probe| probe.compare_with(trade.price, trade.is_sell))
+            .binary_search_by(|probe| probe.compare_with(grouped_price, trade.is_sell))
         {
             Ok(index) => self.grouped_trades[index].qty += trade.qty,
             Err(index) => {
@@ -216,7 +223,7 @@ impl HistoricalDepth {
                     return;
                 }
 
-                if time > last_run.until_time + GRACE_PERIOD_MS {
+                if time > last_run.until_time + MAX_CONTINUITY_GAP_MS {
                     price_level.push(OrderRun::new(time, aggr_time, qty, is_bid));
                     return;
                 }
@@ -234,9 +241,7 @@ impl HistoricalDepth {
                         last_run.until_time = new_until;
                     }
                 } else {
-                    if last_run.until_time > time {
-                        last_run.until_time = time;
-                    }
+                    last_run.until_time = time;
                     price_level.push(OrderRun::new(time, aggr_time, qty, is_bid));
                 }
             }
@@ -250,7 +255,7 @@ impl HistoricalDepth {
                     }
                     return;
                 }
-                if last_run.until_time > time {
+                if time <= last_run.until_time + MAX_CONTINUITY_GAP_MS {
                     last_run.until_time = time;
                 }
                 price_level.push(OrderRun::new(time, aggr_time, qty, is_bid));
@@ -723,5 +728,106 @@ mod tests {
             CoalesceKind::Average(0.15),
         );
         assert!(!runs.is_empty());
+    }
+
+    #[test]
+    fn test_update_price_level_continuity_no_gap_on_jitter() {
+        let basis = Basis::Time(exchange::Timeframe::MS100);
+        let mut depth = HistoricalDepth::new(0.01, PriceStep { units: 100 }, basis);
+        let price = Price { units: 50000 };
+
+        // Initial run at t=1000 (100ms bucket, ends at 1100)
+        depth.update_price_level(1000, price, 10.0, true);
+
+        // Network jitter / slow broadcast: next update arrives 1500ms later (t=2500)
+        depth.update_price_level(2500, price, 10.0, true);
+
+        let runs = depth.price_levels.get(&price).unwrap();
+        // Since order was unchanged, it should seamlessly extend the same run without creating a gap
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start_time, 1000);
+        assert_eq!(runs[0].until_time, 2600);
+    }
+
+    #[test]
+    fn test_update_price_level_continuity_no_gap_on_qty_change() {
+        let basis = Basis::Time(exchange::Timeframe::MS100);
+        let mut depth = HistoricalDepth::new(0.01, PriceStep { units: 100 }, basis);
+        let price = Price { units: 50000 };
+
+        // Run at t=1000 with 10.0 qty (ends at 1100)
+        depth.update_price_level(1000, price, 10.0, true);
+
+        // Trade/liquidity change arrives at t=1300 with 25.0 qty
+        depth.update_price_level(1300, price, 25.0, true);
+
+        let runs = depth.price_levels.get(&price).unwrap();
+        assert_eq!(runs.len(), 2);
+        // Previous run must end exactly where the new run begins (no 1100..1300 gap)
+        assert_eq!(runs[0].start_time, 1000);
+        assert_eq!(runs[0].until_time, 1300);
+        assert_eq!(runs[1].start_time, 1300);
+        assert_eq!(runs[1].until_time, 1400);
+        assert_eq!(runs[0].until_time, runs[1].start_time);
+    }
+
+    #[test]
+    fn test_update_price_level_side_flip_continuity() {
+        let basis = Basis::Time(exchange::Timeframe::MS100);
+        let mut depth = HistoricalDepth::new(0.01, PriceStep { units: 100 }, basis);
+        let price = Price { units: 50000 };
+
+        depth.update_price_level(1000, price, 10.0, true);
+        depth.update_price_level(1400, price, 15.0, false);
+
+        let runs = depth.price_levels.get(&price).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].until_time, 1400);
+        assert_eq!(runs[1].start_time, 1400);
+        assert_eq!(runs[0].until_time, runs[1].start_time);
+    }
+
+    #[test]
+    fn test_update_price_level_genuine_disconnect_preserves_gap() {
+        let basis = Basis::Time(exchange::Timeframe::MS100);
+        let mut depth = HistoricalDepth::new(0.01, PriceStep { units: 100 }, basis);
+        let price = Price { units: 50000 };
+
+        depth.update_price_level(1000, price, 10.0, true);
+        // Reconnect after 30 seconds (> 10s threshold)
+        depth.update_price_level(31000, price, 10.0, true);
+
+        let runs = depth.price_levels.get(&price).unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].until_time, 1100);
+        assert!(runs[1].start_time > runs[0].until_time);
+    }
+
+    #[test]
+    fn test_dat01_heatmap_grouped_price_binary_search() {
+        let mut dp = HeatmapDataPoint::default();
+        let step = PriceStep { units: 100 };
+        let trade1 = exchange::Trade {
+            time: 1000,
+            price: Price { units: 50010 },
+            qty: 1.5,
+            is_sell: true,
+        };
+        let trade2 = exchange::Trade {
+            time: 1005,
+            price: Price { units: 50090 },
+            qty: 2.5,
+            is_sell: true,
+        };
+
+        dp.add_trade(&trade1, step);
+        dp.add_trade(&trade2, step);
+
+        assert_eq!(dp.grouped_trades.len(), 1);
+        assert_eq!(dp.grouped_trades[0].qty, 4.0);
+        assert_eq!(
+            dp.grouped_trades[0].price,
+            trade1.price.round_to_side_step(true, step)
+        );
     }
 }

@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod clock;
 pub mod connect;
 pub mod depth;
 pub mod fetcher;
@@ -356,7 +357,7 @@ impl Ticker {
     }
 
     #[inline]
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         let end = self
             .bytes
             .iter()
@@ -557,6 +558,12 @@ pub struct TickerInfo {
     pub min_ticksize: MinTicksize,
     pub min_qty: MinQtySize,
     pub contract_size: Option<ContractSize>,
+}
+
+impl fmt::Display for TickerInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.ticker)
+    }
 }
 
 impl TickerInfo {

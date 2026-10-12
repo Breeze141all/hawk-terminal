@@ -326,7 +326,8 @@ impl Drawing {
     }
 }
 
-use std::sync::{LazyLock, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DrawingRecord {
@@ -337,19 +338,43 @@ pub struct DrawingRecord {
 static GLOBAL_DRAWINGS: LazyLock<RwLock<Vec<DrawingRecord>>> =
     LazyLock::new(|| RwLock::new(crate::load_drawings()));
 
+static DRAWING_SAVE_LOCK: Mutex<()> = Mutex::new(());
+static DRAWING_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
+static DRAWING_LAST_WRITTEN_VERSION: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn read_drawings() -> std::sync::RwLockReadGuard<'static, Vec<DrawingRecord>> {
+    GLOBAL_DRAWINGS.read().unwrap_or_else(|p| p.into_inner())
+}
+
+#[inline]
+fn write_drawings() -> std::sync::RwLockWriteGuard<'static, Vec<DrawingRecord>> {
+    GLOBAL_DRAWINGS.write().unwrap_or_else(|p| p.into_inner())
+}
+
+fn spawn_save_drawings(snapshot: Vec<DrawingRecord>) {
+    let version = DRAWING_SAVE_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        let _guard = DRAWING_SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        if version < DRAWING_LAST_WRITTEN_VERSION.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = crate::save_drawings(&snapshot);
+        DRAWING_LAST_WRITTEN_VERSION.store(version, Ordering::Relaxed);
+    });
+}
+
 pub struct DrawingStore;
 
 impl DrawingStore {
     /// Retrieve a clone of all drawing records
     pub fn all() -> Vec<DrawingRecord> {
-        GLOBAL_DRAWINGS.read().unwrap().clone()
+        read_drawings().clone()
     }
 
     /// Retrieve all drawings for a specific ticker symbol
     pub fn for_symbol(symbol: &str) -> Vec<Drawing> {
-        GLOBAL_DRAWINGS
-            .read()
-            .unwrap()
+        read_drawings()
             .iter()
             .filter(|r| r.ticker_symbol == symbol)
             .map(|r| r.drawing.clone())
@@ -360,9 +385,7 @@ impl DrawingStore {
     /// Returns drawings that are synced to all charts, drawings specific to this pane,
     /// or legacy drawings that have no pane_id assigned yet.
     pub fn for_symbol_and_pane(symbol: &str, pane_id: uuid::Uuid) -> Vec<Drawing> {
-        GLOBAL_DRAWINGS
-            .read()
-            .unwrap()
+        read_drawings()
             .iter()
             .filter(|r| {
                 r.ticker_symbol == symbol
@@ -374,72 +397,93 @@ impl DrawingStore {
             .collect()
     }
 
-    /// Add or update a drawing for a symbol and persist to disk
+    /// Add or update a drawing for a symbol and persist to disk asynchronously
     pub fn add(symbol: impl Into<String>, drawing: Drawing) {
-        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
-        if let Some(existing) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
-            existing.drawing = drawing;
-        } else {
-            drawings.push(DrawingRecord {
-                ticker_symbol: symbol.into(),
-                drawing,
-            });
-        }
-        let _ = crate::save_drawings(&drawings);
+        let snapshot = {
+            let mut drawings = write_drawings();
+            if let Some(existing) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
+                existing.drawing = drawing;
+            } else {
+                drawings.push(DrawingRecord {
+                    ticker_symbol: symbol.into(),
+                    drawing,
+                });
+            }
+            drawings.clone()
+        };
+        spawn_save_drawings(snapshot);
     }
 
-    /// Update an existing drawing for a symbol and persist to disk
+    /// Update an existing drawing for a symbol and persist to disk asynchronously
     pub fn update(symbol: &str, drawing: Drawing) {
-        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
-        if let Some(record) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
-            record.drawing = drawing;
-            record.ticker_symbol = symbol.to_string();
-        } else {
-            drawings.push(DrawingRecord {
-                ticker_symbol: symbol.to_string(),
-                drawing,
-            });
-        }
-        let _ = crate::save_drawings(&drawings);
+        let snapshot = {
+            let mut drawings = write_drawings();
+            if let Some(record) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
+                record.drawing = drawing;
+                record.ticker_symbol = symbol.to_string();
+            } else {
+                drawings.push(DrawingRecord {
+                    ticker_symbol: symbol.to_string(),
+                    drawing,
+                });
+            }
+            drawings.clone()
+        };
+        spawn_save_drawings(snapshot);
     }
 
-    /// Remove a drawing by ID and persist to disk
+    /// Remove a drawing by ID and persist to disk asynchronously
     pub fn remove(id: uuid::Uuid) {
-        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
-        drawings.retain(|r| r.drawing.id != id);
-        let _ = crate::save_drawings(&drawings);
+        let snapshot = {
+            let mut drawings = write_drawings();
+            drawings.retain(|r| r.drawing.id != id);
+            drawings.clone()
+        };
+        spawn_save_drawings(snapshot);
     }
 
-    /// Clear unlocked drawings for a specific symbol and persist to disk
+    /// Clear unlocked drawings for a specific symbol and persist to disk asynchronously
     pub fn clear_for_symbol(symbol: &str) {
-        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
-        drawings.retain(|r| r.ticker_symbol != symbol || r.drawing.is_locked);
-        let _ = crate::save_drawings(&drawings);
+        let snapshot = {
+            let mut drawings = write_drawings();
+            drawings.retain(|r| r.ticker_symbol != symbol || r.drawing.is_locked);
+            drawings.clone()
+        };
+        spawn_save_drawings(snapshot);
     }
 
     /// Clear unlocked drawings for a specific symbol visible to a given pane.
     /// Drawings belonging exclusively to another pane remain untouched.
     pub fn clear_for_symbol_and_pane(symbol: &str, pane_id: uuid::Uuid) {
-        let mut drawings = GLOBAL_DRAWINGS.write().unwrap();
-        drawings.retain(|r| {
-            if r.ticker_symbol != symbol || r.drawing.is_locked {
-                return true;
-            }
-            if !r.drawing.is_synced
-                && r.drawing.pane_id.is_some()
-                && r.drawing.pane_id != Some(pane_id)
-            {
-                return true;
-            }
-            false
-        });
-        let _ = crate::save_drawings(&drawings);
+        let snapshot = {
+            let mut drawings = write_drawings();
+            drawings.retain(|r| {
+                if r.ticker_symbol != symbol || r.drawing.is_locked {
+                    return true;
+                }
+                if !r.drawing.is_synced
+                    && r.drawing.pane_id.is_some()
+                    && r.drawing.pane_id != Some(pane_id)
+                {
+                    return true;
+                }
+                false
+            });
+            drawings.clone()
+        };
+        spawn_save_drawings(snapshot);
     }
 
-    /// Force save all drawings to disk
+    /// Force save all drawings to disk asynchronously
     pub fn save() {
-        let drawings = GLOBAL_DRAWINGS.read().unwrap();
-        let _ = crate::save_drawings(&drawings);
+        let snapshot = read_drawings().clone();
+        spawn_save_drawings(snapshot);
+    }
+
+    /// Force synchronous save of all drawings to disk
+    pub fn save_sync() -> std::io::Result<()> {
+        let snapshot = read_drawings().clone();
+        crate::save_drawings(&snapshot)
     }
 }
 
@@ -590,7 +634,8 @@ mod tests {
 
     #[test]
     fn test_drawing_store_operations() {
-        let sym = "TEST_DRAWING_SYM";
+        let sym_owned = format!("TEST_DRAWING_SYM_{}", uuid::Uuid::new_v4());
+        let sym = sym_owned.as_str();
         let d1 = Drawing::horizontal(65000.0, [1.0, 0.5, 0.0, 1.0], 2.0);
         let id1 = d1.id;
         let mut d2 = Drawing::trendline((100, 10.0), (200, 20.0), [0.0, 1.0, 0.0, 1.0], 1.5);
@@ -677,5 +722,32 @@ mod tests {
         // Cleanup
         DrawingStore::remove(id1);
         DrawingStore::remove(id2);
+    }
+
+    #[test]
+    fn test_dat06_drawing_store_lock_poisoning_resilience() {
+        use std::panic;
+
+        let _ = panic::catch_unwind(|| {
+            let _guard = GLOBAL_DRAWINGS.write().unwrap_or_else(|p| p.into_inner());
+            panic!("simulated panic while holding GLOBAL_DRAWINGS write lock");
+        });
+
+        assert!(GLOBAL_DRAWINGS.is_poisoned());
+
+        let sym = "POISON_TEST_DRAWING";
+        let d = Drawing::horizontal(100.0, [1.0, 0.0, 0.0, 1.0], 1.0);
+        let id = d.id;
+
+        DrawingStore::add(sym, d);
+        let drawings = DrawingStore::for_symbol(sym);
+        assert!(drawings.iter().any(|item| item.id == id));
+
+        DrawingStore::remove(id);
+        assert!(
+            !DrawingStore::for_symbol(sym)
+                .iter()
+                .any(|item| item.id == id)
+        );
     }
 }

@@ -53,6 +53,11 @@ pub enum Effect {
         drawing: data::chart::drawing::Drawing,
         originating_pane_id: uuid::Uuid,
     },
+    SyncDrawings {
+        symbol: String,
+        drawings: Vec<data::chart::drawing::Drawing>,
+        originating_pane_id: uuid::Uuid,
+    },
     UnsyncDrawing {
         symbol: String,
         drawing_id: uuid::Uuid,
@@ -66,6 +71,9 @@ pub enum Effect {
         symbol: String,
         drawing_ids: Vec<uuid::Uuid>,
     },
+    DeleteAlert(uuid::Uuid),
+    ToggleAlert(uuid::Uuid),
+    ClearTriggeredAlerts,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -131,6 +139,10 @@ pub enum Event {
     FootprintAggregateToggled(bool),
     /// Footprint aggregate exchange toggle
     FootprintAggregateExchangeToggled(Exchange, bool),
+    /// Footprint history lookback input changed
+    FootprintHistoryLookbackInput(String),
+    /// Footprint history lookback preset selected
+    FootprintHistoryLookbackSet(u32),
     /// Select drawing tool
     SelectDrawingTool(data::chart::drawing::DrawingTool),
     /// Drawing toolbar dragged to new position
@@ -141,6 +153,10 @@ pub enum Event {
     SelectedDrawingAction(widget::chart::drawing_selection_toolbar::SelectionToolbarAction),
     /// Clear all drawings
     ClearDrawings,
+    /// Undo drawing action (Ctrl+Z)
+    UndoDrawing,
+    /// Redo drawing action (Ctrl+Y / Ctrl+Shift+Z)
+    RedoDrawing,
     /// Screenshot to clipboard
     TakeScreenshot(window::Id),
     /// Market Replay
@@ -159,6 +175,7 @@ pub enum Event {
     AlertConditionSelected(data::chart::alert::AlertCondition),
     AlertFilterSelected(data::chart::alert::AlertFilter),
     ClearTriggeredAlerts,
+    SelectSettingsCategory(modal::pane::settings::SettingsCategory),
 }
 
 pub struct State {
@@ -177,6 +194,7 @@ pub struct State {
     pub selected_drawing_toolbar_pos: Option<iced::Point>,
     pub selected_drawing_show_settings: bool,
     pub footprint_notice_dismissed: Option<Exchange>,
+    pub settings_category: modal::pane::settings::SettingsCategory,
 }
 
 impl State {
@@ -271,11 +289,41 @@ impl State {
 
     pub fn from_config(
         content: Content,
-        streams: Vec<PersistStreamKind>,
-        settings: Settings,
+        mut streams: Vec<PersistStreamKind>,
+        mut settings: Settings,
         link_group: Option<LinkGroup>,
     ) -> Self {
         let id = settings.pane_id.unwrap_or_else(uuid::Uuid::new_v4);
+        settings.pane_id = Some(id);
+
+        if let Content::Kline { ref kind, .. } = content
+            && matches!(kind, data::chart::KlineChartKind::Footprint { .. })
+            && !streams
+                .iter()
+                .any(|s| matches!(s, PersistStreamKind::DepthAndTrades(_)))
+            && let Some(base_ticker) = streams.iter().find_map(|s| match s {
+                PersistStreamKind::Kline(k) => Some(k.ticker),
+                _ => None,
+            })
+        {
+            let depth_aggr = if base_ticker.exchange.is_depth_client_aggr() {
+                StreamTicksize::Client
+            } else {
+                StreamTicksize::ServerSide(
+                    settings
+                        .tick_multiply
+                        .unwrap_or(exchange::TickMultiplier(1)),
+                )
+            };
+            streams.push(PersistStreamKind::DepthAndTrades(
+                exchange::adapter::PersistDepth {
+                    ticker: base_ticker,
+                    depth_aggr,
+                    push_freq: exchange::PushFrequency::ServerDefault,
+                },
+            ));
+        }
+
         Self {
             id,
             content,
@@ -287,10 +335,15 @@ impl State {
     }
 
     pub fn stream_pair(&self) -> Option<TickerInfo> {
-        self.streams.find_ready_map(|stream| match stream {
-            StreamKind::DepthAndTrades { ticker_info, .. }
-            | StreamKind::Kline { ticker_info, .. } => Some(*ticker_info),
-        })
+        self.streams
+            .find_ready_map(|stream| match stream {
+                StreamKind::DepthAndTrades { ticker_info, .. }
+                | StreamKind::Kline { ticker_info, .. } => Some(*ticker_info),
+            })
+            .or(match &self.content {
+                Content::Kline { chart: Some(c), .. } => Some(c.ticker_info),
+                _ => None,
+            })
     }
 
     pub fn stream_pair_kind(&self) -> Option<StreamPairKind> {
@@ -369,15 +422,31 @@ impl State {
         if let Content::Kline { chart, kind, .. } = &self.content
             && let Some(base_ticker) = self.stream_pair()
         {
-            let tf = match self.settings.selected_basis {
-                Some(Basis::Time(tf)) => Some(tf),
-                None => Some(Timeframe::M5),
-                _ => None,
-            };
             let chart_kind = chart.as_ref().map_or(kind, |c| &c.kind);
-            let streams =
-                Self::build_footprint_streams(base_ticker, chart_kind, &self.settings, tf);
-            self.streams = ResolvedStream::Ready(streams);
+            if matches!(chart_kind, data::chart::KlineChartKind::Footprint { .. }) {
+                let tf = match self.settings.selected_basis {
+                    Some(Basis::Time(tf)) => Some(tf),
+                    None => self
+                        .streams
+                        .find_ready_map(|s| match s {
+                            StreamKind::Kline { timeframe, .. } => Some(*timeframe),
+                            _ => None,
+                        })
+                        .or_else(|| {
+                            self.streams.waiting_to_resolve().and_then(|streams| {
+                                streams.iter().find_map(|s| match s {
+                                    PersistStreamKind::Kline(k) => Some(k.timeframe),
+                                    _ => None,
+                                })
+                            })
+                        })
+                        .or(Some(Timeframe::M5)),
+                    _ => None,
+                };
+                let streams =
+                    Self::build_footprint_streams(base_ticker, chart_kind, &self.settings, tf);
+                self.streams = ResolvedStream::Ready(streams);
+            }
         }
     }
 
@@ -391,7 +460,9 @@ impl State {
             self.settings.tick_multiply = None;
         }
 
-        let base_ticker = tickers[0];
+        let Some(&base_ticker) = tickers.first() else {
+            return vec![];
+        };
         let prev_base_ticker = self.stream_pair();
 
         let derived_plan = PaneSetup::new(
@@ -458,17 +529,14 @@ impl State {
                     (content, streams)
                 }
                 ContentKind::CandlestickChart => {
-                    let content = {
-                        let base_ticker = tickers[0];
-                        Content::new_kline(
-                            kind,
-                            &self.content,
-                            derived_plan.ticker_info,
-                            &self.settings,
-                            base_ticker.min_ticksize.into(),
-                            self.id,
-                        )
-                    };
+                    let content = Content::new_kline(
+                        kind,
+                        &self.content,
+                        derived_plan.ticker_info,
+                        &self.settings,
+                        base_ticker.min_ticksize.into(),
+                        self.id,
+                    );
 
                     let streams = by_basis_default(
                         derived_plan.basis,
@@ -490,17 +558,14 @@ impl State {
                     (content, streams)
                 }
                 ContentKind::TpoChart => {
-                    let content = {
-                        let base_ticker = tickers[0];
-                        Content::new_kline(
-                            kind,
-                            &self.content,
-                            derived_plan.ticker_info,
-                            &self.settings,
-                            base_ticker.min_ticksize.into(),
-                            self.id,
-                        )
-                    };
+                    let content = Content::new_kline(
+                        kind,
+                        &self.content,
+                        derived_plan.ticker_info,
+                        &self.settings,
+                        base_ticker.min_ticksize.into(),
+                        self.id,
+                    );
 
                     let streams = by_basis_default(
                         derived_plan.basis,
@@ -719,7 +784,7 @@ impl State {
                         chart.kind(),
                         Some(current_config),
                     );
-                    chart.alerts = data::AlertStore::for_symbol(&symbol);
+                    chart.alerts = data::AlertStore::for_symbol_and_pane(&symbol, self.id);
                     chart.drawings = if !existing_drawings.is_empty() {
                         existing_drawings
                     } else {
@@ -1090,6 +1155,7 @@ impl State {
                             basis,
                             trade_input,
                             order_input,
+                            self.settings_category,
                         )
                     };
 
@@ -1285,6 +1351,7 @@ impl State {
                     let base = chart::view(chart, indicators, timezone).map(move |message| {
                         Message::PaneEvent(id, Event::ChartInteraction(message))
                     });
+                    let lookback_input = chart.history_lookback_input();
                     let settings_modal = || {
                         kline_cfg_view(
                             chart.study_configurator(),
@@ -1294,6 +1361,8 @@ impl State {
                             chart.basis(),
                             indicators,
                             chart.expanded_indicator,
+                            self.settings_category,
+                            lookback_input,
                         )
                     };
 
@@ -1458,11 +1527,23 @@ impl State {
                         drawing.pane_id = Some(self.id);
                         drawing.is_synced = false;
                         c.add_drawing(drawing.clone());
+                        c.push_undo(crate::chart::kline::DrawingHistoryAction::Add(
+                            drawing.clone(),
+                        ));
                         data::DrawingStore::add(&symbol, drawing.clone());
                     }
                     chart::Message::UpdateDrawing(drawing) => {
                         let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        let old_drawing = c.drawings.iter().find(|d| d.id == drawing.id).cloned();
                         c.update_drawing(drawing.clone());
+                        if let Some(old) = old_drawing
+                            && old != *drawing
+                        {
+                            c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                old,
+                                new: drawing.clone(),
+                            });
+                        }
                         data::DrawingStore::update(&symbol, drawing.clone());
                         if drawing.is_synced {
                             return Some(Effect::SyncDrawing {
@@ -1474,12 +1555,16 @@ impl State {
                     }
                     chart::Message::DeleteDrawing(id) => {
                         let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        let old_drawing = c.drawings.iter().find(|d| d.id == *id).cloned();
                         let was_synced = c
                             .drawings
                             .iter()
                             .find(|d| d.id == *id)
                             .is_some_and(|d| d.is_synced);
                         c.delete_drawing(*id);
+                        if let Some(old) = old_drawing {
+                            c.push_undo(crate::chart::kline::DrawingHistoryAction::Delete(old));
+                        }
                         data::DrawingStore::remove(*id);
                         self.selected_drawing_show_settings = false;
                         if was_synced {
@@ -1491,12 +1576,22 @@ impl State {
                     }
                     chart::Message::ClearDrawings => {
                         let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
-                        let cleared_synced_ids: Vec<uuid::Uuid> = c
+                        let cleared_drawings: Vec<data::chart::drawing::Drawing> = c
                             .drawings
                             .iter()
-                            .filter(|d| !d.is_locked && d.is_synced)
+                            .filter(|d| !d.is_locked)
+                            .cloned()
+                            .collect();
+                        let cleared_synced_ids: Vec<uuid::Uuid> = cleared_drawings
+                            .iter()
+                            .filter(|d| d.is_synced)
                             .map(|d| d.id)
                             .collect();
+                        if !cleared_drawings.is_empty() {
+                            c.push_undo(crate::chart::kline::DrawingHistoryAction::Clear(
+                                cleared_drawings,
+                            ));
+                        }
                         c.clear_drawings();
                         data::DrawingStore::clear_for_symbol_and_pane(&symbol, self.id);
                         self.selected_drawing_show_settings = false;
@@ -1507,6 +1602,24 @@ impl State {
                             });
                         }
                     }
+                    chart::Message::UndoDrawing => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        return Self::apply_undo_action(
+                            self.id,
+                            &mut self.selected_drawing_show_settings,
+                            c,
+                            &symbol,
+                        );
+                    }
+                    chart::Message::RedoDrawing => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        return Self::apply_redo_action(
+                            self.id,
+                            &mut self.selected_drawing_show_settings,
+                            c,
+                            &symbol,
+                        );
+                    }
                     chart::Message::SelectDrawing(id) => {
                         c.set_selected_drawing(*id);
                         if id.is_none() {
@@ -1516,6 +1629,11 @@ impl State {
                     chart::Message::UpdateAlertPrice(id, price) => {
                         c.update_alert_price(*id, *price);
                         data::AlertStore::update_price(*id, *price);
+                    }
+                    chart::Message::DeletePriceAlert(id) => {
+                        data::AlertStore::remove(*id);
+                        c.remove_alert(*id);
+                        return Some(Effect::DeleteAlert(*id));
                     }
                     chart::Message::AutofillPosition(autofill) => {
                         return Some(Effect::AutofillJournal(autofill.clone()));
@@ -1562,6 +1680,8 @@ impl State {
                     *cur = c.kind.clone();
                 }
                 self.sync_footprint_exchange_notice();
+                self.sync_footprint_streams();
+                return Some(Effect::RefreshStreams);
             }
             Event::ClusterScalingSelected(scaling) => {
                 if let Content::Kline { chart, kind, .. } = &mut self.content
@@ -1570,6 +1690,8 @@ impl State {
                     c.set_cluster_scaling(scaling);
                     *kind = c.kind.clone();
                 }
+                self.sync_footprint_streams();
+                return Some(Effect::RefreshStreams);
             }
             Event::TpoKindChanged(new_kind) => {
                 if let Content::Kline {
@@ -1580,6 +1702,8 @@ impl State {
                     c.set_tpo_kind(new_kind.clone());
                     *cur = new_kind;
                 }
+                self.sync_footprint_streams();
+                return Some(Effect::RefreshStreams);
             }
             Event::FootprintShowBottomVolumeToggled(show) => {
                 if let Content::Kline { chart, kind, .. } = &mut self.content
@@ -1588,6 +1712,8 @@ impl State {
                     c.set_footprint_show_bottom_volume(show);
                     *kind = c.kind.clone();
                 }
+                self.sync_footprint_streams();
+                return Some(Effect::RefreshStreams);
             }
             Event::FootprintAggregateToggled(agg) => {
                 if let Content::Kline { chart, kind, .. } = &mut self.content {
@@ -1623,6 +1749,42 @@ impl State {
                 self.sync_footprint_streams();
                 return Some(Effect::RefreshStreams);
             }
+            Event::FootprintHistoryLookbackInput(input) => {
+                if let Content::Kline { chart, kind, .. } = &mut self.content {
+                    if let Some(c) = chart {
+                        c.set_history_lookback_input(input);
+                        *kind = c.kind.clone();
+                    } else if let data::chart::KlineChartKind::Footprint {
+                        history_lookback_days,
+                        ..
+                    } = kind
+                        && let Ok(days) = input.trim().parse::<u32>()
+                        && days > 0
+                    {
+                        *history_lookback_days = Some(days);
+                        if days > exchange::fetcher::trade_history_lookback_days() {
+                            exchange::fetcher::set_trade_history_lookback_days(days);
+                        }
+                    }
+                }
+            }
+            Event::FootprintHistoryLookbackSet(days) => {
+                if let Content::Kline { chart, kind, .. } = &mut self.content {
+                    if let Some(c) = chart {
+                        c.set_history_lookback_days(days);
+                        *kind = c.kind.clone();
+                    } else if let data::chart::KlineChartKind::Footprint {
+                        history_lookback_days,
+                        ..
+                    } = kind
+                    {
+                        *history_lookback_days = Some(days);
+                        if days > exchange::fetcher::trade_history_lookback_days() {
+                            exchange::fetcher::set_trade_history_lookback_days(days);
+                        }
+                    }
+                }
+            }
             Event::StudyConfigurator(study_msg) => match study_msg {
                 modal::pane::settings::study::StudyMessage::Footprint(m) => {
                     if let Content::Kline { chart, kind, .. } = &mut self.content
@@ -1641,6 +1803,9 @@ impl State {
                     }
                 }
             },
+            Event::SelectSettingsCategory(cat) => {
+                self.settings_category = cat;
+            }
             Event::StreamModifierChanged(message) => {
                 if let Some(Modal::StreamModifier(mut modifier)) = self.modal.take() {
                     let mut effect: Option<Effect> = None;
@@ -1693,6 +1858,16 @@ impl State {
                                 if !is_client {
                                     effect = Some(Effect::RefreshStreams);
                                 }
+                                if let Content::Kline { chart, kind, .. } = &self.content {
+                                    let chart_kind = chart.as_ref().map_or(kind, |c| &c.kind);
+                                    if matches!(
+                                        chart_kind,
+                                        data::chart::KlineChartKind::Footprint { .. }
+                                    ) {
+                                        self.sync_footprint_streams();
+                                        effect = Some(Effect::RefreshStreams);
+                                    }
+                                }
                             }
                             modal::stream::Action::BasisSelected(new_basis) => {
                                 modifier.update_kind_with_basis(new_basis);
@@ -1730,17 +1905,19 @@ impl State {
 
                                         effect = Some(Effect::RefreshStreams);
                                     }
-                                    Content::Kline { chart: Some(c), .. } => {
+                                    Content::Kline { chart, kind, .. } => {
                                         if let Some(base_ticker) = base_ticker {
+                                            let chart_kind =
+                                                chart.as_ref().map_or(&*kind, |c| &c.kind);
                                             match new_basis {
                                                 Basis::Time(tf) => {
                                                     let streams = if matches!(
-                                                        c.kind,
+                                                        chart_kind,
                                                         data::chart::KlineChartKind::Footprint { .. }
                                                     ) {
                                                         Self::build_footprint_streams(
                                                             base_ticker,
-                                                            &c.kind,
+                                                            chart_kind,
                                                             &self.settings,
                                                             Some(tf),
                                                         )
@@ -1752,7 +1929,9 @@ impl State {
                                                     };
 
                                                     self.streams = ResolvedStream::Ready(streams);
-                                                    let action = c.set_basis(new_basis);
+                                                    let action = chart
+                                                        .as_mut()
+                                                        .and_then(|c| c.set_basis(new_basis));
 
                                                     if let Some(chart::Action::RequestFetch(
                                                         fetch,
@@ -1765,12 +1944,12 @@ impl State {
                                                 }
                                                 Basis::Tick(_) => {
                                                     let streams = if matches!(
-                                                        c.kind,
+                                                        chart_kind,
                                                         data::chart::KlineChartKind::Footprint { .. }
                                                     ) {
                                                         Self::build_footprint_streams(
                                                             base_ticker,
-                                                            &c.kind,
+                                                            chart_kind,
                                                             &self.settings,
                                                             None,
                                                         )
@@ -1795,7 +1974,9 @@ impl State {
                                                     };
 
                                                     self.streams = ResolvedStream::Ready(streams);
-                                                    c.set_basis(new_basis);
+                                                    if let Some(c) = chart {
+                                                        c.set_basis(new_basis);
+                                                    }
                                                     effect = Some(Effect::RefreshStreams);
                                                 }
                                             }
@@ -1917,12 +2098,22 @@ impl State {
             Event::ClearDrawings => {
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
                     let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
-                    let cleared_synced_ids: Vec<uuid::Uuid> = c
+                    let cleared_drawings: Vec<data::chart::drawing::Drawing> = c
                         .drawings
                         .iter()
-                        .filter(|d| !d.is_locked && d.is_synced)
+                        .filter(|d| !d.is_locked)
+                        .cloned()
+                        .collect();
+                    let cleared_synced_ids: Vec<uuid::Uuid> = cleared_drawings
+                        .iter()
+                        .filter(|d| d.is_synced)
                         .map(|d| d.id)
                         .collect();
+                    if !cleared_drawings.is_empty() {
+                        c.push_undo(crate::chart::kline::DrawingHistoryAction::Clear(
+                            cleared_drawings,
+                        ));
+                    }
                     c.clear_drawings();
                     data::DrawingStore::clear_for_symbol_and_pane(&symbol, self.id);
                     self.selected_drawing_show_settings = false;
@@ -1932,6 +2123,28 @@ impl State {
                             drawing_ids: cleared_synced_ids,
                         });
                     }
+                }
+            }
+            Event::UndoDrawing => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                    return Self::apply_undo_action(
+                        self.id,
+                        &mut self.selected_drawing_show_settings,
+                        c,
+                        &symbol,
+                    );
+                }
+            }
+            Event::RedoDrawing => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                    return Self::apply_redo_action(
+                        self.id,
+                        &mut self.selected_drawing_show_settings,
+                        c,
+                        &symbol,
+                    );
                 }
             }
             Event::DrawingToolbarMoved(pos) => {
@@ -1948,7 +2161,17 @@ impl State {
                             self.selected_drawing_show_settings = !self.selected_drawing_show_settings;
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleLock => {
+                            let old = c.selected_drawing().cloned();
                             c.toggle_selected_drawing_lock();
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -1961,7 +2184,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleSync => {
+                            let old = c.selected_drawing().cloned();
                             c.toggle_selected_drawing_sync(self.id);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -1980,10 +2213,11 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::Delete => {
-                            if let Some(d) = c.selected_drawing() {
+                            if let Some(d) = c.selected_drawing().cloned() {
                                 let id = d.id;
                                 let was_synced = d.is_synced;
                                 c.delete_drawing(id);
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Delete(d));
                                 data::DrawingStore::remove(id);
                                 self.selected_drawing_show_settings = false;
                                 if was_synced {
@@ -1995,7 +2229,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetColor(color) => {
+                            let old = c.selected_drawing().cloned();
                             c.update_selected_drawing_color(color);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -2008,7 +2252,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetWidth(w) => {
+                            let old = c.selected_drawing().cloned();
                             c.update_selected_drawing_width(w);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -2021,7 +2275,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionProfitColor(color) => {
+                            let old = c.selected_drawing().cloned();
                             c.update_selected_position_profit_color(color);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -2034,7 +2298,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionStopColor(color) => {
+                            let old = c.selected_drawing().cloned();
                             c.update_selected_position_stop_color(color);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -2047,7 +2321,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::SetPositionEntryColor(color) => {
+                            let old = c.selected_drawing().cloned();
                             c.update_selected_position_entry_color(color);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -2060,7 +2344,17 @@ impl State {
                             }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::TogglePositionPricePath => {
+                            let old = c.selected_drawing().cloned();
                             c.toggle_selected_position_price_path();
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
                             if let Some(d) = c.selected_drawing() {
                                 data::DrawingStore::update(&symbol, d.clone());
                                 if d.is_synced {
@@ -2247,13 +2541,14 @@ impl State {
                 } else {
                     None
                 };
-                let alert = data::chart::alert::PriceAlert::with_details(
+                let mut alert = data::chart::alert::PriceAlert::with_details(
                     ticker,
                     symbol,
                     price,
                     initial_price,
                     self.alert_condition,
                 );
+                alert.pane_id = Some(self.id);
                 data::AlertStore::add(alert.clone());
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
                     c.add_alert(alert);
@@ -2265,12 +2560,14 @@ impl State {
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
                     c.remove_alert(id);
                 }
+                return Some(Effect::DeleteAlert(id));
             }
             Event::TogglePriceAlert(id) => {
                 data::AlertStore::toggle(id);
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
                     c.toggle_alert(id);
                 }
+                return Some(Effect::ToggleAlert(id));
             }
             Event::AlertPriceInput(val) => {
                 self.alert_price_input = val;
@@ -2288,6 +2585,7 @@ impl State {
                         .retain(|a| a.status != data::chart::alert::AlertStatus::Triggered);
                     c.invalidate_all();
                 }
+                return Some(Effect::ClearTriggeredAlerts);
             }
         }
         None
@@ -2502,11 +2800,8 @@ impl State {
                     .unwrap_or_else(|| "Symbol".to_string());
 
                 let all_alerts = data::AlertStore::all();
-                let this_chart_alerts: Vec<_> = all_alerts
-                    .iter()
-                    .filter(|a| a.ticker_symbol == ticker_symbol)
-                    .cloned()
-                    .collect();
+                let this_chart_alerts =
+                    data::AlertStore::for_symbol_and_pane(&ticker_symbol, self.id);
 
                 let content = crate::modal::pane::alerts::alerts_view(
                     pane,
@@ -2569,16 +2864,22 @@ impl State {
             let magnet_mode = c.config().magnet_mode;
             let current_cfg = c.config();
 
+            let can_undo = c.can_undo();
+
             let toolbar = widget::chart::drawing_toolbar::view(
                 active_tool,
                 has_drawings,
                 magnet_mode,
+                can_undo,
                 move |action| match action {
                     widget::chart::drawing_toolbar::ToolbarAction::SelectTool(tool) => {
                         Message::PaneEvent(pane, Event::SelectDrawingTool(tool))
                     }
                     widget::chart::drawing_toolbar::ToolbarAction::ClearDrawings => {
                         Message::PaneEvent(pane, Event::ClearDrawings)
+                    }
+                    widget::chart::drawing_toolbar::ToolbarAction::Undo => {
+                        Message::PaneEvent(pane, Event::UndoDrawing)
                     }
                     widget::chart::drawing_toolbar::ToolbarAction::ToggleMagnet => {
                         let mut new_cfg = current_cfg;
@@ -2666,14 +2967,18 @@ impl State {
                     .style(|theme, status| style::button::transparent(theme, status, false))
                     .on_press(Message::PaneEvent(pane, Event::ReplayStepBackward))
                     .padding([3, 7]),
-                    button(text(play_btn_text).size(10).font(style::AZERET_MONO))
-                        .style(|theme, status| style::button::modifier(
-                            theme,
-                            status,
-                            rep.is_playing
-                        ))
-                        .on_press(Message::PaneEvent(pane, Event::ReplayPlayPause))
-                        .padding([3, 10]),
+                    tooltip(
+                        button(text(play_btn_text).size(10).font(style::AZERET_MONO))
+                            .style(|theme, status| style::button::modifier(
+                                theme,
+                                status,
+                                rep.is_playing
+                            ))
+                            .on_press(Message::PaneEvent(pane, Event::ReplayPlayPause))
+                            .padding([3, 10]),
+                        Some("Play / Pause (Space)"),
+                        tooltip::Position::Top,
+                    ),
                     button(modal::pane::replay_calendar::step_forward_icon(
                         None, 12.0, 10.0
                     ))
@@ -2789,6 +3094,124 @@ impl State {
         }
 
         false
+    }
+
+    fn apply_undo_action(
+        pane_id: uuid::Uuid,
+        selected_drawing_show_settings: &mut bool,
+        c: &mut crate::chart::kline::KlineChart,
+        symbol: &str,
+    ) -> Option<Effect> {
+        if let Some(undone) = c.undo() {
+            match undone {
+                crate::chart::kline::DrawingHistoryAction::Add(d) => {
+                    data::DrawingStore::remove(d.id);
+                    *selected_drawing_show_settings = false;
+                    if d.is_synced {
+                        return Some(Effect::DeleteSyncedDrawing {
+                            symbol: symbol.to_string(),
+                            drawing_id: d.id,
+                        });
+                    }
+                }
+                crate::chart::kline::DrawingHistoryAction::Delete(d) => {
+                    data::DrawingStore::add(symbol, d.clone());
+                    if d.is_synced {
+                        return Some(Effect::SyncDrawing {
+                            symbol: symbol.to_string(),
+                            drawing: d,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
+                crate::chart::kline::DrawingHistoryAction::Update { old, new } => {
+                    data::DrawingStore::update(symbol, old.clone());
+                    if old.is_synced || new.is_synced {
+                        return Some(Effect::SyncDrawing {
+                            symbol: symbol.to_string(),
+                            drawing: old,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
+                crate::chart::kline::DrawingHistoryAction::Clear(drawings) => {
+                    let mut synced = Vec::new();
+                    for d in drawings {
+                        data::DrawingStore::add(symbol, d.clone());
+                        if d.is_synced {
+                            synced.push(d);
+                        }
+                    }
+                    if !synced.is_empty() {
+                        return Some(Effect::SyncDrawings {
+                            symbol: symbol.to_string(),
+                            drawings: synced,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn apply_redo_action(
+        pane_id: uuid::Uuid,
+        selected_drawing_show_settings: &mut bool,
+        c: &mut crate::chart::kline::KlineChart,
+        symbol: &str,
+    ) -> Option<Effect> {
+        if let Some(redone) = c.redo() {
+            match redone {
+                crate::chart::kline::DrawingHistoryAction::Add(d) => {
+                    data::DrawingStore::add(symbol, d.clone());
+                    if d.is_synced {
+                        return Some(Effect::SyncDrawing {
+                            symbol: symbol.to_string(),
+                            drawing: d,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
+                crate::chart::kline::DrawingHistoryAction::Delete(d) => {
+                    data::DrawingStore::remove(d.id);
+                    *selected_drawing_show_settings = false;
+                    if d.is_synced {
+                        return Some(Effect::DeleteSyncedDrawing {
+                            symbol: symbol.to_string(),
+                            drawing_id: d.id,
+                        });
+                    }
+                }
+                crate::chart::kline::DrawingHistoryAction::Update { new, .. } => {
+                    data::DrawingStore::update(symbol, new.clone());
+                    if new.is_synced {
+                        return Some(Effect::SyncDrawing {
+                            symbol: symbol.to_string(),
+                            drawing: new,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
+                crate::chart::kline::DrawingHistoryAction::Clear(drawings) => {
+                    let mut synced_ids = Vec::new();
+                    for d in &drawings {
+                        data::DrawingStore::remove(d.id);
+                        if d.is_synced {
+                            synced_ids.push(d.id);
+                        }
+                    }
+                    *selected_drawing_show_settings = false;
+                    if !synced_ids.is_empty() {
+                        return Some(Effect::ClearSyncedDrawings {
+                            symbol: symbol.to_string(),
+                            drawing_ids: synced_ids,
+                        });
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn show_modal_with_focus(&mut self, requested_modal: Modal) -> Option<Effect> {
@@ -2921,6 +3344,7 @@ impl Default for State {
             selected_drawing_toolbar_pos: None,
             selected_drawing_show_settings: false,
             footprint_notice_dismissed: None,
+            settings_category: modal::pane::settings::SettingsCategory::default(),
         }
     }
 }
@@ -3046,6 +3470,7 @@ impl Content {
                         show_bottom_volume: false,
                         aggregate: false,
                         aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                        history_lookback_days: None,
                     }),
             ),
             ContentKind::CandlestickChart => (Timeframe::M15, data::chart::KlineChartKind::Candles),
@@ -3082,21 +3507,12 @@ impl Content {
             if is_footprint && !prev_was_footprint {
                 vec![]
             } else {
-                prev_indis.map_or_else(
-                    || {
-                        if is_footprint {
-                            vec![]
-                        } else {
-                            vec![KlineIndicator::Volume]
-                        }
-                    },
-                    |indis| {
-                        indis
-                            .into_iter()
-                            .filter(|i| available.contains(i))
-                            .collect()
-                    },
-                )
+                prev_indis.map_or_else(Vec::new, |indis| {
+                    indis
+                        .into_iter()
+                        .filter(|i| available.contains(i))
+                        .collect()
+                })
             }
         };
 
@@ -3143,7 +3559,7 @@ impl Content {
             kline_config,
         );
         let symbol = ticker_info.ticker.display_symbol_and_type().0;
-        chart.alerts = data::AlertStore::for_symbol(&symbol);
+        chart.alerts = data::AlertStore::for_symbol_and_pane(&symbol, pane_id);
         chart.drawings = data::DrawingStore::for_symbol_and_pane(&symbol, pane_id);
 
         Content::Kline {
@@ -3159,7 +3575,7 @@ impl Content {
             ContentKind::Starter => Content::Starter,
             ContentKind::CandlestickChart => Content::Kline {
                 chart: None,
-                indicators: vec![KlineIndicator::Volume],
+                indicators: vec![],
                 kind: data::chart::KlineChartKind::Candles,
                 layout: ViewConfig {
                     splits: vec![],
@@ -3168,7 +3584,7 @@ impl Content {
             },
             ContentKind::TpoChart => Content::Kline {
                 chart: None,
-                indicators: vec![KlineIndicator::Volume],
+                indicators: vec![],
                 kind: data::chart::KlineChartKind::Tpo {
                     show_candles: true,
                     show_letters: true,
@@ -3200,6 +3616,7 @@ impl Content {
                     show_bottom_volume: false,
                     aggregate: false,
                     aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                    history_lookback_days: None,
                 },
                 layout: ViewConfig {
                     splits: vec![],
@@ -3609,6 +4026,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             layout: Default::default(),
         };
@@ -3652,6 +4070,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             layout: Default::default(),
         };
@@ -3683,6 +4102,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             layout: Default::default(),
         };
@@ -3714,6 +4134,7 @@ mod tests {
                 show_bottom_volume: false,
                 aggregate: false,
                 aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
             },
             layout: Default::default(),
         };
@@ -3760,6 +4181,7 @@ mod tests {
             show_bottom_volume: false,
             aggregate: false,
             aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            history_lookback_days: None,
         };
 
         let streams_single =
@@ -3774,6 +4196,7 @@ mod tests {
             show_bottom_volume: false,
             aggregate: true,
             aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            history_lookback_days: None,
         };
 
         let streams_agg =
@@ -3819,6 +4242,7 @@ mod tests {
                     Exchange::OkexLinear,
                     Exchange::HyperliquidLinear,
                 ],
+                history_lookback_days: None,
             },
             layout: Default::default(),
         };
@@ -3854,5 +4278,122 @@ mod tests {
             push_freq: exchange::PushFrequency::ServerDefault,
         };
         assert!(!state.matches_trades(&eth_stream));
+    }
+
+    #[test]
+    fn test_footprint_from_config_registers_depth_and_trades_stream() {
+        let ticker = exchange::Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let kline_persist = PersistStreamKind::Kline(exchange::adapter::PersistKline {
+            ticker,
+            timeframe: exchange::Timeframe::M5,
+        });
+        let content = Content::Kline {
+            chart: None,
+            indicators: vec![],
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+        };
+
+        let state = State::from_config(content, vec![kline_persist], Settings::default(), None);
+
+        match &state.streams {
+            ResolvedStream::Waiting(streams) => {
+                assert_eq!(streams.len(), 2);
+                assert!(
+                    streams
+                        .iter()
+                        .any(|s| matches!(s, PersistStreamKind::Kline(_)))
+                );
+                assert!(
+                    streams
+                        .iter()
+                        .any(|s| matches!(s, PersistStreamKind::DepthAndTrades(_)))
+                );
+            }
+            _ => panic!("Expected ResolvedStream::Waiting"),
+        }
+    }
+
+    #[test]
+    fn test_footprint_events_sync_streams_and_return_refresh_effect() {
+        let ticker = exchange::Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ti = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let chart = crate::chart::kline::KlineChart::new(
+            data::chart::ViewConfig::default(),
+            data::chart::Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            ti,
+            &data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+
+        let mut state = State {
+            content: Content::Kline {
+                chart: Some(chart),
+                indicators: vec![],
+                layout: Default::default(),
+                kind: data::chart::KlineChartKind::Footprint {
+                    clusters: Default::default(),
+                    scaling: Default::default(),
+                    studies: vec![],
+                    show_bottom_volume: false,
+                    aggregate: false,
+                    aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                    history_lookback_days: None,
+                },
+            },
+            ..Default::default()
+        };
+
+        // Initially no streams
+        assert!(matches!(state.streams, ResolvedStream::Waiting(ref v) if v.is_empty()));
+
+        // ClusterKindSelected should sync streams and return RefreshStreams
+        let eff = state.update(Event::ClusterKindSelected(
+            data::chart::kline::ClusterKind::DeltaProfile,
+        ));
+        assert!(matches!(eff, Some(Effect::RefreshStreams)));
+        assert!(
+            state.streams.find_ready_map(|s| match s {
+                StreamKind::DepthAndTrades { ticker_info, .. } => Some(*ticker_info),
+                _ => None,
+            }) == Some(ti)
+        );
+
+        // ClusterScalingSelected should return RefreshStreams
+        let eff = state.update(Event::ClusterScalingSelected(
+            data::chart::kline::ClusterScaling::Hybrid { weight: 0.5 },
+        ));
+        assert!(matches!(eff, Some(Effect::RefreshStreams)));
+
+        // FootprintShowBottomVolumeToggled should return RefreshStreams
+        let eff = state.update(Event::FootprintShowBottomVolumeToggled(true));
+        assert!(matches!(eff, Some(Effect::RefreshStreams)));
+    }
+
+    #[test]
+    fn test_ter01_empty_tickers_pane_update() {
+        let mut state = State::default();
+        let streams = state.set_content_and_streams(Vec::new(), ContentKind::CandlestickChart);
+        assert!(streams.is_empty());
     }
 }

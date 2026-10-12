@@ -93,6 +93,15 @@ pub struct TickAggr {
 }
 
 impl TickAggr {
+    pub const MAX_RETAINED_DATAPOINTS: usize = 10_000;
+
+    pub fn enforce_retention_limit(&mut self) {
+        if self.datapoints.len() > Self::MAX_RETAINED_DATAPOINTS {
+            let excess = self.datapoints.len() - Self::MAX_RETAINED_DATAPOINTS;
+            self.datapoints.drain(0..excess);
+        }
+    }
+
     pub fn new(interval: aggr::TickCount, tick_size: PriceStep, raw_trades: &[Trade]) -> Self {
         let mut tick_aggr = Self {
             datapoints: Vec::new(),
@@ -160,20 +169,12 @@ impl TickAggr {
     }
 
     pub fn update_poc_status(&mut self) {
+        self.enforce_retention_limit();
+
         let total_points = self.datapoints.len();
         if total_points == 0 {
             return;
         }
-
-        // O(n) approach: iterate backwards once, tracking cumulative price range
-        // and the first index where each price level was touched.
-        //
-        // For each datapoint (from end to start), we track the cumulative high/low
-        // range seen so far. When we encounter a POC, we check if it falls within
-        // that range. If so, we need to find when it was first touched.
-        //
-        // We maintain a "first touch index" by tracking when prices first entered
-        // the cumulative range as we scan backwards.
 
         // First, precompute low/high for each datapoint
         let bounds: Vec<(Price, Price)> = self
@@ -186,90 +187,56 @@ impl TickAggr {
             })
             .collect();
 
-        // Track cumulative range and when each boundary was established
+        // Track cumulative range
         let mut cumulative_low: Option<Price> = None;
         let mut cumulative_high: Option<Price> = None;
-        let mut low_established_at: usize = total_points;
-        let mut high_established_at: usize = total_points;
 
         // Process from end to start
         for i in (0..total_points).rev() {
             let (dp_low, dp_high) = bounds[i];
 
-            // Update cumulative range (looking at i+1 onwards, i.e., "future" candles)
-            // We check the POC at index i against the range from i+1 to end
-
             // Check if this datapoint has a POC and determine its status
             if let Some(poc_price) = self.datapoints[i].poc_price() {
-                let npoc = if let (Some(cum_low), Some(cum_high)) =
-                    (cumulative_low, cumulative_high)
-                {
-                    if cum_low <= poc_price && cum_high >= poc_price {
-                        // POC was touched - find the first touch index
-                        // The first touch is the earliest index where the price was covered
-                        let first_touch = if poc_price <= bounds[low_established_at].1
-                            && poc_price >= bounds[low_established_at].0
-                        {
-                            low_established_at
-                        } else if poc_price <= bounds[high_established_at].1
-                            && poc_price >= bounds[high_established_at].0
-                        {
-                            high_established_at
-                        } else {
-                            // Need to find first touch by scanning forward from i+1
-                            // This is a fallback for edge cases
-                            let search_end = high_established_at.max(low_established_at);
-                            bounds[(i + 1)..=search_end]
+                let npoc =
+                    if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high) {
+                        if cum_low <= poc_price && cum_high >= poc_price {
+                            // POC was touched - find the earliest chronological touch index in future candles
+                            let first_touch = bounds[(i + 1)..total_points]
                                 .iter()
                                 .enumerate()
                                 .find(|(_, (low, high))| *low <= poc_price && *high >= poc_price)
-                                .map_or(total_points, |(offset, _)| i + 1 + offset)
-                        };
+                                .map_or(total_points, |(offset, _)| i + 1 + offset);
 
-                        if first_touch < total_points {
-                            // Convert to reversed index for rendering
-                            let reversed_idx = (total_points - 1) - first_touch;
-                            let mut n = NPoc::default();
-                            n.filled(reversed_idx as u64);
-                            n
+                            if first_touch < total_points {
+                                // Convert to reversed index for rendering
+                                let reversed_idx = (total_points - 1) - first_touch;
+                                let mut n = NPoc::default();
+                                n.filled(reversed_idx as u64);
+                                n
+                            } else {
+                                NPoc::Naked
+                            }
                         } else {
                             NPoc::Naked
                         }
                     } else {
-                        NPoc::Naked
-                    }
-                } else {
-                    // No future candles to check against (this is the last candle)
-                    NPoc::default()
-                };
+                        // No future candles to check against (this is the last candle)
+                        NPoc::default()
+                    };
 
                 self.datapoints[i].set_poc_status(npoc);
             }
 
             // Now update cumulative range to include this candle for the next iteration
-            match cumulative_low {
-                Some(cl) if dp_low < cl => {
-                    cumulative_low = Some(dp_low);
-                    low_established_at = i;
-                }
-                None => {
-                    cumulative_low = Some(dp_low);
-                    low_established_at = i;
-                }
-                _ => {}
-            }
+            cumulative_low = Some(match cumulative_low {
+                Some(cl) => cl.min(dp_low),
+                None => dp_low,
+            });
 
-            match cumulative_high {
-                Some(ch) if dp_high > ch => {
-                    cumulative_high = Some(dp_high);
-                    high_established_at = i;
-                }
-                None => {
-                    cumulative_high = Some(dp_high);
-                    high_established_at = i;
-                }
-                _ => {}
-            }
+            cumulative_high = Some(match cumulative_high {
+                Some(ch) => ch.max(dp_high),
+                None => dp_high,
+            });
         }
     }
 
@@ -348,5 +315,63 @@ impl From<&TickAggr> for BTreeMap<u64, (f32, f32)> {
             .enumerate()
             .map(|(idx, dp)| (idx as u64, (dp.kline.volume.0, dp.kline.volume.1)))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dat02_ticks_chronological_first_touch() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = aggr::TickCount(1);
+        let mut aggr = TickAggr::new(interval, step, &[]);
+
+        let trades = vec![
+            Trade {
+                time: 1000,
+                price: Price::from_f32(100.0),
+                qty: 10.0,
+                is_sell: false,
+            },
+            Trade {
+                time: 2000,
+                price: Price::from_f32(100.0),
+                qty: 5.0,
+                is_sell: true,
+            },
+            Trade {
+                time: 3000,
+                price: Price::from_f32(10.0),
+                qty: 2.0,
+                is_sell: true,
+            },
+        ];
+        aggr.insert_trades(&trades);
+
+        let npoc = aggr.datapoints[0].footprint.poc.as_ref().unwrap().status;
+        assert_eq!(npoc, NPoc::Filled { at: 1 });
+    }
+
+    #[test]
+    fn test_dat03_ticks_retention_limit() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = aggr::TickCount(1);
+        let mut aggr = TickAggr::new(interval, step, &[]);
+
+        let total_trades = TickAggr::MAX_RETAINED_DATAPOINTS + 50;
+        let mut trades = Vec::with_capacity(total_trades);
+        for i in 0..total_trades {
+            trades.push(Trade {
+                time: (i as u64 + 1) * 1000,
+                price: Price::from_f32(100.0),
+                qty: 1.0,
+                is_sell: false,
+            });
+        }
+        aggr.insert_trades(&trades);
+
+        assert_eq!(aggr.datapoints.len(), TickAggr::MAX_RETAINED_DATAPOINTS);
     }
 }

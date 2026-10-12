@@ -185,6 +185,7 @@ async fn try_connect(
                 )))
                 .await
             {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 let _ = output
                     .send(Event::Disconnected(
                         exchange,
@@ -236,123 +237,145 @@ pub fn connect_market_stream(
         let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
         let contract_size = ticker_info.effective_contract_size();
 
+        let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_millis(30));
+        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             match &mut state {
                 State::Disconnected => {
                     state = try_connect(&subscribe_message, exchange, &mut output, "public").await;
                 }
-                State::Connected(ws) => match ws.read_frame().await {
-                    Ok(msg) => match msg.opcode {
-                        OpCode::Text => {
-                            if let Ok(data) = feed_de(&msg.payload[..], ticker) {
-                                match data {
-                                    StreamData::Trade(de_trade_vec) => {
-                                        for de_trade in &de_trade_vec {
-                                            let price = Price::from_f32(de_trade.price)
-                                                .round_to_min_tick(ticker_info.min_ticksize);
-                                            let qty = calc_qty(
-                                                de_trade.qty,
-                                                de_trade.price,
-                                                size_in_quote_ccy,
-                                                contract_size,
-                                                market_type,
-                                            );
-
-                                            let trade = Trade {
-                                                time: de_trade.time,
-                                                is_sell: de_trade.is_sell == "sell"
-                                                    || de_trade.is_sell == "SELL",
-                                                price,
-                                                qty,
-                                            };
-                                            trades_buffer.push(trade);
-                                        }
-                                    }
-                                    StreamData::Depth(de_depth, data_type, time) => {
-                                        let depth = DepthPayload {
-                                            last_update_id: de_depth.update_id,
-                                            time,
-                                            bids: de_depth
-                                                .bids
-                                                .iter()
-                                                .map(|x| DeOrder {
-                                                    price: x.price,
-                                                    qty: calc_qty(
-                                                        x.qty,
-                                                        x.price,
+                State::Connected(ws) => {
+                    tokio::select! {
+                                frame_res = ws.read_frame() => match frame_res {
+                            Ok(msg) => match msg.opcode {
+                                OpCode::Text => {
+                                    if let Ok(data) = feed_de(&msg.payload[..], ticker) {
+                                        match data {
+                                            StreamData::Trade(de_trade_vec) => {
+                                                for de_trade in &de_trade_vec {
+                                                    let price = Price::from_f32(de_trade.price)
+                                                        .round_to_min_tick(ticker_info.min_ticksize);
+                                                    let qty = calc_qty(
+                                                        de_trade.qty,
+                                                        de_trade.price,
                                                         size_in_quote_ccy,
                                                         contract_size,
                                                         market_type,
-                                                    ),
-                                                })
-                                                .collect(),
-                                            asks: de_depth
-                                                .asks
-                                                .iter()
-                                                .map(|x| DeOrder {
-                                                    price: x.price,
-                                                    qty: calc_qty(
-                                                        x.qty,
-                                                        x.price,
-                                                        size_in_quote_ccy,
-                                                        contract_size,
-                                                        market_type,
-                                                    ),
-                                                })
-                                                .collect(),
-                                        };
+                                                    );
 
-                                        if (data_type == "snapshot") || (depth.last_update_id == 1)
-                                        {
-                                            orderbook.update(
-                                                DepthUpdate::Snapshot(depth),
-                                                ticker_info.min_ticksize,
-                                            );
-                                        } else if data_type == "delta" {
-                                            orderbook.update(
-                                                DepthUpdate::Diff(depth),
-                                                ticker_info.min_ticksize,
-                                            );
-
-                                            let _ = output
-                                                .send(Event::DepthReceived(
-                                                    StreamKind::DepthAndTrades {
-                                                        ticker_info,
-                                                        depth_aggr: StreamTicksize::Client,
-                                                        push_freq,
-                                                    },
+                                                    let trade = Trade {
+                                                        time: de_trade.time,
+                                                        is_sell: de_trade.is_sell == "sell"
+                                                            || de_trade.is_sell == "SELL",
+                                                        price,
+                                                        qty,
+                                                    };
+                                                    trades_buffer.push(trade);
+                                                }
+                                            }
+                                            StreamData::Depth(de_depth, data_type, time) => {
+                                                let depth = DepthPayload {
+                                                    last_update_id: de_depth.update_id,
                                                     time,
-                                                    orderbook.depth.clone(),
-                                                    std::mem::take(&mut trades_buffer)
-                                                        .into_boxed_slice(),
-                                                ))
-                                                .await;
+                                                    bids: de_depth
+                                                        .bids
+                                                        .iter()
+                                                        .map(|x| DeOrder {
+                                                            price: x.price,
+                                                            qty: calc_qty(
+                                                                x.qty,
+                                                                x.price,
+                                                                size_in_quote_ccy,
+                                                                contract_size,
+                                                                market_type,
+                                                            ),
+                                                        })
+                                                        .collect(),
+                                                    asks: de_depth
+                                                        .asks
+                                                        .iter()
+                                                        .map(|x| DeOrder {
+                                                            price: x.price,
+                                                            qty: calc_qty(
+                                                                x.qty,
+                                                                x.price,
+                                                                size_in_quote_ccy,
+                                                                contract_size,
+                                                                market_type,
+                                                            ),
+                                                        })
+                                                        .collect(),
+                                                };
+
+                                                if (data_type == "snapshot") || (depth.last_update_id == 1)
+                                                {
+                                                    orderbook.update(
+                                                        DepthUpdate::Snapshot(depth),
+                                                        ticker_info.min_ticksize,
+                                                    );
+                                                } else if data_type == "delta" {
+                                                    orderbook.update(
+                                                        DepthUpdate::Diff(depth),
+                                                        ticker_info.min_ticksize,
+                                                    );
+
+                                                    let _ = output
+                                                        .send(Event::DepthReceived(
+                                                            StreamKind::DepthAndTrades {
+                                                                ticker_info,
+                                                                depth_aggr: StreamTicksize::Client,
+                                                                push_freq,
+                                                            },
+                                                            time,
+                                                            orderbook.depth.clone(),
+                                                            std::mem::take(&mut trades_buffer)
+                                                                .into_boxed_slice(),
+                                                        ))
+                                                        .await;
+                                                }
+                                            }
                                         }
                                     }
                                 }
+                                OpCode::Close => {
+                                    state = State::Disconnected;
+                                    let _ = output
+                                        .send(Event::Disconnected(
+                                            exchange,
+                                            "Connection closed".to_string(),
+                                        ))
+                                        .await;
+                                }
+                                _ => {}
+                            },
+                            Err(e) => {
+                                state = State::Disconnected;
+                                let _ = output
+                                    .send(Event::Disconnected(
+                                        exchange,
+                                        "Error reading frame: ".to_string() + &e.to_string(),
+                                    ))
+                                    .await;
                             }
-                        }
-                        OpCode::Close => {
-                            state = State::Disconnected;
+                        },
+                        _ = flush_interval.tick(), if !trades_buffer.is_empty() => {
+                            let latest_time = trades_buffer.last().map(|t| t.time).unwrap_or(0);
                             let _ = output
-                                .send(Event::Disconnected(
-                                    exchange,
-                                    "Connection closed".to_string(),
+                                .send(Event::DepthReceived(
+                                    StreamKind::DepthAndTrades {
+                                        ticker_info,
+                                        depth_aggr: StreamTicksize::Client,
+                                        push_freq,
+                                    },
+                                    latest_time,
+                                    orderbook.depth.clone(),
+                                    std::mem::take(&mut trades_buffer).into_boxed_slice(),
                                 ))
                                 .await;
                         }
-                        _ => {}
-                    },
-                    Err(e) => {
-                        state = State::Disconnected;
-                        let _ = output
-                            .send(Event::Disconnected(
-                                exchange,
-                                "Error reading frame: ".to_string() + &e.to_string(),
-                            ))
-                            .await;
                     }
-                },
+                }
             }
         }
     })
@@ -749,14 +772,21 @@ pub async fn fetch_klines(
         bar,
         match range {
             Some((start, end)) => {
-                ((end - start) / timeframe.to_milliseconds()).clamp(1, 300)
+                let interval_ms = timeframe.to_milliseconds().max(1);
+                let span = end.saturating_sub(start);
+                (span / interval_ms).clamp(1, 300)
             }
             None => 300,
         }
     );
 
     if let Some((start, end)) = range {
-        url.push_str(&format!("&before={start}&after={end}"));
+        let (s, e) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        url.push_str(&format!("&before={s}&after={e}"));
     }
 
     let doc: Value = limiter::http_parse_with_limiter(&url, &OKEX_LIMITER, 1, None, None).await?;
@@ -1069,7 +1099,12 @@ async fn fetch_trades_from_intraday_cache_or_rest(
 
         if from_time <= t_last {
             let start_idx = cached.partition_point(|t| t.time < from_time);
-            return Ok(slice_cached_trades(&cached, start_idx, 60_000, 1000));
+            return Ok(slice_cached_trades(
+                &cached,
+                start_idx,
+                crate::trades::cache::INTRADAY_MAX_GAP_MS,
+                1000,
+            ));
         }
     }
 
@@ -1115,12 +1150,7 @@ pub async fn fetch_trades(
         .and_utc()
         .timestamp_millis() as u64;
 
-    let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
-    let max_days: i64 = if symbol.to_uppercase().starts_with("BTC") {
-        130
-    } else {
-        30
-    };
+    let max_days = crate::fetcher::trade_history_lookback_days() as i64;
     let cutoff_date = chrono::Utc::now().date_naive() - chrono::Duration::days(max_days);
     if from_date < cutoff_date {
         return Ok((Vec::new(), next_day_start));
@@ -1166,5 +1196,25 @@ pub async fn fetch_trades(
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Timeframe;
+
+    #[test]
+    fn test_ex05_okex_reversed_interval_safe() {
+        let tf = Timeframe::M5;
+        let range = Some((10_000u64, 5_000u64)); // Reversed: start > end
+        let limit = match range {
+            Some((start, end)) => {
+                let interval_ms = tf.to_milliseconds().max(1);
+                let span = end.saturating_sub(start);
+                (span / interval_ms).clamp(1, 300)
+            }
+            None => 300,
+        };
+        assert_eq!(limit, 1);
     }
 }

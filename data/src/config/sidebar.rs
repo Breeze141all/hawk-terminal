@@ -10,6 +10,9 @@ pub struct Sidebar {
     pub active_menu: Option<Menu>,
     #[serde(default)]
     pub tickers_table: Option<tickers_table::Settings>,
+    #[cfg(feature = "volume-search")]
+    #[serde(default)]
+    pub show_volume_search: bool,
 }
 
 impl Sidebar {
@@ -36,6 +39,8 @@ impl Default for Sidebar {
             position: Position::Left,
             active_menu: None,
             tickers_table: None,
+            #[cfg(feature = "volume-search")]
+            show_volume_search: false,
         }
     }
 }
@@ -69,4 +74,6 @@ pub enum Menu {
     Settings,
     Audio,
     ThemeEditor,
+    #[cfg(feature = "volume-search")]
+    VolumeSearch,
 }

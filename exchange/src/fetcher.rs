@@ -3,10 +3,12 @@ use crate::{FundingRate, Kline, NetOiDataPoint, OpenInterest, SpotKline, Trade};
 
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use uuid::Uuid;
 
+pub const DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS: u32 = 90;
 static TRADE_FETCH_ENABLED: AtomicBool = AtomicBool::new(false);
+static TRADE_HISTORY_LOOKBACK_DAYS: AtomicU32 = AtomicU32::new(DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS);
 
 pub fn toggle_trade_fetch(value: bool) {
     TRADE_FETCH_ENABLED.store(value, Ordering::Relaxed);
@@ -14,6 +16,14 @@ pub fn toggle_trade_fetch(value: bool) {
 
 pub fn is_trade_fetch_enabled() -> bool {
     TRADE_FETCH_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_trade_history_lookback_days(days: u32) {
+    TRADE_HISTORY_LOOKBACK_DAYS.store(days.max(1), Ordering::Relaxed);
+}
+
+pub fn trade_history_lookback_days() -> u32 {
+    TRADE_HISTORY_LOOKBACK_DAYS.load(Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone)]
@@ -72,7 +82,18 @@ impl RequestHandler {
         }
     }
 
+    /// Prune completed requests older than max_age_ms (default: 60s) and failed requests
+    pub fn prune_old_requests(&mut self, max_age_ms: u64) {
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        self.requests.retain(|_, req| match req.status {
+            RequestStatus::Pending => true,
+            RequestStatus::Completed(ts) => now.saturating_sub(ts) <= max_age_ms,
+            RequestStatus::Failed(_) => false,
+        });
+    }
+
     pub fn add_request(&mut self, fetch: FetchRange) -> Result<Option<Uuid>, ReqError> {
+        self.prune_old_requests(60_000);
         let request = FetchRequest::new(fetch);
         let id = Uuid::new_v4();
 
@@ -88,7 +109,8 @@ impl RequestHandler {
                 RequestStatus::Completed(ts) => {
                     // retry completed requests after a cooldown
                     // to handle data source failures or outdated results gracefully
-                    if chrono::Utc::now().timestamp_millis() as u64 - ts > 30_000 {
+                    let now = chrono::Utc::now().timestamp_millis() as u64;
+                    if now.saturating_sub(*ts) > 30_000 {
                         Ok(Some(existing_id))
                     } else {
                         Ok(None)
@@ -260,4 +282,29 @@ pub enum InfoKind {
     FetchingOI,
     FetchingMarketPulse,
     FetchingNetOi,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_trade_history_lookback_days_getter_and_setter() {
+        set_trade_history_lookback_days(180);
+        assert_eq!(trade_history_lookback_days(), 180);
+
+        set_trade_history_lookback_days(365);
+        assert_eq!(trade_history_lookback_days(), 365);
+
+        // Minimum boundary clamped to 1
+        set_trade_history_lookback_days(0);
+        assert_eq!(trade_history_lookback_days(), 1);
+
+        // Restore default
+        set_trade_history_lookback_days(DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS);
+        assert_eq!(
+            trade_history_lookback_days(),
+            DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS
+        );
+    }
 }

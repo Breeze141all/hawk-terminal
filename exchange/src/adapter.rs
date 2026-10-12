@@ -34,8 +34,8 @@ impl ResolvedStream {
     pub fn matches_trades(&self, stream: &StreamKind) -> bool {
         match self {
             ResolvedStream::Ready(existing) => {
-                let target = stream.ticker_info();
-                existing.iter().any(|s| s.ticker_info() == target)
+                let target = stream.ticker_info().ticker;
+                existing.iter().any(|s| s.ticker_info().ticker == target)
             }
             _ => false,
         }
@@ -137,6 +137,19 @@ pub enum AdapterError {
     WebsocketError(String),
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
+}
+
+impl Clone for AdapterError {
+    fn clone(&self) -> Self {
+        match self {
+            AdapterError::FetchError(err) => {
+                AdapterError::ParseError(format!("Network fetch error: {err}"))
+            }
+            AdapterError::ParseError(s) => AdapterError::ParseError(s.clone()),
+            AdapterError::WebsocketError(s) => AdapterError::WebsocketError(s.clone()),
+            AdapterError::InvalidRequest(s) => AdapterError::InvalidRequest(s.clone()),
+        }
+    }
 }
 
 impl AdapterError {
@@ -725,5 +738,40 @@ pub async fn fetch_open_interest(
     }
 }
 
-/// Historical Open Interest retention window supported by exchange APIs (30 days in milliseconds)
-pub const OI_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// Historical Open Interest retention window supported by exchange APIs (29 days in milliseconds to prevent edge-boundary rejections)
+pub const OI_RETENTION_MS: u64 = 29 * 24 * 60 * 60 * 1000;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Ticker;
+
+    #[test]
+    fn test_matches_trades_ignores_metadata_differences() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ti_pane = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let ti_stream = TickerInfo::new(ticker, 0.5, 0.01, Some(10.0));
+
+        let resolved = ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+            ticker_info: ti_pane,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        }]);
+
+        let incoming_stream = StreamKind::DepthAndTrades {
+            ticker_info: ti_stream,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        assert!(resolved.matches_trades(&incoming_stream));
+
+        let other_ticker = Ticker::new("ETHUSDT", Exchange::BinanceLinear);
+        let incoming_diff_ticker = StreamKind::DepthAndTrades {
+            ticker_info: TickerInfo::new(other_ticker, 0.1, 0.001, None),
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+        assert!(!resolved.matches_trades(&incoming_diff_ticker));
+    }
+}

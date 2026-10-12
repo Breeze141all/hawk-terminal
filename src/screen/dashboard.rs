@@ -43,7 +43,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant, vec};
 pub enum Message {
     Pane(window::Id, pane::Message),
     ChangePaneStatus(uuid::Uuid, pane::Status),
-    TradeFetchBatchDone(uuid::Uuid, u64, u64),
+    TradeFetchBatchDone(uuid::Uuid, TickerInfo, u64, u64),
     SavePopoutSpecs(HashMap<window::Id, WindowSpec>),
     ErrorOccurred(Option<uuid::Uuid>, DashboardError),
     Notification(Toast),
@@ -202,6 +202,65 @@ impl Dashboard {
         None
     }
 
+    pub fn toggle_replay_play_pause_active(&mut self) -> bool {
+        let check_pane = |pane_state: &mut pane::State| -> bool {
+            if pane_state.modal.is_some() {
+                return false;
+            }
+            if let pane::Content::Kline {
+                chart: Some(kline), ..
+            } = &mut pane_state.content
+                && kline.is_replay_active()
+            {
+                kline.replay_play_pause();
+                return true;
+            }
+            false
+        };
+
+        // 1. Try last focused kline pane
+        if let Some((win_id, pane)) = self.last_focused_kline {
+            let pane_state = self.panes.get_mut(pane).or_else(|| {
+                self.popout
+                    .get_mut(&win_id)
+                    .and_then(|(panes, _)| panes.get_mut(pane))
+            });
+            if let Some(pane_state) = pane_state
+                && check_pane(pane_state)
+            {
+                return true;
+            }
+        }
+        // 2. Try current focus pane
+        if let Some((win_id, pane)) = self.focus {
+            let pane_state = self.panes.get_mut(pane).or_else(|| {
+                self.popout
+                    .get_mut(&win_id)
+                    .and_then(|(panes, _)| panes.get_mut(pane))
+            });
+            if let Some(pane_state) = pane_state
+                && check_pane(pane_state)
+            {
+                return true;
+            }
+        }
+        // 3. Search all panes in self.panes
+        for (_pane, pane_state) in self.panes.iter_mut() {
+            if check_pane(pane_state) {
+                return true;
+            }
+        }
+        // 4. Search popouts
+        for (popout_panes, _) in self.popout.values_mut() {
+            for (_pane, pane_state) in popout_panes.iter_mut() {
+                if check_pane(pane_state) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn load_layout(&mut self, main_window: window::Id) -> Task<Message> {
         let mut open_popouts_tasks: Vec<Task<Message>> = vec![];
         let mut new_popout = Vec::new();
@@ -281,18 +340,30 @@ impl Dashboard {
                     self.set_focus(main_window.id, window, pane);
                 }
                 pane::Message::PaneResized(pane_grid::ResizeEvent { split, ratio }) => {
-                    self.panes.resize(split, ratio);
+                    if window == main_window.id {
+                        self.panes.resize(split, ratio);
+                    } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
+                        popout_panes.resize(split, ratio);
+                    }
                 }
                 pane::Message::PaneDragged(event) => {
                     if let pane_grid::DragEvent::Dropped { pane, target } = event {
-                        self.panes.drop(pane, target);
+                        if window == main_window.id {
+                            self.panes.drop(pane, target);
+                        } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
+                            popout_panes.drop(pane, target);
+                        }
                     }
                 }
                 pane::Message::SplitPane(axis, pane) => {
-                    let focus_pane = if let Some((new_pane, _)) =
-                        self.panes.split(axis, pane, pane::State::new())
-                    {
-                        Some(new_pane)
+                    let focus_pane = if window == main_window.id {
+                        self.panes
+                            .split(axis, pane, pane::State::new())
+                            .map(|(new_pane, _)| new_pane)
+                    } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
+                        popout_panes
+                            .split(axis, pane, pane::State::new())
+                            .map(|(new_pane, _)| new_pane)
                     } else {
                         None
                     };
@@ -302,18 +373,40 @@ impl Dashboard {
                     }
                 }
                 pane::Message::ClosePane(pane) => {
-                    if let Some((_, sibling)) = self.panes.close(pane) {
+                    let sibling = if window == main_window.id {
+                        self.panes.close(pane).map(|(_, s)| s)
+                    } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
+                        popout_panes.close(pane).map(|(_, s)| s)
+                    } else {
+                        None
+                    };
+                    if let Some(sibling) = sibling {
                         self.set_focus(main_window.id, window, sibling);
                     }
                 }
                 pane::Message::MaximizePane(pane) => {
-                    self.panes.maximize(pane);
+                    if window == main_window.id {
+                        self.panes.maximize(pane);
+                    } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
+                        popout_panes.maximize(pane);
+                    }
                 }
                 pane::Message::Restore => {
-                    self.panes.restore();
+                    if window == main_window.id {
+                        self.panes.restore();
+                    } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
+                        popout_panes.restore();
+                    }
                 }
                 pane::Message::ReplacePane(pane) => {
-                    if let Some(pane) = self.panes.get_mut(pane) {
+                    let target = if window == main_window.id {
+                        self.panes.get_mut(pane)
+                    } else {
+                        self.popout
+                            .get_mut(&window)
+                            .and_then(|(p, _)| p.get_mut(pane))
+                    };
+                    if let Some(pane) = target {
                         *pane = pane::State::new();
                     }
 
@@ -498,6 +591,21 @@ impl Dashboard {
                                 );
                                 Task::none()
                             }
+                            pane::Effect::SyncDrawings {
+                                symbol,
+                                drawings,
+                                originating_pane_id,
+                            } => {
+                                for drawing in drawings {
+                                    self.sync_drawing_to_panes(
+                                        main_window.id,
+                                        &symbol,
+                                        &drawing,
+                                        originating_pane_id,
+                                    );
+                                }
+                                Task::none()
+                            }
                             pane::Effect::UnsyncDrawing {
                                 symbol,
                                 drawing_id,
@@ -532,6 +640,41 @@ impl Dashboard {
                                 }
                                 Task::none()
                             }
+                            pane::Effect::DeleteAlert(id) => {
+                                self.iter_all_panes_mut(main_window.id)
+                                    .for_each(|(_, _, p)| {
+                                        if let pane::Content::Kline { chart: Some(c), .. } =
+                                            &mut p.content
+                                            && c.alerts.iter().any(|a| a.id == id)
+                                        {
+                                            c.remove_alert(id);
+                                            c.invalidate_all();
+                                        }
+                                    });
+                                Task::none()
+                            }
+                            pane::Effect::ToggleAlert(id) => {
+                                self.iter_all_panes_mut(main_window.id)
+                                    .for_each(|(_, _, p)| {
+                                        if let pane::Content::Kline { chart: Some(c), .. } =
+                                            &mut p.content
+                                            && c.alerts.iter().any(|a| a.id == id)
+                                        {
+                                            c.toggle_alert(id);
+                                            c.invalidate_all();
+                                        }
+                                    });
+                                Task::none()
+                            }
+                            pane::Effect::ClearTriggeredAlerts => {
+                                self.iter_all_panes_mut(main_window.id).for_each(|(_, _, p)| {
+                                    if let pane::Content::Kline { chart: Some(c), .. } = &mut p.content {
+                                        c.alerts.retain(|a| a.status != data::chart::alert::AlertStatus::Triggered);
+                                        c.invalidate_all();
+                                    }
+                                });
+                                Task::none()
+                            }
                         };
                         return (task, None);
                     }
@@ -551,12 +694,24 @@ impl Dashboard {
                     }
                 }
             }
-            Message::TradeFetchBatchDone(pane_id, from_time, actual_last_trade_t) => {
+            Message::TradeFetchBatchDone(pane_id, batch_ti, from_time, actual_last_trade_t) => {
                 if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window.id, pane_id) {
                     if let pane::Content::Kline {
                         chart: Some(chart), ..
                     } = &mut pane_state.content
                     {
+                        if chart.ticker_info.ticker != batch_ti.ticker {
+                            log::warn!(
+                                "Dropping stale TradeFetchBatchDone for {:?}, current chart is {:?}",
+                                batch_ti.ticker,
+                                chart.ticker_info.ticker
+                            );
+                            if !chart.is_fetching_trades() {
+                                pane_state.status = pane::Status::Ready;
+                            }
+                            return (Default::default(), None);
+                        }
+                        chart.commit_fetched_trades(from_time, actual_last_trade_t);
                         chart.mark_trades_fetched(from_time, actual_last_trade_t);
                         chart.finish_one_trade_fetch();
                         chart.flush_footprint_cache();
@@ -1129,6 +1284,23 @@ impl Dashboard {
             });
     }
 
+    pub fn set_trade_history_lookback(&mut self, days: u32, main_window: &Window) {
+        exchange::fetcher::set_trade_history_lookback_days(days);
+
+        self.iter_all_panes_mut(main_window.id)
+            .for_each(|(_, _, state)| {
+                if let pane::Content::Kline { chart, kind, .. } = &mut state.content
+                    && matches!(kind, data::chart::KlineChartKind::Footprint { .. })
+                    && let Some(c) = chart
+                {
+                    c.reset_request_handler();
+                    c.invalidate_unfetched_empty_footprints();
+                    c.invalidate_all();
+                }
+                state.sync_footprint_exchange_notice();
+            });
+    }
+
     pub fn distribute_fetched_data(
         &mut self,
         main_window: window::Id,
@@ -1138,13 +1310,16 @@ impl Dashboard {
     ) -> Task<Message> {
         match data {
             FetchedData::Trades { batch, .. } => {
+                let stream_ti = stream_type.ticker_info();
                 if !batch.is_empty()
-                    && let Err(reason) = self.insert_fetched_trades(main_window, pane_id, &batch)
+                    && let Err(reason) =
+                        self.insert_fetched_trades(main_window, pane_id, stream_ti, &batch)
                 {
                     return self.handle_error(Some(pane_id), &reason, main_window);
                 }
             }
             FetchedData::Klines { data, req_id } => {
+                let mut triggered = Vec::new();
                 if let Some(pane_state) = self.get_mut_pane_state_by_uuid(main_window, pane_id) {
                     pane_state.status = pane::Status::Ready;
 
@@ -1154,7 +1329,53 @@ impl Dashboard {
                     } = stream_type
                     {
                         pane_state.insert_hist_klines(req_id, timeframe, ticker_info, &data);
+                        triggered =
+                            data::AlertStore::check_offline_klines(&ticker_info.ticker, &data);
                     }
+                }
+
+                if !triggered.is_empty() {
+                    let mut seen_ids = std::collections::HashSet::new();
+                    for alert in &triggered {
+                        if seen_ids.insert(alert.id) {
+                            let notif_body = format!(
+                                "{} reached {:.2} ({})",
+                                alert.ticker_symbol, alert.target_price, alert.condition
+                            );
+                            crate::notification::send_desktop_notification(
+                                "🔔 Price Alert",
+                                &notif_body,
+                            );
+                        }
+                    }
+
+                    self.iter_all_panes_mut(main_window).for_each(|(_, _, ps)| {
+                        let pid = ps.unique_id();
+                        let mut to_add = Vec::new();
+                        if let pane::Content::Kline { chart: Some(c), .. } = &mut ps.content {
+                            for alert in &triggered {
+                                let matches_pane = alert.is_synced
+                                    || alert.pane_id.is_none()
+                                    || alert.pane_id == Some(pid);
+                                if matches_pane && c.alerts.iter().any(|a| a.id == alert.id) {
+                                    c.alerts.iter_mut().for_each(|a| {
+                                        if a.id == alert.id {
+                                            a.status = data::chart::alert::AlertStatus::Triggered;
+                                            a.triggered_at = alert.triggered_at;
+                                        }
+                                    });
+                                    c.invalidate_all();
+                                    to_add.push(Toast::info(format!(
+                                        "🔔 Price Alert: {} reached {:.2} ({})",
+                                        alert.ticker_symbol, alert.target_price, alert.condition
+                                    )));
+                                }
+                            }
+                        }
+                        if !to_add.is_empty() {
+                            ps.notifications.extend(to_add);
+                        }
+                    });
                 }
             }
             FetchedData::OI { data, req_id } => {
@@ -1202,6 +1423,7 @@ impl Dashboard {
         &mut self,
         main_window: window::Id,
         pane_id: uuid::Uuid,
+        stream_ti: TickerInfo,
         trades: &[Trade],
     ) -> Result<(), DashboardError> {
         let pane_state = self
@@ -1226,7 +1448,15 @@ impl Dashboard {
         match &mut pane_state.content {
             pane::Content::Kline { chart, .. } => {
                 if let Some(c) = chart {
-                    c.insert_raw_trades(trades.to_owned());
+                    if c.ticker_info.ticker != stream_ti.ticker {
+                        log::warn!(
+                            "Dropping stale fetched trades for {:?}, current chart is {:?}",
+                            stream_ti.ticker,
+                            c.ticker_info.ticker
+                        );
+                        return Ok(());
+                    }
+                    c.insert_fetched_trades_buffered(trades);
                     Ok(())
                 } else {
                     Err(DashboardError::Unknown(
@@ -1247,6 +1477,7 @@ impl Dashboard {
         main_window: window::Id,
     ) -> Task<Message> {
         let mut found_match = false;
+        let mut all_triggered = Vec::new();
 
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, pane_state)| {
@@ -1256,22 +1487,13 @@ impl Dashboard {
                             let prev_p = c.current_price().unwrap_or(kline.close.to_f32_lossy());
                             c.update_latest_kline(kline);
                             let cur_p = kline.close.to_f32_lossy();
+                            let low_p = kline.low.to_f32_lossy();
+                            let high_p = kline.high.to_f32_lossy();
                             let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
-                            let triggered =
-                                data::AlertStore::check_price_triggers(&symbol, prev_p, cur_p);
-                            for alert in &triggered {
-                                c.alerts.iter_mut().for_each(|a| {
-                                    if a.id == alert.id {
-                                        a.status = data::chart::alert::AlertStatus::Triggered;
-                                        a.triggered_at = alert.triggered_at;
-                                    }
-                                });
-                                c.invalidate_all();
-                                pane_state.notifications.push(Toast::info(format!(
-                                    "🔔 Price Alert: {} reached {:.2} ({})",
-                                    alert.ticker_symbol, alert.target_price, alert.condition
-                                )));
-                            }
+                            let triggered = data::AlertStore::check_price_triggers_range(
+                                &symbol, prev_p, low_p, high_p, cur_p,
+                            );
+                            all_triggered.extend(triggered);
                         }
                         pane::Content::Comparison(Some(c)) => {
                             c.update_latest_kline(&stream.ticker_info(), kline);
@@ -1281,6 +1503,50 @@ impl Dashboard {
                     found_match = true;
                 }
             });
+
+        if !all_triggered.is_empty() {
+            let mut seen_ids = std::collections::HashSet::new();
+            for alert in &all_triggered {
+                if seen_ids.insert(alert.id) {
+                    let notif_body = format!(
+                        "{} reached {:.2} ({})",
+                        alert.ticker_symbol, alert.target_price, alert.condition
+                    );
+                    crate::notification::send_desktop_notification("🔔 Price Alert", &notif_body);
+                }
+            }
+
+            self.iter_all_panes_mut(main_window)
+                .for_each(|(_, _, pane_state)| {
+                    let pane_id = pane_state.unique_id();
+                    let mut triggered_toasts = Vec::new();
+                    if let pane::Content::Kline { chart: Some(c), .. } = &mut pane_state.content {
+                        for alert in &all_triggered {
+                            let matches_pane = alert.is_synced
+                                || alert.pane_id.is_none()
+                                || alert.pane_id == Some(pane_id);
+                            if matches_pane && c.alerts.iter().any(|a| a.id == alert.id) {
+                                c.alerts.iter_mut().for_each(|a| {
+                                    if a.id == alert.id {
+                                        a.status = data::chart::alert::AlertStatus::Triggered;
+                                        a.triggered_at = alert.triggered_at;
+                                    }
+                                });
+                                c.invalidate_all();
+                                let notif_body = format!(
+                                    "{} reached {:.2} ({})",
+                                    alert.ticker_symbol, alert.target_price, alert.condition
+                                );
+                                triggered_toasts
+                                    .push(Toast::info(format!("🔔 Price Alert: {notif_body}")));
+                            }
+                        }
+                    }
+                    if !triggered_toasts.is_empty() {
+                        pane_state.notifications.extend(triggered_toasts);
+                    }
+                });
+        }
 
         if found_match {
             Task::none()
@@ -1299,6 +1565,7 @@ impl Dashboard {
         main_window: window::Id,
     ) -> Task<Message> {
         let mut found_match = false;
+        let mut all_triggered = Vec::new();
 
         self.iter_all_panes_mut(main_window)
             .for_each(|(_, _, pane_state)| {
@@ -1318,21 +1585,21 @@ impl Dashboard {
                             let cur_p = c.current_price();
                             if let (Some(prev), Some(cur)) = (prev_p, cur_p) {
                                 let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
-                                let triggered =
-                                    data::AlertStore::check_price_triggers(&symbol, prev, cur);
-                                for alert in &triggered {
-                                    c.alerts.iter_mut().for_each(|a| {
-                                        if a.id == alert.id {
-                                            a.status = data::chart::alert::AlertStatus::Triggered;
-                                            a.triggered_at = alert.triggered_at;
-                                        }
-                                    });
-                                    c.invalidate_all();
-                                    pane_state.notifications.push(Toast::info(format!(
-                                        "🔔 Price Alert: {} reached {:.2} ({})",
-                                        alert.ticker_symbol, alert.target_price, alert.condition
-                                    )));
+                                let mut min_p = prev.min(cur);
+                                let mut max_p = prev.max(cur);
+                                for t in trades_buffer {
+                                    let p = t.price.to_f32_lossy();
+                                    if p < min_p {
+                                        min_p = p;
+                                    }
+                                    if p > max_p {
+                                        max_p = p;
+                                    }
                                 }
+                                let triggered = data::AlertStore::check_price_triggers_range(
+                                    &symbol, prev, min_p, max_p, cur,
+                                );
+                                all_triggered.extend(triggered);
                             }
                         }
                         pane::Content::TimeAndSales(Some(p)) if !trades_buffer.is_empty() => {
@@ -1346,6 +1613,50 @@ impl Dashboard {
                     found_match = true;
                 }
             });
+
+        if !all_triggered.is_empty() {
+            let mut seen_ids = std::collections::HashSet::new();
+            for alert in &all_triggered {
+                if seen_ids.insert(alert.id) {
+                    let notif_body = format!(
+                        "{} reached {:.2} ({})",
+                        alert.ticker_symbol, alert.target_price, alert.condition
+                    );
+                    crate::notification::send_desktop_notification("🔔 Price Alert", &notif_body);
+                }
+            }
+
+            self.iter_all_panes_mut(main_window)
+                .for_each(|(_, _, pane_state)| {
+                    let pane_id = pane_state.unique_id();
+                    let mut triggered_toasts = Vec::new();
+                    if let pane::Content::Kline { chart: Some(c), .. } = &mut pane_state.content {
+                        for alert in &all_triggered {
+                            let matches_pane = alert.is_synced
+                                || alert.pane_id.is_none()
+                                || alert.pane_id == Some(pane_id);
+                            if matches_pane && c.alerts.iter().any(|a| a.id == alert.id) {
+                                c.alerts.iter_mut().for_each(|a| {
+                                    if a.id == alert.id {
+                                        a.status = data::chart::alert::AlertStatus::Triggered;
+                                        a.triggered_at = alert.triggered_at;
+                                    }
+                                });
+                                c.invalidate_all();
+                                let notif_body = format!(
+                                    "{} reached {:.2} ({})",
+                                    alert.ticker_symbol, alert.target_price, alert.condition
+                                );
+                                triggered_toasts
+                                    .push(Toast::info(format!("🔔 Price Alert: {notif_body}")));
+                            }
+                        }
+                    }
+                    if !triggered_toasts.is_empty() {
+                        pane_state.notifications.extend(triggered_toasts);
+                    }
+                });
+        }
 
         if found_match {
             Task::none()
@@ -1418,6 +1729,12 @@ impl Dashboard {
     ) -> Task<Message> {
         if let Some(state) = self.get_mut_pane_state_by_uuid(main_window, pane_id) {
             state.streams = ResolvedStream::Ready(streams.clone());
+            if let pane::Content::Kline { kind, chart, .. } = &state.content {
+                let chart_kind = chart.as_ref().map_or(kind, |c| &c.kind);
+                if matches!(chart_kind, data::chart::KlineChartKind::Footprint { .. }) {
+                    state.sync_footprint_streams();
+                }
+            }
         }
         self.refresh_streams(main_window)
     }
@@ -1485,6 +1802,10 @@ fn request_fetch(
 
     match fetch {
         FetchRange::Kline(from, to) => {
+            if from >= to {
+                return Task::none();
+            }
+
             let kline_stream = {
                 if let Some(s) = stream {
                     Some((s, pane_id))
@@ -1533,16 +1854,51 @@ fn request_fetch(
             }
         }
         FetchRange::Trades(from_time, to_time) => {
-            let trade_info = state.streams.find_ready_map(|stream| {
-                if let StreamKind::DepthAndTrades { ticker_info, .. } = stream {
-                    Some((*ticker_info, pane_id, *stream))
-                } else {
-                    None
-                }
-            });
+            let trade_info = stream
+                .and_then(|s| match s {
+                    StreamKind::DepthAndTrades { ticker_info, .. } => {
+                        Some((ticker_info, pane_id, s))
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    state.streams.find_ready_map(|stream| {
+                        if let StreamKind::DepthAndTrades { ticker_info, .. } = stream {
+                            Some((*ticker_info, pane_id, *stream))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .or_else(|| {
+                    let ti = if let pane::Content::Kline { chart: Some(c), .. } = &state.content {
+                        Some(c.ticker_info)
+                    } else {
+                        state.stream_pair()
+                    };
+                    ti.map(|ti| {
+                        let depth_aggr = if ti.exchange().is_depth_client_aggr() {
+                            StreamTicksize::Client
+                        } else {
+                            StreamTicksize::ServerSide(
+                                state
+                                    .settings
+                                    .tick_multiply
+                                    .unwrap_or(exchange::TickMultiplier(1)),
+                            )
+                        };
+                        let fallback_stream = StreamKind::DepthAndTrades {
+                            ticker_info: ti,
+                            depth_aggr,
+                            push_freq: exchange::PushFrequency::ServerDefault,
+                        };
+                        (ti, pane_id, fallback_stream)
+                    })
+                });
 
             if let Some((ticker_info, pane_id, stream)) = trade_info {
                 state.sync_footprint_exchange_notice();
+                state.sync_footprint_streams();
                 let exchange_folder = match ticker_info.exchange() {
                     Exchange::BinanceSpot | Exchange::BinanceLinear | Exchange::BinanceInverse => {
                         "binance"
@@ -1568,9 +1924,12 @@ fn request_fetch(
                         }
                     },
                     move |result| match result {
-                        Ok(actual_last_trade_t) => {
-                            Message::TradeFetchBatchDone(pane_id, from_time, actual_last_trade_t)
-                        }
+                        Ok(actual_last_trade_t) => Message::TradeFetchBatchDone(
+                            pane_id,
+                            ticker_info,
+                            from_time,
+                            actual_last_trade_t,
+                        ),
                         Err(err) => Message::ErrorOccurred(
                             Some(pane_id),
                             DashboardError::Fetch(err.to_string()),
@@ -1903,19 +2262,20 @@ pub fn fetch_trades_batched(
         let mut actual_last_trade_t = from_time;
         let mut reached_end = false;
 
+        if exchange::clock::is_sync_needed(ticker_info.exchange(), 60_000) {
+            let _ = exchange::clock::ping_server_time(ticker_info.exchange()).await;
+        }
+
         while latest_trade_t < to_time {
             match exchange::trades::fetch_trades(ticker_info, latest_trade_t, data_path.clone())
                 .await
             {
                 Ok((mut batch, next_trade_t)) => {
                     let batch_len = batch.len();
-                    let today_midnight = chrono::Utc::now()
-                        .date_naive()
-                        .and_hms_opt(0, 0, 0)
-                        .unwrap()
-                        .and_utc()
-                        .timestamp_millis() as u64;
-                    if batch_len == 0 && latest_trade_t >= today_midnight {
+                    let now_ms = exchange::clock::server_time_ms(Some(ticker_info.exchange()));
+                    let is_at_market_tip = latest_trade_t >= now_ms.saturating_sub(120_000)
+                        || next_trade_t >= now_ms.saturating_sub(120_000);
+                    if batch_len == 0 && is_at_market_tip {
                         reached_end = true;
                         break;
                     }
@@ -1935,6 +2295,7 @@ pub fn fetch_trades_batched(
                     }
 
                     if next_trade_t <= latest_trade_t {
+                        reached_end = true;
                         break;
                     }
 
@@ -1946,6 +2307,8 @@ pub fn fetch_trades_batched(
 
                     if (100..=2000).contains(&batch_len) {
                         tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
+                    } else if batch_len == 0 {
+                        tokio::task::yield_now().await;
                     }
 
                     latest_trade_t = next_trade_t;
@@ -2242,5 +2605,541 @@ mod tests {
         {
             assert_eq!(c.drawings.len(), 0);
         }
+    }
+
+    #[test]
+    fn test_alert_isolation_between_panes_same_symbol() {
+        let mut dashboard = Dashboard::default();
+        let main_window_id = window::Id::unique();
+
+        let test_symbol = format!("TEST_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+        // Cleanup any potential pre-existing alerts for this test symbol or legacy TESTALERT
+        for a in data::AlertStore::for_symbol(&test_symbol) {
+            data::AlertStore::remove(a.id);
+        }
+        for a in data::AlertStore::for_symbol("TESTALERT") {
+            data::AlertStore::remove(a.id);
+        }
+
+        // 1. Setup two panes with the same ticker: Pane 1 (TPO) and Pane 2 (Footprint)
+        let panes: Vec<pane_grid::Pane> = dashboard.panes.iter().map(|(p, _)| *p).collect();
+        let p1 = panes[0];
+        let p2 = panes[1];
+
+        let p1_id = dashboard.panes.get(p1).unwrap().unique_id();
+        let p2_id = dashboard.panes.get(p2).unwrap().unique_id();
+        assert_ne!(p1_id, p2_id);
+
+        let ticker_info = exchange::TickerInfo::new(
+            exchange::Ticker::new(&test_symbol, exchange::adapter::Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        );
+
+        let stream = exchange::adapter::StreamKind::Kline {
+            ticker_info,
+            timeframe: exchange::Timeframe::M15,
+        };
+
+        let tpo_kind = data::chart::KlineChartKind::Tpo {
+            show_candles: true,
+            show_letters: true,
+            show_ib: true,
+            show_va: true,
+            show_poc: true,
+            show_single_prints: true,
+            tick_step: Default::default(),
+            period: Default::default(),
+            clusters: vec![],
+            split_sessions: vec![],
+            color_scheme: Default::default(),
+            ib_color: Default::default(),
+            poc_color: Default::default(),
+            single_prints_color: Default::default(),
+        };
+
+        let footprint_kind = data::chart::KlineChartKind::Footprint {
+            clusters: Default::default(),
+            scaling: Default::default(),
+            studies: vec![],
+            show_bottom_volume: false,
+            aggregate: false,
+            aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+            history_lookback_days: None,
+        };
+
+        let chart_p1 = crate::chart::kline::KlineChart::new(
+            data::chart::ViewConfig::default(),
+            data::chart::Basis::Time(exchange::Timeframe::M15),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            ticker_info,
+            &tpo_kind,
+            None,
+        );
+
+        let chart_p2 = crate::chart::kline::KlineChart::new(
+            data::chart::ViewConfig::default(),
+            data::chart::Basis::Time(exchange::Timeframe::M15),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            ticker_info,
+            &footprint_kind,
+            None,
+        );
+
+        dashboard.panes.get_mut(p1).unwrap().streams =
+            exchange::adapter::ResolvedStream::Ready(vec![stream]);
+        dashboard.panes.get_mut(p1).unwrap().content = pane::Content::Kline {
+            chart: Some(chart_p1),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: tpo_kind,
+        };
+
+        dashboard.panes.get_mut(p2).unwrap().streams =
+            exchange::adapter::ResolvedStream::Ready(vec![stream]);
+        dashboard.panes.get_mut(p2).unwrap().content = pane::Content::Kline {
+            chart: Some(chart_p2),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: footprint_kind,
+        };
+
+        // 2. Add an alert on Pane 1 (TPO)
+        let alert_price = 65000.0;
+        dashboard
+            .panes
+            .get_mut(p1)
+            .unwrap()
+            .update(pane::Event::AddPriceAlert(alert_price));
+
+        // Verify Pane 1 has 1 alert, Pane 2 has 0 alerts
+        let p1_alerts_len = match &dashboard.panes.get(p1).unwrap().content {
+            pane::Content::Kline { chart: Some(c), .. } => c.alerts.len(),
+            _ => 0,
+        };
+        let p2_alerts_len = match &dashboard.panes.get(p2).unwrap().content {
+            pane::Content::Kline { chart: Some(c), .. } => c.alerts.len(),
+            _ => 0,
+        };
+        assert_eq!(p1_alerts_len, 1);
+        assert_eq!(p2_alerts_len, 0);
+
+        // Verify AlertStore has it bound to p1_id
+        let for_p1 = data::AlertStore::for_symbol_and_pane(&test_symbol, p1_id);
+        let for_p2 = data::AlertStore::for_symbol_and_pane(&test_symbol, p2_id);
+        assert_eq!(for_p1.len(), 1);
+        assert_eq!(for_p1[0].pane_id, Some(p1_id));
+        assert_eq!(for_p2.len(), 0);
+
+        // 3. Simulate kline reload / app startup on Pane 2 (Footprint)
+        dashboard.panes.get_mut(p2).unwrap().insert_hist_klines(
+            None,
+            exchange::Timeframe::M15,
+            ticker_info,
+            &[],
+        );
+
+        // Pane 2 must STILL have 0 alerts
+        let p2_alerts_len_after = match &dashboard.panes.get(p2).unwrap().content {
+            pane::Content::Kline { chart: Some(c), .. } => c.alerts.len(),
+            _ => 0,
+        };
+        assert_eq!(p2_alerts_len_after, 0);
+
+        // 4. Initial price below alert (64000.0)
+        let kline_init = exchange::Kline {
+            time: 1700000000000,
+            open: exchange::util::Price::from_f32(64000.0),
+            high: exchange::util::Price::from_f32(64100.0),
+            low: exchange::util::Price::from_f32(63900.0),
+            close: exchange::util::Price::from_f32(64000.0),
+            volume: (10.0, 10.0),
+        };
+        let _ = dashboard.update_latest_klines(&stream, &kline_init, main_window_id);
+
+        // Next price crossing 65000.0
+        let kline_trigger = exchange::Kline {
+            time: 1700000060000,
+            open: exchange::util::Price::from_f32(64000.0),
+            high: exchange::util::Price::from_f32(65200.0),
+            low: exchange::util::Price::from_f32(64000.0),
+            close: exchange::util::Price::from_f32(65100.0),
+            volume: (10.0, 10.0),
+        };
+        let _ = dashboard.update_latest_klines(&stream, &kline_trigger, main_window_id);
+
+        // Pane 1 must receive the notification and have its alert marked Triggered
+        let p1_notifications = &dashboard.panes.get(p1).unwrap().notifications;
+        let p2_notifications = &dashboard.panes.get(p2).unwrap().notifications;
+        assert_eq!(p1_notifications.len(), 1);
+        assert!(p1_notifications[0].body.contains("Price Alert"));
+        assert_eq!(
+            p2_notifications.len(),
+            0,
+            "Pane 2 must not receive notification for Pane 1's alert"
+        );
+
+        // Clean up AlertStore for this test symbol
+        for a in data::AlertStore::for_symbol(&test_symbol) {
+            data::AlertStore::remove(a.id);
+        }
+        let after_remove = data::AlertStore::for_symbol(&test_symbol);
+        assert!(after_remove.is_empty());
+    }
+
+    #[test]
+    fn test_dashboard_toggle_replay_play_pause() {
+        let mut p1_state = pane::State::default();
+        let chart = make_test_chart();
+        assert!(!chart.is_replay_active());
+        p1_state.content = pane::Content::Kline {
+            chart: Some(chart),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Candles,
+        };
+
+        let (panes, p1) = pane_grid::State::new(p1_state);
+        let win_id = window::Id::unique();
+
+        let mut dashboard = Dashboard {
+            panes,
+            focus: Some((win_id, p1)),
+            last_focused_kline: Some((win_id, p1)),
+            streams: UniqueStreams::default(),
+            popout: HashMap::new(),
+            layout_id: uuid::Uuid::new_v4(),
+        };
+
+        // When replay is not active, toggle returns false
+        assert!(!dashboard.toggle_replay_play_pause_active());
+
+        // Activate replay on pane
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &mut dashboard.panes.get_mut(p1).unwrap().content
+        {
+            c.toggle_replay();
+            assert!(c.is_replay_active());
+        }
+
+        // Toggle play/pause via dashboard (Space hotkey logic)
+        assert!(dashboard.toggle_replay_play_pause_active());
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert!(c.replay_state().unwrap().is_playing);
+        }
+
+        // Toggle again to pause
+        assert!(dashboard.toggle_replay_play_pause_active());
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert!(!c.replay_state().unwrap().is_playing);
+        }
+
+        // When a modal is open on the pane (e.g. Settings), space does not trigger replay
+        dashboard.panes.get_mut(p1).unwrap().modal = Some(crate::modal::pane::Modal::Settings);
+        assert!(!dashboard.toggle_replay_play_pause_active());
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert!(!c.replay_state().unwrap().is_playing);
+        }
+    }
+
+    #[test]
+    fn test_stale_trade_fetch_discarded_on_ticker_mismatch() {
+        let mut p1_state = pane::State::default();
+        let eth_ticker =
+            exchange::Ticker::new("ETHUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let eth_info = exchange::TickerInfo::new(eth_ticker, 0.01, 0.001, None);
+        let chart = crate::chart::kline::KlineChart::new(
+            data::chart::ViewConfig::default(),
+            data::chart::Basis::Time(exchange::Timeframe::H1),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            eth_info,
+            &data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+        p1_state.content = pane::Content::Kline {
+            chart: Some(chart),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+        };
+
+        let (panes, p1) = pane_grid::State::new(p1_state);
+        let win_id = window::Id::unique();
+
+        let mut dashboard = Dashboard {
+            panes,
+            focus: Some((win_id, p1)),
+            last_focused_kline: Some((win_id, p1)),
+            streams: UniqueStreams::default(),
+            popout: HashMap::new(),
+            layout_id: uuid::Uuid::new_v4(),
+        };
+
+        let p1_uuid = dashboard.panes.get(p1).unwrap().unique_id();
+
+        // Create SOL trade and try inserting it into ETH pane
+        let sol_ticker =
+            exchange::Ticker::new("SOLUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let sol_info = exchange::TickerInfo::new(sol_ticker, 0.01, 0.001, None);
+        let sol_trade = exchange::Trade {
+            time: 1700000000000,
+            price: exchange::util::Price::from_f32(120.0),
+            qty: 1.0,
+            is_sell: false,
+        };
+
+        // 1. insert_fetched_trades with SOL must drop the trade and return Ok(())
+        let res = dashboard.insert_fetched_trades(win_id, p1_uuid, sol_info, &[sol_trade]);
+        assert!(res.is_ok());
+
+        // Verify ETH chart buffer did NOT accept SOL trade
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert_eq!(c.raw_trades().len(), 0);
+        }
+
+        // 2. update Message::TradeFetchBatchDone with SOL must be ignored
+        let main_win = Window::new(win_id);
+        let layout_id = dashboard.layout_id;
+        let (_task, event) = dashboard.update(
+            Message::TradeFetchBatchDone(p1_uuid, sol_info, 1700000000000, 1700000001000),
+            &main_win,
+            &layout_id,
+        );
+        assert!(event.is_none());
+
+        // 3. insert_fetched_trades with matching ETH trade is accepted
+        let eth_trade = exchange::Trade {
+            time: 1700000000000,
+            price: exchange::util::Price::from_f32(2700.0),
+            qty: 2.0,
+            is_sell: false,
+        };
+        let res2 = dashboard.insert_fetched_trades(win_id, p1_uuid, eth_info, &[eth_trade]);
+        assert!(res2.is_ok());
+
+        if let pane::Content::Kline { chart: Some(c), .. } =
+            &dashboard.panes.get(p1).unwrap().content
+        {
+            assert_eq!(c.raw_trades().len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_fetch_range_trades_falls_back_to_chart_ticker_info() {
+        let mut p1_state = pane::State::default();
+        let btc_ticker =
+            exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let btc_info = exchange::TickerInfo::new(btc_ticker, 0.1, 0.001, None);
+        let chart = crate::chart::kline::KlineChart::new(
+            data::chart::ViewConfig::default(),
+            data::chart::Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            btc_info,
+            &data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+        p1_state.content = pane::Content::Kline {
+            chart: Some(chart),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+        };
+
+        // Explicitly set streams to only contain Kline stream (no DepthAndTrades)
+        p1_state.streams = exchange::adapter::ResolvedStream::Ready(vec![StreamKind::Kline {
+            ticker_info: btc_info,
+            timeframe: exchange::Timeframe::M5,
+        }]);
+
+        let layout_id = uuid::Uuid::new_v4();
+        let req_id = uuid::Uuid::new_v4();
+        let fetch = FetchRange::Trades(1700000000000, 1700000060000);
+
+        // request_fetch should NOT return Task::none() or drop request,
+        // and should synchronize footprint streams so DepthAndTrades is registered.
+        let _task = request_fetch(&mut p1_state, layout_id, req_id, fetch, None);
+
+        // Verify DepthAndTrades is now in p1_state.streams
+        let has_depth_and_trades = p1_state.streams.find_ready_map(|s| {
+            if let StreamKind::DepthAndTrades { ticker_info, .. } = s {
+                Some(*ticker_info)
+            } else {
+                None
+            }
+        });
+        assert_eq!(has_depth_and_trades, Some(btc_info));
+    }
+
+    #[test]
+    fn test_fetch_range_trades_explicit_stream_priority() {
+        let btc_ticker = exchange::Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let btc_info = TickerInfo::new(btc_ticker, 0.1, 0.001, None);
+        let bybit_ticker = exchange::Ticker::new("BTCUSDT", Exchange::BybitLinear);
+        let bybit_info = TickerInfo::new(bybit_ticker, 0.1, 0.001, None);
+
+        let mut p1_state = pane::State::default();
+        let chart = crate::chart::kline::KlineChart::new(
+            data::chart::ViewConfig::default(),
+            data::chart::Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            Vec::new(),
+            &[],
+            btc_info,
+            &data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: true,
+                aggregate_exchanges: vec![Exchange::BinanceLinear, Exchange::BybitLinear],
+                history_lookback_days: None,
+            },
+            None,
+        );
+        p1_state.content = pane::Content::Kline {
+            chart: Some(chart),
+            indicators: Default::default(),
+            layout: Default::default(),
+            kind: data::chart::KlineChartKind::Footprint {
+                clusters: Default::default(),
+                scaling: Default::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: true,
+                aggregate_exchanges: vec![Exchange::BinanceLinear, Exchange::BybitLinear],
+                history_lookback_days: None,
+            },
+        };
+
+        p1_state.streams =
+            exchange::adapter::ResolvedStream::Ready(vec![StreamKind::DepthAndTrades {
+                ticker_info: btc_info,
+                depth_aggr: StreamTicksize::Client,
+                push_freq: PushFrequency::ServerDefault,
+            }]);
+
+        let explicit_stream = StreamKind::DepthAndTrades {
+            ticker_info: bybit_info,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        let layout_id = uuid::Uuid::new_v4();
+        let req_id = uuid::Uuid::new_v4();
+        let fetch = FetchRange::Trades(1700000000000, 1700000060000);
+
+        // When explicit stream is passed, request_fetch must not panic or drop request
+        let _task = request_fetch(
+            &mut p1_state,
+            layout_id,
+            req_id,
+            fetch,
+            Some(explicit_stream),
+        );
+        assert!(p1_state.streams.matches_trades(&explicit_stream));
+    }
+
+    #[test]
+    fn test_ter06_popout_window_grid_routing_isolation() {
+        let (main_panes, _) = pane_grid::State::new(pane::State::default());
+        let (popout_panes, popout_p1) = pane_grid::State::new(pane::State::default());
+
+        let popout_win_id = window::Id::unique();
+
+        let mut popout_map = HashMap::new();
+        popout_map.insert(popout_win_id, (popout_panes, WindowSpec::default()));
+
+        let mut dashboard = Dashboard {
+            panes: main_panes,
+            focus: None,
+            last_focused_kline: None,
+            streams: UniqueStreams::default(),
+            popout: popout_map,
+            layout_id: uuid::Uuid::new_v4(),
+        };
+
+        // Split pane in popout window
+        let (new_popout_pane, _) = dashboard
+            .popout
+            .get_mut(&popout_win_id)
+            .unwrap()
+            .0
+            .split(pane_grid::Axis::Horizontal, popout_p1, pane::State::new())
+            .unwrap();
+
+        assert_eq!(dashboard.popout.get(&popout_win_id).unwrap().0.len(), 2);
+        assert_eq!(
+            dashboard.panes.len(),
+            1,
+            "Main grid must remain unaffected by popout split"
+        );
+
+        dashboard
+            .popout
+            .get_mut(&popout_win_id)
+            .unwrap()
+            .0
+            .maximize(new_popout_pane);
+
+        assert_eq!(
+            dashboard.panes.len(),
+            1,
+            "Main grid must remain unaffected by popout maximize"
+        );
     }
 }

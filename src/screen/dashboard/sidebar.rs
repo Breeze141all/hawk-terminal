@@ -283,6 +283,21 @@ impl Sidebar {
             buttons = buttons.push(journal_button);
         }
 
+        #[cfg(feature = "volume-search")]
+        if self.state.show_volume_search {
+            let is_active = self.is_menu_active(sidebar::Menu::VolumeSearch);
+            let volume_search_button = button_with_tooltip(
+                icon_text(Icon::Sort, 14)
+                    .width(24)
+                    .align_x(Alignment::Center),
+                Message::ToggleSidebarMenu(Some(sidebar::Menu::VolumeSearch)),
+                Some("Пошук об'єму (Volume Search)"),
+                tooltip_position,
+                move |theme, status| crate::style::button::transparent(theme, status, is_active),
+            );
+            buttons = buttons.push(volume_search_button);
+        }
+
         buttons
             .push(space::vertical())
             .push(settings_modal_button)

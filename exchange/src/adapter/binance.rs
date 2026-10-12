@@ -1047,11 +1047,6 @@ pub fn connect_kline_stream(
         let mut state = State::Disconnected;
         let exchange = exchange_from_market_type(market);
 
-        let ticker_info_map = streams
-            .iter()
-            .map(|(ticker_info, _)| (ticker_info.ticker, *ticker_info))
-            .collect::<HashMap<Ticker, TickerInfo>>();
-
         let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
 
         loop {
@@ -1113,36 +1108,31 @@ pub fn connect_kline_stream(
                                     }
                                 };
 
-                                if let Some((_, tf)) = streams
-                                    .iter()
-                                    .find(|(_, tf)| tf.to_string() == de_kline.interval)
-                                {
-                                    if let Some(info) = ticker_info_map.get(&ticker) {
-                                        let ticker_info = *info;
-                                        let timeframe = *tf;
+                                if let Some((target_ti, tf)) = streams.iter().find(|(ti, tf)| {
+                                    ti.ticker == ticker && tf.to_string() == de_kline.interval
+                                }) {
+                                    let ticker_info = *target_ti;
+                                    let timeframe = *tf;
 
-                                        let kline = Kline::new(
-                                            de_kline.time,
-                                            de_kline.open,
-                                            de_kline.high,
-                                            de_kline.low,
-                                            de_kline.close,
-                                            (buy_volume, sell_volume),
-                                            info.min_ticksize,
-                                        );
+                                    let kline = Kline::new(
+                                        de_kline.time,
+                                        de_kline.open,
+                                        de_kline.high,
+                                        de_kline.low,
+                                        de_kline.close,
+                                        (buy_volume, sell_volume),
+                                        ticker_info.min_ticksize,
+                                    );
 
-                                        let _ = output
-                                            .send(Event::KlineReceived(
-                                                StreamKind::Kline {
-                                                    ticker_info,
-                                                    timeframe,
-                                                },
-                                                kline,
-                                            ))
-                                            .await;
-                                    } else {
-                                        log::error!("Ticker info not found for ticker: {}", ticker);
-                                    }
+                                    let _ = output
+                                        .send(Event::KlineReceived(
+                                            StreamKind::Kline {
+                                                ticker_info,
+                                                timeframe,
+                                            },
+                                            kline,
+                                        ))
+                                        .await;
                                 }
                             }
                         }
@@ -1702,25 +1692,25 @@ pub async fn fetch_historical_oi(
     if let Some((start, end)) = range {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("Could not get system time")
+            .unwrap_or_default()
             .as_millis() as u64;
 
-        // API is limited to 30 days of historical data
-        let thirty_days_ago = now_ms.saturating_sub(THIRTY_DAYS_MS);
+        // API is limited to ~30 days of historical data (safe retention window)
+        let retention_start = now_ms.saturating_sub(THIRTY_DAYS_MS);
 
-        if end <= thirty_days_ago {
+        if end <= retention_start {
             return Ok(Vec::new());
         }
 
         let end = end.min(now_ms);
 
-        let adjusted_start = if start < thirty_days_ago {
+        let adjusted_start = if start < retention_start {
             log::debug!(
-                "Adjusting start time from {} to {} (30 days limit)",
+                "Adjusting start time from {} to {} (retention limit)",
                 start,
-                thirty_days_ago
+                retention_start
             );
-            thirty_days_ago
+            retention_start
         } else {
             start
         };
@@ -1757,6 +1747,16 @@ pub async fn fetch_historical_oi(
                     api_err.code,
                     api_err.msg
                 );
+                // Binance returns code -1130 ("parameter 'startTime' is invalid.") when the requested
+                // startTime falls outside its supported historical retention window.
+                // Rather than failing with an error dialog in the UI, treat as empty history.
+                if api_err.code == -1130 && api_err.msg.contains("startTime") {
+                    log::warn!(
+                        "Binance OI startTime is outside valid retention window; returning empty dataset: {}",
+                        api_err.msg
+                    );
+                    return Ok(Vec::new());
+                }
                 return Err(AdapterError::InvalidRequest(format!(
                     "Binance API error ({}): {}",
                     api_err.code, api_err.msg
@@ -1819,14 +1819,26 @@ async fn fetch_trades_from_intraday_cache_or_rest(
                 }
                 return Ok((new_trades, next_from));
             } else {
-                return Ok(slice_cached_trades(&cached, 0, 60_000, 1000));
+                let next_from = from_time
+                    .saturating_add(crate::trades::cache::INTRADAY_MAX_GAP_MS)
+                    .min(t_first);
+                if next_from < t_first {
+                    return Ok((Vec::new(), next_from));
+                }
+                return Ok(slice_cached_trades(
+                    &cached,
+                    0,
+                    crate::trades::cache::INTRADAY_MAX_GAP_MS,
+                    1000,
+                ));
             }
         }
 
         if from_time <= t_last {
             let start_idx = cached.partition_point(|t| t.time < from_time);
             let in_gap = start_idx < cached.len()
-                && cached[start_idx].time.saturating_sub(from_time) > 60_000;
+                && cached[start_idx].time.saturating_sub(from_time)
+                    > crate::trades::cache::INTRADAY_MAX_GAP_MS;
 
             if in_gap {
                 let target_end = cached[start_idx].time;
@@ -1850,8 +1862,17 @@ async fn fetch_trades_from_intraday_cache_or_rest(
                 }
             }
 
-            return Ok(slice_cached_trades(&cached, start_idx, 60_000, 1000));
+            return Ok(slice_cached_trades(
+                &cached,
+                start_idx,
+                crate::trades::cache::INTRADAY_MAX_GAP_MS,
+                1000,
+            ));
         }
+    }
+
+    if crate::trades::coordinator::COORDINATOR.is_tip_fresh(ticker_info.ticker, from_time) {
+        return Ok((Vec::new(), day_end_fallback));
     }
 
     let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
@@ -1859,6 +1880,16 @@ async fn fetch_trades_from_intraday_cache_or_rest(
         .last()
         .map(|t| t.time.saturating_add(1))
         .unwrap_or(day_end_fallback);
+
+    let now_ms = crate::clock::server_time_ms(Some(ticker_info.exchange()));
+    let t = new_trades.last().map(|t| t.time).unwrap_or(from_time);
+    if new_trades.len() < 1000 && t >= now_ms.saturating_sub(120_000) {
+        crate::trades::coordinator::COORDINATOR.record_tip_poll(
+            ticker_info.ticker,
+            from_time,
+            new_trades.last().map(|t| t.time),
+        );
+    }
 
     if !new_trades.is_empty() {
         let _ = save_intraday_trades_to_cache_buffered(
@@ -1879,16 +1910,18 @@ pub async fn fetch_trades(
     from_time: u64,
     data_path: PathBuf,
 ) -> Result<(Vec<Trade>, u64), AdapterError> {
-    let today_date = chrono::Utc::now().date_naive();
-    let today_midnight = today_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let today_midnight = crate::clock::today_midnight_ms(Some(ticker_info.exchange()));
+    let today_date = chrono::DateTime::from_timestamp_millis(today_midnight as i64)
+        .map(|dt| dt.date_naive())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive());
 
-    if from_time as i64 >= today_midnight.timestamp_millis() {
+    if from_time >= today_midnight {
         return fetch_trades_from_intraday_cache_or_rest(
             ticker_info,
             from_time,
             today_date,
             &data_path,
-            from_time.saturating_add(60_000),
+            from_time.saturating_add(crate::trades::cache::INTRADAY_MAX_GAP_MS),
         )
         .await;
     }
@@ -1905,12 +1938,7 @@ pub async fn fetch_trades(
         .and_utc()
         .timestamp_millis() as u64;
 
-    let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
-    let max_days: i64 = if symbol.to_uppercase().starts_with("BTC") {
-        130
-    } else {
-        30
-    };
+    let max_days = crate::fetcher::trade_history_lookback_days() as i64;
     let cutoff_date = chrono::Utc::now().date_naive() - chrono::Duration::days(max_days);
     if from_date < cutoff_date {
         return Ok((Vec::new(), next_day_start));
@@ -1978,7 +2006,28 @@ pub async fn fetch_trades(
     }
 }
 
+type AggTradesSingleFlight = crate::trades::coordinator::SingleFlight<
+    (Ticker, u64, Option<u64>),
+    Result<Vec<Trade>, AdapterError>,
+>;
+
+static AGG_TRADES_SINGLE_FLIGHT: LazyLock<AggTradesSingleFlight> =
+    LazyLock::new(crate::trades::coordinator::SingleFlight::new);
+
 pub async fn fetch_intraday_trades_raw(
+    ticker_info: TickerInfo,
+    from: u64,
+    to: Option<u64>,
+) -> Result<Vec<Trade>, AdapterError> {
+    let key = (ticker_info.ticker, from, to);
+    AGG_TRADES_SINGLE_FLIGHT
+        .execute(key, move || async move {
+            fetch_intraday_trades_raw_inner(ticker_info, from, to).await
+        })
+        .await
+}
+
+async fn fetch_intraday_trades_raw_inner(
     ticker_info: TickerInfo,
     from: u64,
     to: Option<u64>,
@@ -1994,15 +2043,41 @@ pub async fn fetch_intraday_trades_raw(
 
     let mut url = format!("{base_url}?symbol={symbol_str}&limit=1000&startTime={from}");
     if let Some(to_time) = to {
-        url.push_str(&format!("&endTime={to_time}"));
+        let clamped_to = to_time.min(from.saturating_add(3_600_000 - 1));
+        if clamped_to > from {
+            url.push_str(&format!("&endTime={clamped_to}"));
+        }
     }
 
     let limiter = limiter_from_market_type(market_type);
     let text = crate::limiter::http_request_with_limiter(&url, limiter, weight, None, None).await?;
 
     let trades: Vec<Trade> = {
-        let de_trades: Vec<SonicTrade> = sonic_rs::from_str(&text)
-            .map_err(|e| AdapterError::ParseError(format!("Failed to parse trades: {e}")))?;
+        let de_trades: Vec<SonicTrade> = match sonic_rs::from_str(&text) {
+            Ok(trades) => trades,
+            Err(e) => {
+                #[derive(serde::Deserialize)]
+                struct BinanceApiError {
+                    code: i64,
+                    msg: String,
+                }
+                if let Ok(api_err) = serde_json::from_str::<BinanceApiError>(&text) {
+                    log::error!(
+                        "Binance aggTrades API error for {}: ({}) {}",
+                        url,
+                        api_err.code,
+                        api_err.msg
+                    );
+                    return Err(AdapterError::InvalidRequest(format!(
+                        "Binance aggTrades API error ({}): {}",
+                        api_err.code, api_err.msg
+                    )));
+                }
+                return Err(AdapterError::ParseError(format!(
+                    "Failed to parse trades: {e}"
+                )));
+            }
+        };
 
         let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
 
@@ -2032,13 +2107,39 @@ pub async fn fetch_intraday_trades(
 }
 
 pub use crate::trades::cache::{
-    BINARY_CACHE_MAGIC, TRADE_RECORD_SIZE, USE_BINARY_CACHE, decode_trades_binary,
-    encode_trades_binary, find_gap_index, flush_all_intraday_trades_cache,
+    BINARY_CACHE_MAGIC, INTRADAY_MAX_GAP_MS, TRADE_RECORD_SIZE, USE_BINARY_CACHE,
+    decode_trades_binary, encode_trades_binary, find_gap_index, flush_all_intraday_trades_cache,
     flush_intraday_trades_cache, intraday_raw_trade_bin_path, load_intraday_trades_from_cache,
     load_raw_trades_from_cache, merge_intraday_trades, merge_intraday_trades_with_diff,
     raw_trade_bin_path, raw_trade_subpath, save_intraday_trades_to_cache,
     save_intraday_trades_to_cache_buffered, save_raw_trades_to_cache, slice_cached_trades,
 };
+
+pub(crate) fn parse_binance_csv_record(
+    record: &csv::StringRecord,
+    ticker_info: &TickerInfo,
+    size_in_quote_ccy: bool,
+) -> Option<Trade> {
+    let time = record.get(5)?.parse::<u64>().ok()?;
+    let is_sell = record.get(6)?.parse::<bool>().ok()?;
+    let price_f32 = str_f32_parse(record.get(1)?);
+
+    let price = Price::from_f32(price_f32).round_to_min_tick(ticker_info.min_ticksize);
+
+    let qty_f32 = str_f32_parse(record.get(2)?);
+    let qty = if size_in_quote_ccy {
+        (qty_f32 * price_f32).round()
+    } else {
+        qty_f32
+    };
+
+    Some(Trade {
+        time,
+        is_sell,
+        price,
+        qty,
+    })
+}
 
 pub async fn get_hist_trades(
     ticker_info: TickerInfo,
@@ -2064,9 +2165,11 @@ pub async fn get_hist_trades(
                     let is_full = date.and_hms_opt(0, 0, 0).is_some_and(|dt| {
                         let day_start = dt.and_utc().timestamp_millis() as u64;
                         let day_end = day_start + 86_400_000 - 1;
-                        !trades.is_empty()
-                            && trades.first().map(|t| t.time).unwrap_or(0) <= day_start + 600_000
-                            && trades.last().map(|t| t.time).unwrap_or(0) >= day_end - 600_000
+                        let first_t = trades.first().map(|t| t.time).unwrap_or(0);
+                        let last_t = trades.last().map(|t| t.time).unwrap_or(0);
+                        let starts_near_open = first_t <= day_start + 600_000;
+                        let reaches_day_end = last_t >= day_end.saturating_sub(600_000);
+                        !trades.is_empty() && (starts_near_open || reaches_day_end)
                     });
 
                     if is_full {
@@ -2169,31 +2272,12 @@ pub async fn get_hist_trades(
 
                 let mut csv_reader = ReaderBuilder::new()
                     .has_headers(false)
+                    .flexible(true)
                     .from_reader(BufReader::new(csv_file));
 
                 trades.extend(csv_reader.records().filter_map(|record| {
-                    record.ok().and_then(|record| {
-                        let time = record[5].parse::<u64>().ok()?;
-                        let is_sell = record[6].parse::<bool>().ok()?;
-                        let price_f32 = str_f32_parse(&record[1]);
-
-                        let price =
-                            Price::from_f32(price_f32).round_to_min_tick(ticker_info.min_ticksize);
-
-                        let mut qty = str_f32_parse(&record[2]);
-
-                        qty = if size_in_quote_ccy {
-                            (qty * price_f32).round()
-                        } else {
-                            qty
-                        };
-
-                        Some(Trade {
-                            time,
-                            is_sell,
-                            price,
-                            qty,
-                        })
+                    record.ok().and_then(|rec| {
+                        parse_binance_csv_record(&rec, &ticker_info, size_in_quote_ccy)
                     })
                 }));
             }
@@ -2558,6 +2642,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_historical_oi_clamps_old_start_without_error() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let old_time = now_ms.saturating_sub(40 * 24 * 60 * 60 * 1000); // 40 days ago
+
+        let result = fetch_historical_oi(ticker, Some((old_time, now_ms)), Timeframe::H1).await;
+        assert!(result.is_ok(), "Expected Ok result, got {:?}", result);
+        let oi = result.unwrap();
+        assert!(!oi.is_empty(), "Expected OI records to be returned");
+    }
+
+    #[tokio::test]
     async fn test_connect_kline_stream_receives_kline() {
         use iced_futures::futures::StreamExt;
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
@@ -2640,5 +2739,133 @@ mod tests {
         let (batch3, next3) = slice_cached_trades(&trades, 2000, 60_000, 1000);
         assert_eq!(batch3.len(), 500);
         assert_eq!(next3, 1000 + 2500);
+    }
+
+    #[test]
+    fn test_slice_cached_trades_detects_sub_minute_gap() {
+        let trades = vec![
+            Trade {
+                time: 1000,
+                price: Price::from_f32(50000.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: 1000 + INTRADAY_MAX_GAP_MS + 500, // Gap > INTRADAY_MAX_GAP_MS (60s)
+                price: Price::from_f32(50010.0),
+                qty: 1.0,
+                is_sell: true,
+            },
+        ];
+
+        let (batch, next_from) = slice_cached_trades(&trades, 0, INTRADAY_MAX_GAP_MS, 1000);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].time, 1000);
+        assert_eq!(next_from, 1001);
+    }
+
+    #[test]
+    fn test_slice_cached_trades_allows_normal_market_pause_under_one_minute() {
+        let trades = vec![
+            Trade {
+                time: 1000,
+                price: Price::from_f32(50000.0),
+                qty: 1.0,
+                is_sell: false,
+            },
+            Trade {
+                time: 1000 + 25_000, // 25s normal market pause (< 60s max gap)
+                price: Price::from_f32(50010.0),
+                qty: 1.0,
+                is_sell: true,
+            },
+        ];
+
+        let (batch, next_from) = slice_cached_trades(&trades, 0, INTRADAY_MAX_GAP_MS, 1000);
+        assert_eq!(
+            batch.len(),
+            2,
+            "Normal pause should not prematurely cut off trade slice"
+        );
+        assert_eq!(batch[0].time, 1000);
+        assert_eq!(batch[1].time, 1000 + 25_000);
+        assert_eq!(next_from, 1000 + 25_000 + 1);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_intraday_trades_raw_clamps_excessive_time_range() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let from = now_ms.saturating_sub(7_200_000); // 2 hours ago
+        let to = Some(now_ms); // 2 hours range (> 1 hour Binance limit)
+
+        let result = fetch_intraday_trades_raw(ticker_info, from, to).await;
+        assert!(
+            result.is_ok(),
+            "Expected Ok result with clamped 1h range, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_binance_agg_trades_error_deserialization() {
+        let err_json = r#"{"code":-1121,"msg":"Invalid symbol."}"#;
+        #[derive(serde::Deserialize)]
+        struct BinanceApiError {
+            code: i64,
+            msg: String,
+        }
+        let parsed = serde_json::from_str::<BinanceApiError>(err_json);
+        assert!(parsed.is_ok());
+        let err = parsed.unwrap();
+        assert_eq!(err.code, -1121);
+        assert_eq!(err.msg, "Invalid symbol.");
+    }
+
+    #[test]
+    fn test_ex02_binance_csv_malformed_rows_safe() {
+        let csv_data = "
+# Comment line
+1,60000.0,0.5
+2,60001.0,1.0,extra,stuff,1789600000000,true
+invalid,row
+";
+        let mut reader = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(csv_data.as_bytes());
+        let ticker_info = TickerInfo::new(
+            Ticker::new("BTCUSDT", Exchange::BinanceLinear),
+            0.1,
+            0.001,
+            None,
+        );
+
+        let parsed: Vec<Trade> = reader
+            .records()
+            .filter_map(|r| {
+                r.ok()
+                    .and_then(|rec| parse_binance_csv_record(&rec, &ticker_info, false))
+            })
+            .collect();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].time, 1789600000000);
+        assert!(parsed[0].is_sell);
+    }
+
+    #[test]
+    fn test_ex03_system_time_backwards_safe() {
+        let past = std::time::UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(100))
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let duration = past
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        assert_eq!(duration.as_millis(), 0);
     }
 }

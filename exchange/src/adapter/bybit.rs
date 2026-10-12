@@ -31,8 +31,9 @@ use std::{
 };
 
 use crate::trades::cache::{
-    USE_BINARY_CACHE, load_intraday_trades_from_cache, load_raw_trades_from_cache,
-    save_intraday_trades_to_cache, save_raw_trades_to_cache, slice_cached_trades,
+    INTRADAY_MAX_GAP_MS, USE_BINARY_CACHE, load_intraday_trades_from_cache,
+    load_raw_trades_from_cache, save_intraday_trades_to_cache, save_raw_trades_to_cache,
+    slice_cached_trades,
 };
 
 const WS_DOMAIN: &str = "stream.bybit.com";
@@ -286,6 +287,7 @@ async fn try_connect(
                 )))
                 .await
             {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 let _ = output
                     .send(Event::Disconnected(
                         exchange,
@@ -330,6 +332,9 @@ pub fn connect_market_stream(
         let size_in_quote_ccy =
             volume_size_unit() == SizeUnit::Quote && market_type != MarketKind::InversePerps;
 
+        let mut flush_interval = tokio::time::interval(tokio::time::Duration::from_millis(30));
+        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             match &mut state {
                 State::Disconnected => {
@@ -359,115 +364,134 @@ pub fn connect_market_stream(
                     });
                     state = try_connect(&subscribe_message, market_type, &mut output).await;
                 }
-                State::Connected(websocket) => match websocket.read_frame().await {
-                    Ok(msg) => match msg.opcode {
-                        OpCode::Text => {
-                            if let Ok(data) = feed_de(&msg.payload[..], Some(ticker), market_type) {
-                                match data {
-                                    StreamData::Trade(de_trade_vec) => {
-                                        for de_trade in &de_trade_vec {
-                                            let price = Price::from_f32(de_trade.price)
-                                                .round_to_min_tick(ticker_info.min_ticksize);
-                                            let qty = if size_in_quote_ccy {
-                                                (de_trade.qty * de_trade.price).round()
-                                            } else {
-                                                de_trade.qty
-                                            };
-
-                                            let trade = Trade {
-                                                time: de_trade.time,
-                                                is_sell: de_trade.is_sell == "Sell",
-                                                price,
-                                                qty,
-                                            };
-
-                                            trades_buffer.push(trade);
-                                        }
-                                    }
-                                    StreamData::Depth(de_depth, data_type, time) => {
-                                        let depth = DepthPayload {
-                                            last_update_id: de_depth.update_id,
-                                            time,
-                                            bids: de_depth
-                                                .bids
-                                                .iter()
-                                                .map(|x| DeOrder {
-                                                    price: x.price,
-                                                    qty: if size_in_quote_ccy {
-                                                        (x.qty * x.price).round()
+                State::Connected(websocket) => {
+                    tokio::select! {
+                        frame_res = websocket.read_frame() => match frame_res {
+                            Ok(msg) => match msg.opcode {
+                                OpCode::Text => {
+                                    if let Ok(data) = feed_de(&msg.payload[..], Some(ticker), market_type) {
+                                        match data {
+                                            StreamData::Trade(de_trade_vec) => {
+                                                for de_trade in &de_trade_vec {
+                                                    let price = Price::from_f32(de_trade.price)
+                                                        .round_to_min_tick(ticker_info.min_ticksize);
+                                                    let qty = if size_in_quote_ccy {
+                                                        (de_trade.qty * de_trade.price).round()
                                                     } else {
-                                                        x.qty
-                                                    },
-                                                })
-                                                .collect(),
-                                            asks: de_depth
-                                                .asks
-                                                .iter()
-                                                .map(|x| DeOrder {
-                                                    price: x.price,
-                                                    qty: if size_in_quote_ccy {
-                                                        (x.qty * x.price).round()
-                                                    } else {
-                                                        x.qty
-                                                    },
-                                                })
-                                                .collect(),
-                                        };
+                                                        de_trade.qty
+                                                    };
 
-                                        if (data_type == "snapshot") || (depth.last_update_id == 1)
-                                        {
-                                            orderbook.update(
-                                                DepthUpdate::Snapshot(depth),
-                                                ticker_info.min_ticksize,
-                                            );
-                                        } else if data_type == "delta" {
-                                            orderbook.update(
-                                                DepthUpdate::Diff(depth),
-                                                ticker_info.min_ticksize,
-                                            );
+                                                    let trade = Trade {
+                                                        time: de_trade.time,
+                                                        is_sell: de_trade.is_sell == "Sell",
+                                                        price,
+                                                        qty,
+                                                    };
 
-                                            let _ = output
-                                                .send(Event::DepthReceived(
-                                                    StreamKind::DepthAndTrades {
-                                                        ticker_info,
-                                                        depth_aggr: StreamTicksize::Client,
-                                                        push_freq,
-                                                    },
+                                                    trades_buffer.push(trade);
+                                                }
+                                            }
+                                            StreamData::Depth(de_depth, data_type, time) => {
+                                                let depth = DepthPayload {
+                                                    last_update_id: de_depth.update_id,
                                                     time,
-                                                    orderbook.depth.clone(),
-                                                    std::mem::take(&mut trades_buffer)
-                                                        .into_boxed_slice(),
-                                                ))
-                                                .await;
+                                                    bids: de_depth
+                                                        .bids
+                                                        .iter()
+                                                        .map(|x| DeOrder {
+                                                            price: x.price,
+                                                            qty: if size_in_quote_ccy {
+                                                                (x.qty * x.price).round()
+                                                            } else {
+                                                                x.qty
+                                                            },
+                                                        })
+                                                        .collect(),
+                                                    asks: de_depth
+                                                        .asks
+                                                        .iter()
+                                                        .map(|x| DeOrder {
+                                                            price: x.price,
+                                                            qty: if size_in_quote_ccy {
+                                                                (x.qty * x.price).round()
+                                                            } else {
+                                                                x.qty
+                                                            },
+                                                        })
+                                                        .collect(),
+                                                };
+
+                                                if (data_type == "snapshot") || (depth.last_update_id == 1)
+                                                {
+                                                    orderbook.update(
+                                                        DepthUpdate::Snapshot(depth),
+                                                        ticker_info.min_ticksize,
+                                                    );
+                                                } else if data_type == "delta" {
+                                                    orderbook.update(
+                                                        DepthUpdate::Diff(depth),
+                                                        ticker_info.min_ticksize,
+                                                    );
+
+                                                    let _ = output
+                                                        .send(Event::DepthReceived(
+                                                            StreamKind::DepthAndTrades {
+                                                                ticker_info,
+                                                                depth_aggr: StreamTicksize::Client,
+                                                                push_freq,
+                                                            },
+                                                            time,
+                                                            orderbook.depth.clone(),
+                                                            std::mem::take(&mut trades_buffer)
+                                                                .into_boxed_slice(),
+                                                        ))
+                                                        .await;
+                                                }
+                                            }
+                                            _ => {
+                                                log::warn!("Unknown data received");
+                                            }
                                         }
-                                    }
-                                    _ => {
-                                        log::warn!("Unknown data received");
                                     }
                                 }
+                                OpCode::Close => {
+                                    state = State::Disconnected;
+                                    let _ = output
+                                        .send(Event::Disconnected(
+                                            exchange,
+                                            "Connection closed".to_string(),
+                                        ))
+                                        .await;
+                                }
+                                _ => {}
+                            },
+                            Err(e) => {
+                                state = State::Disconnected;
+                                let _ = output
+                                    .send(Event::Disconnected(
+                                        exchange,
+                                        "Error reading frame: ".to_string() + &e.to_string(),
+                                    ))
+                                    .await;
                             }
-                        }
-                        OpCode::Close => {
-                            state = State::Disconnected;
+                        },
+                        _ = flush_interval.tick(), if !trades_buffer.is_empty() => {
+                            let latest_time = trades_buffer.last().map(|t| t.time).unwrap_or(0);
                             let _ = output
-                                .send(Event::Disconnected(
-                                    exchange,
-                                    "Connection closed".to_string(),
+                                .send(Event::DepthReceived(
+                                    StreamKind::DepthAndTrades {
+                                        ticker_info,
+                                        depth_aggr: StreamTicksize::Client,
+                                        push_freq,
+                                    },
+                                    latest_time,
+                                    orderbook.depth.clone(),
+                                    std::mem::take(&mut trades_buffer).into_boxed_slice(),
                                 ))
                                 .await;
                         }
-                        _ => {}
-                    },
-                    Err(e) => {
-                        state = State::Disconnected;
-                        let _ = output
-                            .send(Event::Disconnected(
-                                exchange,
-                                "Error reading frame: ".to_string() + &e.to_string(),
-                            ))
-                            .await;
                     }
-                },
+                }
             }
         }
     })
@@ -646,7 +670,7 @@ pub async fn fetch_historical_oi(
     if let Some((start, end)) = range {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("Could not get system time")
+            .unwrap_or_default()
             .as_millis() as u64;
         let end = end.min(now_ms);
         if start >= end {
@@ -674,6 +698,16 @@ pub async fn fetch_historical_oi(
         );
         AdapterError::ParseError(e.to_string())
     })?;
+
+    if let Some(ret_code) = content["retCode"].as_i64()
+        && ret_code != 0
+    {
+        let ret_msg = content["retMsg"].as_str().unwrap_or("Unknown error");
+        log::error!("Bybit open-interest error {ret_code}: {ret_msg} (url: {url})");
+        return Err(AdapterError::InvalidRequest(format!(
+            "Bybit error {ret_code}: {ret_msg}"
+        )));
+    }
 
     let result_list = content["result"]["list"].as_array().ok_or_else(|| {
         log::error!("Result list is not an array in response: {}", response_text);
@@ -712,18 +746,22 @@ pub async fn fetch_historical_oi(
 #[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct ApiResponse {
-    #[serde(rename = "retCode")]
-    ret_code: u32,
-    #[serde(rename = "retMsg")]
+    #[serde(rename = "retCode", default)]
+    ret_code: i32,
+    #[serde(rename = "retMsg", default)]
     ret_msg: String,
-    result: ApiResult,
+    #[serde(default)]
+    result: Option<ApiResult>,
 }
 
 #[allow(dead_code)]
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Default)]
 struct ApiResult {
+    #[serde(default)]
     symbol: String,
+    #[serde(default)]
     category: String,
+    #[serde(default)]
     list: Vec<Vec<Value>>,
 }
 
@@ -766,8 +804,11 @@ pub async fn fetch_klines(
     );
 
     if let Some((start, end)) = range {
-        let interval_ms = timeframe.to_milliseconds();
-        let num_intervals = ((end - start) / interval_ms).min(1000);
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        let interval_ms = timeframe.to_milliseconds().max(1);
+        let num_intervals = ((end.saturating_sub(start)) / interval_ms).clamp(1, 1000);
 
         url.push_str(&format!("&start={start}&end={end}&limit={num_intervals}"));
     } else {
@@ -777,14 +818,34 @@ pub async fn fetch_klines(
     let response: ApiResponse =
         limiter::http_parse_with_limiter(&url, &BYBIT_LIMITER, 1, None, None).await?;
 
+    if response.ret_code != 0 {
+        log::error!(
+            "Bybit klines error {}: {} (url: {url})",
+            response.ret_code,
+            response.ret_msg
+        );
+        return Err(AdapterError::InvalidRequest(format!(
+            "Bybit error {}: {}",
+            response.ret_code, response.ret_msg
+        )));
+    }
+
+    let Some(api_result) = response.result else {
+        return Ok(Vec::new());
+    };
+
     let size_in_quote_ccy =
         volume_size_unit() == SizeUnit::Quote && *market_type != MarketKind::InversePerps;
 
-    let klines: Result<Vec<Kline>, AdapterError> = response
-        .result
+    let klines: Result<Vec<Kline>, AdapterError> = api_result
         .list
         .iter()
         .map(|kline| {
+            if kline.len() < 6 {
+                return Err(AdapterError::ParseError(
+                    "Kline array too short".to_string(),
+                ));
+            }
             let time = parse_kline_field::<u64>(kline[0].as_str())?;
 
             let open = parse_kline_field::<f32>(kline[1].as_str())?;
@@ -840,6 +901,16 @@ pub async fn fetch_ticksize(
 
     let exchange_info: Value =
         sonic_rs::from_str(&response_text).map_err(|e| AdapterError::ParseError(e.to_string()))?;
+
+    if let Some(ret_code) = exchange_info["retCode"].as_i64()
+        && ret_code != 0
+    {
+        let ret_msg = exchange_info["retMsg"].as_str().unwrap_or("Unknown error");
+        log::error!("Bybit instruments-info error {ret_code}: {ret_msg} (url: {url})");
+        return Err(AdapterError::InvalidRequest(format!(
+            "Bybit error {ret_code}: {ret_msg}"
+        )));
+    }
 
     let result_list: &Vec<Value> = exchange_info["result"]["list"]
         .as_array()
@@ -915,6 +986,18 @@ pub async fn fetch_ticker_prices(
     let parsed_response: Value =
         limiter::http_parse_with_limiter(&url, &BYBIT_LIMITER, 1, None, None).await?;
 
+    if let Some(ret_code) = parsed_response["retCode"].as_i64()
+        && ret_code != 0
+    {
+        let ret_msg = parsed_response["retMsg"]
+            .as_str()
+            .unwrap_or("Unknown error");
+        log::error!("Bybit tickers error {ret_code}: {ret_msg} (url: {url})");
+        return Err(AdapterError::InvalidRequest(format!(
+            "Bybit error {ret_code}: {ret_msg}"
+        )));
+    }
+
     let result_list: &Vec<Value> = parsed_response["result"]["list"]
         .as_array()
         .ok_or_else(|| AdapterError::ParseError("Result list is not an array".to_string()))?;
@@ -980,13 +1063,19 @@ struct BybitRecentTradeItem {
 #[derive(serde::Deserialize, Debug)]
 #[allow(dead_code)]
 struct BybitRecentTradeResult {
+    #[serde(default)]
     pub list: Vec<BybitRecentTradeItem>,
 }
 
 #[derive(serde::Deserialize, Debug)]
 #[allow(dead_code)]
 struct BybitRecentTradeResponse {
-    pub result: BybitRecentTradeResult,
+    #[serde(rename = "retCode", default)]
+    pub ret_code: i32,
+    #[serde(rename = "retMsg", default)]
+    pub ret_msg: String,
+    #[serde(default)]
+    pub result: Option<BybitRecentTradeResult>,
 }
 
 pub async fn fetch_intraday_trades(
@@ -1010,10 +1099,25 @@ pub async fn fetch_intraday_trades(
     let parsed: BybitRecentTradeResponse =
         limiter::http_parse_with_limiter(&url, &BYBIT_LIMITER, 1, None, None).await?;
 
+    if parsed.ret_code != 0 {
+        log::error!(
+            "Bybit recent-trade error {}: {} (url: {url})",
+            parsed.ret_code,
+            parsed.ret_msg
+        );
+        return Err(AdapterError::InvalidRequest(format!(
+            "Bybit error {}: {}",
+            parsed.ret_code, parsed.ret_msg
+        )));
+    }
+
+    let Some(result) = parsed.result else {
+        return Ok(Vec::new());
+    };
+
     let size_in_quote_ccy = volume_size_unit() == SizeUnit::Quote;
 
-    let mut trades: Vec<Trade> = parsed
-        .result
+    let mut trades: Vec<Trade> = result
         .list
         .into_iter()
         .filter_map(|item| {
@@ -1230,14 +1334,14 @@ async fn fetch_trades_from_intraday_cache_or_rest(
                 );
                 return Ok((new_trades, next_from));
             } else {
-                return Ok(slice_cached_trades(&cached, 0, 60_000, 1000));
+                return Ok(slice_cached_trades(&cached, 0, INTRADAY_MAX_GAP_MS, 1000));
             }
         }
 
         if from_time <= t_last {
             let start_idx = cached.partition_point(|t| t.time < from_time);
             let in_gap = start_idx < cached.len()
-                && cached[start_idx].time.saturating_sub(from_time) > 60_000;
+                && cached[start_idx].time.saturating_sub(from_time) > INTRADAY_MAX_GAP_MS;
 
             if in_gap {
                 let new_trades = fetch_intraday_trades(ticker_info, from_time).await?;
@@ -1256,7 +1360,12 @@ async fn fetch_trades_from_intraday_cache_or_rest(
                 }
             }
 
-            return Ok(slice_cached_trades(&cached, start_idx, 60_000, 1000));
+            return Ok(slice_cached_trades(
+                &cached,
+                start_idx,
+                INTRADAY_MAX_GAP_MS,
+                1000,
+            ));
         }
     }
 
@@ -1286,7 +1395,7 @@ pub async fn fetch_trades(
             from_time,
             today_date,
             &data_path,
-            from_time.saturating_add(60_000),
+            from_time.saturating_add(INTRADAY_MAX_GAP_MS),
         )
         .await;
     }
@@ -1303,12 +1412,7 @@ pub async fn fetch_trades(
         .and_utc()
         .timestamp_millis() as u64;
 
-    let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
-    let max_days: i64 = if symbol.to_uppercase().starts_with("BTC") {
-        130
-    } else {
-        30
-    };
+    let max_days = crate::fetcher::trade_history_lookback_days() as i64;
     let cutoff_date = chrono::Utc::now().date_naive() - chrono::Duration::days(max_days);
     if from_date < cutoff_date {
         return Ok((Vec::new(), next_day_start));
@@ -1371,5 +1475,25 @@ mod tests {
             }
             _other => panic!("Expected InvalidRequest, got other result"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_bybit_fetch_klines_inverted_range_returns_empty() {
+        let ticker = Ticker::new("ETHUSDT", Exchange::BybitLinear);
+        let ticker_info = TickerInfo::new(ticker, 0.01, 0.001, None);
+        let res = fetch_klines(ticker_info, Timeframe::M15, Some((2000, 1000))).await;
+        assert!(res.is_ok());
+        assert!(res.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_bybit_api_response_deserializes_error_payload() {
+        let error_json = r#"{"retCode":10001,"retMsg":"Params error","result":{},"retExtInfo":{},"time":1791486234151}"#;
+        let resp: Result<ApiResponse, _> = serde_json::from_str(error_json);
+        assert!(resp.is_ok());
+        let resp = resp.unwrap();
+        assert_eq!(resp.ret_code, 10001);
+        assert_eq!(resp.ret_msg, "Params error");
+        assert!(resp.result.is_none() || resp.result.unwrap().list.is_empty());
     }
 }

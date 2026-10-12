@@ -3,7 +3,7 @@
 ; Output: Single executable setup file
 
 #define MyAppName "Hawk Terminal"
-#define MyAppVersion "0.9.4"
+#define MyAppVersion "0.9.5"
 #define MyAppPublisher "Breeze"
 #define MyAppURL "https://breeze141all.github.io/hawk-site/"
 #define MyAppExeName "hawk-terminal.exe"
@@ -40,9 +40,14 @@ Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "data\src\default_state.json"; DestDir: "{userappdata}\hawk-terminal"; DestName: "saved-state.json"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; AppUserModelID: "Hawk.Terminal"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon; AppUserModelID: "Hawk.Terminal"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Hawk.Terminal"; ValueType: string; ValueName: "DisplayName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Hawk.Terminal"; ValueType: string; ValueName: "IconUri"; ValueData: "{app}\icon.ico"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\AppUserModelId\Hawk.Terminal"; ValueType: dword; ValueName: "ShowInSettings"; ValueData: 1; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

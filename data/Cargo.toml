@@ -26,3 +26,7 @@ uuid.workspace = true
 log = { version = "0.4.22", default-features = true, features = ["std"] }
 thiserror = { version = "2.0.12", default-features = true, features = ["std"] }
 exchange = { version = "0.1.0", path = "../exchange", package = "hawk-exchange" }
+
+[features]
+default = []
+volume-search = []

@@ -42,10 +42,16 @@ pub struct State {
     pub scale_factor: ScaleFactor,
     pub audio_cfg: AudioStream,
     pub trade_fetch_enabled: bool,
+    #[serde(default = "default_trade_history_lookback_days")]
+    pub trade_history_lookback_days: u32,
     pub size_in_quote_ccy: exchange::SizeUnit,
     pub journal_mode: JournalMode,
     #[serde(default)]
     pub default_kline_config: Option<crate::chart::kline::Config>,
+}
+
+fn default_trade_history_lookback_days() -> u32 {
+    exchange::fetcher::DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS
 }
 
 impl State {
@@ -72,6 +78,7 @@ impl State {
             scale_factor,
             audio_cfg,
             trade_fetch_enabled: exchange::fetcher::is_trade_fetch_enabled(),
+            trade_history_lookback_days: exchange::fetcher::trade_history_lookback_days(),
             size_in_quote_ccy: volume_size_unit,
             journal_mode,
             default_kline_config,

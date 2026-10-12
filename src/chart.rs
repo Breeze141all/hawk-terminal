@@ -68,8 +68,11 @@ pub enum Message {
     SelectDrawing(Option<uuid::Uuid>),
     AddPriceAlert(f32),
     UpdateAlertPrice(uuid::Uuid, f32),
+    DeletePriceAlert(uuid::Uuid),
     ReplayCutoff(u64),
     AutofillPosition(data::journal::PositionAutofill),
+    UndoDrawing,
+    RedoDrawing,
 }
 
 pub trait Chart: PlotConstants + canvas::Program<Message> {
@@ -521,8 +524,11 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
         | Message::SelectDrawing(_)
         | Message::AddPriceAlert(_)
         | Message::UpdateAlertPrice(_, _)
+        | Message::DeletePriceAlert(_)
         | Message::ReplayCutoff(_)
-        | Message::AutofillPosition(_) => return,
+        | Message::AutofillPosition(_)
+        | Message::UndoDrawing
+        | Message::RedoDrawing => return,
     }
     chart.invalidate_all();
 }
@@ -945,10 +951,10 @@ impl ViewState {
                 .min_by(|(_, a), (_, b)| {
                     let da = (a.x - p2.x).hypot(a.y - p2.y);
                     let db = (b.x - p2.x).hypot(b.y - p2.y);
-                    da.partial_cmp(&db).unwrap()
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(i, &c)| (c, i))
-                .unwrap();
+                .unwrap_or((corners[0], 0));
 
             let text_padding = 8.0;
             let text_pos = match idx {
@@ -1263,5 +1269,34 @@ fn draw_volume_bar(
                 buy_color.scale_alpha(bar_color_alpha),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ter02_measurement_nan_distance_safe() {
+        let p2 = Point::new(100.0, 100.0);
+        let corners = [
+            Point::new(f32::NAN, 100.0),
+            Point::new(100.0, f32::NAN),
+            Point::new(f32::INFINITY, 100.0),
+            Point::new(100.0, 100.0),
+        ];
+
+        let min_result = corners
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.x - p2.x).hypot(a.y - p2.y);
+                let db = (b.x - p2.x).hypot(b.y - p2.y);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, &c)| (c, i))
+            .unwrap_or((corners[0], 0));
+
+        assert!(min_result.1 < 4);
     }
 }

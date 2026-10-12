@@ -93,7 +93,19 @@ pub fn compute_display_data(
     }
 }
 
-fn split_price_changes(
+/// Compute common prefix byte boundary safe across all UTF-8 characters.
+pub fn split_price_str<'a>(prev_str: &'a str, curr_str: &'a str) -> (&'a str, &'a str) {
+    let mut split_byte_idx = 0;
+    for ((byte_idx, c1), (_, c2)) in curr_str.char_indices().zip(prev_str.char_indices()) {
+        if c1 != c2 {
+            break;
+        }
+        split_byte_idx = byte_idx + c1.len_utf8();
+    }
+    (&curr_str[..split_byte_idx], &curr_str[split_byte_idx..])
+}
+
+pub fn split_price_changes(
     previous_price: f32,
     current_price: f32,
 ) -> (String, String, PriceChangeDirection) {
@@ -114,23 +126,65 @@ fn split_price_changes(
         PriceChangeDirection::Decreased
     };
 
-    let mut split_index = 0;
-    let prev_chars: Vec<char> = prev_str.chars().collect();
-    let curr_chars: Vec<char> = curr_str.chars().collect();
+    let (unchanged_part, changed_part) = split_price_str(&prev_str, &curr_str);
+    (
+        unchanged_part.to_string(),
+        changed_part.to_string(),
+        direction,
+    )
+}
 
-    for (i, &curr_char) in curr_chars.iter().enumerate() {
-        if i >= prev_chars.len() || prev_chars[i] != curr_char {
-            split_index = i;
-            break;
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dat08_utf8_multibyte_split_safe() {
+        // Multi-byte Unicode currency symbols
+        let (unchanged, changed) = split_price_str("€123.45", "€123.89");
+        assert_eq!(unchanged, "€123.");
+        assert_eq!(changed, "89");
+
+        let (unchanged, changed) = split_price_str("¥1000", "¥1050");
+        assert_eq!(unchanged, "¥10");
+        assert_eq!(changed, "50");
+
+        let (unchanged, changed) = split_price_str("₴41.50", "₴41.75");
+        assert_eq!(unchanged, "₴41.");
+        assert_eq!(changed, "75");
+
+        // Unicode minus sign (\u{2212}, 3 bytes)
+        let (unchanged, changed) = split_price_str("−10.5", "−10.8");
+        assert_eq!(unchanged, "−10.");
+        assert_eq!(changed, "8");
+
+        // Differing lengths with mismatch at character 0
+        let (unchanged, changed) = split_price_str("20.0", "100.0");
+        assert_eq!(unchanged, "");
+        assert_eq!(changed, "100.0");
+
+        // Differing lengths with common prefix
+        let (unchanged, changed) = split_price_str("10", "10.5");
+        assert_eq!(unchanged, "10");
+        assert_eq!(changed, ".5");
+
+        let (unchanged, changed) = split_price_str("10.5", "10");
+        assert_eq!(unchanged, "10");
+        assert_eq!(changed, "");
+
+        // Identical and empty strings
+        let (unchanged, changed) = split_price_str("123.45", "123.45");
+        assert_eq!(unchanged, "123.45");
+        assert_eq!(changed, "");
+
+        let (unchanged, changed) = split_price_str("", "100.0");
+        assert_eq!(unchanged, "");
+        assert_eq!(changed, "100.0");
+
+        // Float-based split_price_changes integration test
+        let (unchanged, changed, dir) = split_price_changes(123.45, 123.89);
+        assert_eq!(dir, PriceChangeDirection::Increased);
+        assert_eq!(unchanged, "123.");
+        assert_eq!(changed, "89");
     }
-
-    if split_index == 0 && curr_chars.len() != prev_chars.len() {
-        split_index = prev_chars.len().min(curr_chars.len());
-    }
-
-    let unchanged_part = curr_str[..split_index].to_string();
-    let changed_part = curr_str[split_index..].to_string();
-
-    (unchanged_part, changed_part, direction)
 }

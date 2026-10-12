@@ -14,6 +14,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 pub use audio::AudioStream;
+#[cfg(feature = "volume-search")]
+pub use chart::volume_search;
 pub use config::ScaleFactor;
 pub use config::bundle::{
     BundleMetadata, BundlePayload, BundleValidationError, ConfigBundle, ExportType, WorkspaceBundle,
@@ -142,7 +144,14 @@ pub fn load_alerts() -> Vec<chart::alert::PriceAlert> {
     if file.read_to_string(&mut contents).is_err() {
         return Vec::new();
     }
-    serde_json::from_str(&contents).unwrap_or_default()
+    let mut alerts: Vec<chart::alert::PriceAlert> =
+        serde_json::from_str(&contents).unwrap_or_default();
+    for alert in &mut alerts {
+        if alert.status == chart::alert::AlertStatus::Active {
+            alert.triggered_at = None;
+        }
+    }
+    alerts
 }
 
 #[derive(thiserror::Error, Debug, Clone)]
@@ -164,8 +173,21 @@ pub fn write_json_to_file(json: &str, file_name: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut file = File::create(path)?;
-    file.write_all(json.as_bytes())?;
+    let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.flush()?;
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+            std::fs::rename(&tmp_path, &path).map_err(|_| e)?;
+        } else {
+            return Err(e);
+        }
+    }
     Ok(())
 }
 
@@ -297,14 +319,9 @@ fn cleanup_directory(data_path: &PathBuf) -> usize {
         }
     };
 
-    for entry in entries.filter_map(Result::ok) {
-        let symbol_name = entry.file_name().to_string_lossy().to_uppercase();
-        let max_days = if symbol_name.starts_with("BTC") {
-            130
-        } else {
-            30
-        };
+    let max_days = exchange::fetcher::trade_history_lookback_days() as i64;
 
+    for entry in entries.filter_map(Result::ok) {
         let symbol_dir = match std::fs::read_dir(entry.path()) {
             Ok(dir) => dir,
             Err(e) => {
@@ -419,5 +436,22 @@ mod tests {
         assert_eq!(content, dummy_json);
 
         let _ = std::fs::remove_file(saved);
+    }
+
+    #[test]
+    fn test_write_json_to_file_atomic() {
+        let test_file = format!("test_atomic_{}.json", uuid::Uuid::new_v4());
+        let data1 = r#"{"version": 1}"#;
+        let data2 = r#"{"version": 2}"#;
+
+        assert!(write_json_to_file(data1, &test_file).is_ok());
+        let read1 = std::fs::read_to_string(data_path(Some(&test_file))).unwrap();
+        assert_eq!(read1, data1);
+
+        assert!(write_json_to_file(data2, &test_file).is_ok());
+        let read2 = std::fs::read_to_string(data_path(Some(&test_file))).unwrap();
+        assert_eq!(read2, data2);
+
+        let _ = std::fs::remove_file(data_path(Some(&test_file)));
     }
 }
