@@ -176,67 +176,51 @@ impl TickAggr {
             return;
         }
 
-        // First, precompute low/high for each datapoint
-        let bounds: Vec<(Price, Price)> = self
+        // First, precompute low/high and poc_price for each datapoint
+        let bounds: Vec<(Price, Price, Option<Price>)> = self
             .datapoints
             .iter()
             .map(|dp| {
                 let low = dp.kline.low.round_to_side_step(true, self.tick_size);
                 let high = dp.kline.high.round_to_side_step(false, self.tick_size);
-                (low, high)
+                (low, high, dp.poc_price())
             })
             .collect();
 
-        // Track cumulative range
-        let mut cumulative_low: Option<Price> = None;
-        let mut cumulative_high: Option<Price> = None;
+        let mut active_unfilled: Vec<(usize, Price)> = Vec::with_capacity(64);
+        let mut status_updates: Vec<(usize, NPoc)> = Vec::with_capacity(total_points);
 
-        // Process from end to start
-        for i in (0..total_points).rev() {
-            let (dp_low, dp_high) = bounds[i];
-
-            // Check if this datapoint has a POC and determine its status
-            if let Some(poc_price) = self.datapoints[i].poc_price() {
-                let npoc =
-                    if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high) {
-                        if cum_low <= poc_price && cum_high >= poc_price {
-                            // POC was touched - find the earliest chronological touch index in future candles
-                            let first_touch = bounds[(i + 1)..total_points]
-                                .iter()
-                                .enumerate()
-                                .find(|(_, (low, high))| *low <= poc_price && *high >= poc_price)
-                                .map_or(total_points, |(offset, _)| i + 1 + offset);
-
-                            if first_touch < total_points {
-                                // Convert to reversed index for rendering
-                                let reversed_idx = (total_points - 1) - first_touch;
-                                let mut n = NPoc::default();
-                                n.filled(reversed_idx as u64);
-                                n
-                            } else {
-                                NPoc::Naked
-                            }
-                        } else {
-                            NPoc::Naked
-                        }
-                    } else {
-                        // No future candles to check against (this is the last candle)
-                        NPoc::default()
-                    };
-
-                self.datapoints[i].set_poc_status(npoc);
+        for (i, (low, high, poc_price)) in bounds.into_iter().enumerate() {
+            let mut j = 0;
+            while j < active_unfilled.len() {
+                let (candle_idx, poc) = active_unfilled[j];
+                if low <= poc && poc <= high {
+                    // Chronologically earliest touch by candle i
+                    let reversed_idx = (total_points - 1) - i;
+                    let mut n = NPoc::default();
+                    n.filled(reversed_idx as u64);
+                    status_updates.push((candle_idx, n));
+                    active_unfilled.swap_remove(j);
+                } else {
+                    j += 1;
+                }
             }
 
-            // Now update cumulative range to include this candle for the next iteration
-            cumulative_low = Some(match cumulative_low {
-                Some(cl) => cl.min(dp_low),
-                None => dp_low,
-            });
+            if let Some(poc) = poc_price {
+                active_unfilled.push((i, poc));
+            }
+        }
 
-            cumulative_high = Some(match cumulative_high {
-                Some(ch) => ch.max(dp_high),
-                None => dp_high,
-            });
+        for (candle_idx, _) in active_unfilled {
+            if candle_idx == total_points - 1 {
+                status_updates.push((candle_idx, NPoc::default()));
+            } else {
+                status_updates.push((candle_idx, NPoc::Naked));
+            }
+        }
+
+        for (candle_idx, npoc) in status_updates {
+            self.datapoints[candle_idx].set_poc_status(npoc);
         }
     }
 

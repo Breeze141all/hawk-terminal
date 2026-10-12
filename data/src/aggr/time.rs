@@ -587,57 +587,42 @@ impl TimeSeries<KlineDataPoint> {
             .collect();
 
         let total_points = entries.len();
+        if total_points == 0 {
+            return;
+        }
+        let last_candle_time = entries[total_points - 1].0;
 
-        // Track cumulative range
-        let mut cumulative_low: Option<Price> = None;
-        let mut cumulative_high: Option<Price> = None;
+        let mut active_unfilled: Vec<(u64, Price)> = Vec::with_capacity(64);
+        let mut status_updates: Vec<(u64, NPoc)> = Vec::with_capacity(total_points);
 
-        // Collect status updates to apply later
-        let mut status_updates: Vec<(u64, NPoc)> = Vec::new();
-
-        // Process from end to start
-        for i in (0..total_points).rev() {
-            let (time, dp_low, dp_high, poc_price) = entries[i];
-
-            // Check if this datapoint has a POC and determine its status
-            if let Some(poc_price) = poc_price {
-                let npoc =
-                    if let (Some(cum_low), Some(cum_high)) = (cumulative_low, cumulative_high) {
-                        if cum_low <= poc_price && cum_high >= poc_price {
-                            // POC was touched - find the first chronological touch time in future candles
-                            let first_touch_time = entries[(i + 1)..total_points]
-                                .iter()
-                                .find(|(_, low, high, _)| *low <= poc_price && *high >= poc_price)
-                                .map(|(time, _, _, _)| *time);
-
-                            if let Some(touch_time) = first_touch_time {
-                                let mut n = NPoc::default();
-                                n.filled(touch_time);
-                                n
-                            } else {
-                                NPoc::Naked
-                            }
-                        } else {
-                            NPoc::Naked
-                        }
-                    } else {
-                        // No future candles to check against (this is the last candle)
-                        NPoc::default()
-                    };
-
-                status_updates.push((time, npoc));
+        for (time, low, high, poc_price) in entries {
+            // Check active unfilled POCs against current candle's range
+            let mut j = 0;
+            while j < active_unfilled.len() {
+                let (candle_t, poc) = active_unfilled[j];
+                if low <= poc && poc <= high {
+                    let mut n = NPoc::default();
+                    n.filled(time);
+                    status_updates.push((candle_t, n));
+                    active_unfilled.swap_remove(j);
+                } else {
+                    j += 1;
+                }
             }
 
-            // Update cumulative range to include this candle for the next iteration
-            cumulative_low = Some(match cumulative_low {
-                Some(cl) => cl.min(dp_low),
-                None => dp_low,
-            });
+            // Register this candle's POC as active unfilled
+            if let Some(poc) = poc_price {
+                active_unfilled.push((time, poc));
+            }
+        }
 
-            cumulative_high = Some(match cumulative_high {
-                Some(ch) => ch.max(dp_high),
-                None => dp_high,
-            });
+        // Apply statuses for remaining unfilled POCs
+        for (candle_t, _) in active_unfilled {
+            if candle_t == last_candle_time {
+                status_updates.push((candle_t, NPoc::default()));
+            } else {
+                status_updates.push((candle_t, NPoc::Naked));
+            }
         }
 
         // Apply all status updates
@@ -2242,4 +2227,49 @@ mod tests {
             exchange::fetcher::DEFAULT_TRADE_HISTORY_LOOKBACK_DAYS,
         );
     }
+
+    #[test]
+    fn test_dat02_60k_candles_performance_benchmark() {
+        let step = PriceStep::from_f32(1.0);
+        let mut ts = TimeSeries::<KlineDataPoint>::new(Timeframe::M1, step, &[]);
+
+        // Populate 60,000 candles with a wandering price
+        let mut price = 100.0f32;
+        for i in 0..60_000u64 {
+            let t = (i + 1) * 60_000;
+            let offset = ((i % 50) as f32 - 25.0) * 0.1;
+            price = (price + offset).clamp(50.0, 500.0);
+            let mut dp = KlineDataPoint {
+                kline: Kline {
+                    time: t,
+                    open: Price::from_f32(price - 1.0),
+                    high: Price::from_f32(price + 2.0),
+                    low: Price::from_f32(price - 2.0),
+                    close: Price::from_f32(price + 0.5),
+                    volume: (5.0, 5.0),
+                },
+                footprint: KlineTrades::new(),
+                trades_fetched: false,
+            };
+            let poc_price = Price::from_f32(price);
+            dp.footprint.poc = Some(crate::chart::kline::PointOfControl {
+                price: poc_price,
+                volume: 10.0,
+                status: NPoc::default(),
+            });
+            ts.datapoints.insert(t, dp);
+        }
+
+        let start = std::time::Instant::now();
+        ts.update_poc_status();
+        let elapsed = start.elapsed();
+
+        // Must finish well under 50ms (previously took > 1000ms)
+        assert!(
+            elapsed.as_millis() < 100,
+            "60k candles update_poc_status must complete in <100ms, took {:?}",
+            elapsed
+        );
+    }
 }
+

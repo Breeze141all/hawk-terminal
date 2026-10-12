@@ -321,6 +321,32 @@ impl AlertStore {
         high: f32,
         current_price: f32,
     ) -> Vec<PriceAlert> {
+        let has_trigger = {
+            let alerts = read_alerts();
+            if alerts.is_empty() {
+                return Vec::new();
+            }
+            alerts.iter().any(|alert| {
+                if alert.status != AlertStatus::Active {
+                    return false;
+                }
+                let matches_symbol = alert.ticker_symbol.eq_ignore_ascii_case(symbol)
+                    || alert
+                        .ticker
+                        .as_ref()
+                        .map(|t| {
+                            t.as_str().eq_ignore_ascii_case(symbol)
+                                || t.display_symbol_and_type().0.eq_ignore_ascii_case(symbol)
+                        })
+                        .unwrap_or(false);
+                matches_symbol && alert.check_range_trigger(prev_price, low, high, current_price)
+            })
+        };
+
+        if !has_trigger {
+            return Vec::new();
+        }
+
         let mut triggered = Vec::new();
         let snapshot_to_save = {
             let mut alerts = write_alerts();

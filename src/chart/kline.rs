@@ -151,20 +151,15 @@ impl Chart for KlineChart {
 
     fn autoscaled_coords(&self) -> Vector {
         let chart = self.state();
-        let x_translation = match &self.kind {
-            KlineChartKind::Footprint { .. } => {
-                0.5 * (chart.bounds.width / chart.scaling) - (chart.cell_width / chart.scaling)
-            }
-            KlineChartKind::Candles => {
-                0.5 * (chart.bounds.width / chart.scaling)
-                    - (8.0 * chart.cell_width / chart.scaling)
-            }
-            KlineChartKind::Tpo { .. } => {
-                0.5 * (chart.bounds.width / chart.scaling)
-                    - (8.0 * chart.cell_width / chart.scaling)
-            }
+        let base_x = self.base_x();
+        let x_offset = if let Some(rep) = &self.replay
+            && rep.active
+        {
+            self.chart.interval_to_x(rep.cutoff_time)
+        } else {
+            0.0
         };
-        Vector::new(x_translation, chart.translation.y)
+        Vector::new(base_x - x_offset, chart.translation.y)
     }
 
     fn supports_fit_autoscaling(&self) -> bool {
@@ -333,6 +328,8 @@ pub struct KlineChart {
     last_tick: Instant,
     liquidation_heatmap: LiquidationHeatmap,
     pub(crate) tpo_cache: RefCell<TpoCache>,
+    pub(crate) simulated_footprint_cache:
+        RefCell<rustc_hash::FxHashMap<u64, (PriceStep, std::sync::Arc<KlineTrades>)>>,
     last_footprint_cache_save: Option<Instant>,
     pub drawings: Vec<Drawing>,
     pub undo_stack: Vec<DrawingHistoryAction>,
@@ -343,9 +340,58 @@ pub struct KlineChart {
     pub replay: Option<ReplayState>,
     pub expanded_indicator: Option<KlineIndicator>,
     pub(crate) history_lookback_input: String,
+    pub is_user_panning: bool,
 }
 
 impl KlineChart {
+    pub fn get_or_simulate_footprint(
+        &self,
+        kline: &exchange::Kline,
+        step: PriceStep,
+    ) -> std::sync::Arc<KlineTrades> {
+        let mut cache = self.simulated_footprint_cache.borrow_mut();
+        if let Some((cached_step, footprint)) = cache.get(&kline.time)
+            && *cached_step == step
+        {
+            return std::sync::Arc::clone(footprint);
+        }
+        if cache.len() > 10_000 {
+            cache.clear();
+        }
+        let sim = std::sync::Arc::new(KlineTrades::simulate_from_kline(kline, step));
+        cache.insert(kline.time, (step, std::sync::Arc::clone(&sim)));
+        sim
+    }
+    #[inline]
+    pub fn right_margin_offset(&self) -> f32 {
+        Self::calc_right_margin_offset(&self.kind, self.chart.cell_width, self.chart.scaling)
+    }
+
+    #[inline]
+    pub fn calc_right_margin_offset(kind: &KlineChartKind, cell_width: f32, scaling: f32) -> f32 {
+        let safe_scaling = scaling.max(0.01);
+        match kind {
+            KlineChartKind::Footprint { .. } => {
+                // Footprint cluster has width cell_width. Center is at 0.5 * cell_width.
+                // Keeping center offset at 0.5 * cell_width + 90.0 guarantees 90px of empty space
+                // between the right border of the cluster and the price scale ruler.
+                (cell_width * 0.5 + 90.0) / safe_scaling
+            }
+            KlineChartKind::Candles => {
+                // TradingView standard: 10 to 14 bars (~120 to 160 screen pixels of right margin padding).
+                (12.0 * cell_width.clamp(4.0, 8.0) + 72.0) / safe_scaling
+            }
+            KlineChartKind::Tpo { .. } => {
+                (8.0 * cell_width.clamp(4.0, 12.0) + 64.0) / safe_scaling
+            }
+        }
+    }
+
+    #[inline]
+    pub fn base_x(&self) -> f32 {
+        0.5 * (self.chart.bounds.width / self.chart.scaling) - self.right_margin_offset()
+    }
+
     pub fn new(
         layout: ViewConfig,
         basis: Basis,
@@ -420,20 +466,8 @@ impl KlineChart {
                 chart.base_price_y = base_price_y;
                 chart.latest_x = latest_x;
 
-                let x_translation = match &kind {
-                    KlineChartKind::Footprint { .. } => {
-                        0.5 * (chart.bounds.width / chart.scaling)
-                            - (chart.cell_width / chart.scaling)
-                    }
-                    KlineChartKind::Candles => {
-                        0.5 * (chart.bounds.width / chart.scaling)
-                            - (8.0 * chart.cell_width / chart.scaling)
-                    }
-                    KlineChartKind::Tpo { .. } => {
-                        0.5 * (chart.bounds.width / chart.scaling)
-                            - (8.0 * chart.cell_width / chart.scaling)
-                    }
-                };
+                let x_translation = 0.5 * (chart.bounds.width / chart.scaling)
+                    - Self::calc_right_margin_offset(kind, chart.cell_width, chart.scaling);
                 chart.translation.x = x_translation;
 
                 let data_source = PlotData::TimeBased(timeseries);
@@ -497,6 +531,7 @@ impl KlineChart {
                     last_tick: Instant::now(),
                     liquidation_heatmap,
                     tpo_cache: RefCell::new(TpoCache::default()),
+                    simulated_footprint_cache: RefCell::new(rustc_hash::FxHashMap::default()),
                     last_footprint_cache_save: None,
                     drawings: Vec::new(),
                     undo_stack: Vec::new(),
@@ -507,6 +542,7 @@ impl KlineChart {
                     replay: None,
                     expanded_indicator: None,
                     history_lookback_input: history_lookback_input.clone(),
+                    is_user_panning: false,
                 }
             }
             Basis::Tick(interval) => {
@@ -536,20 +572,8 @@ impl KlineChart {
                     cell_height,
                 );
 
-                let x_translation = match &kind {
-                    KlineChartKind::Footprint { .. } => {
-                        0.5 * (chart.bounds.width / chart.scaling)
-                            - (chart.cell_width / chart.scaling)
-                    }
-                    KlineChartKind::Candles => {
-                        0.5 * (chart.bounds.width / chart.scaling)
-                            - (8.0 * chart.cell_width / chart.scaling)
-                    }
-                    KlineChartKind::Tpo { .. } => {
-                        0.5 * (chart.bounds.width / chart.scaling)
-                            - (8.0 * chart.cell_width / chart.scaling)
-                    }
-                };
+                let x_translation = 0.5 * (chart.bounds.width / chart.scaling)
+                    - Self::calc_right_margin_offset(kind, chart.cell_width, chart.scaling);
                 chart.translation.x = x_translation;
 
                 let data_source = PlotData::TickBased(TickAggr::new(interval, step, &raw_trades));
@@ -593,6 +617,7 @@ impl KlineChart {
                     last_tick: Instant::now(),
                     liquidation_heatmap,
                     tpo_cache: RefCell::new(TpoCache::default()),
+                    simulated_footprint_cache: RefCell::new(rustc_hash::FxHashMap::default()),
                     last_footprint_cache_save: None,
                     drawings: Vec::new(),
                     undo_stack: Vec::new(),
@@ -603,6 +628,7 @@ impl KlineChart {
                     replay: None,
                     expanded_indicator: None,
                     history_lookback_input,
+                    is_user_panning: false,
                 }
             }
         }
@@ -1770,19 +1796,44 @@ impl KlineChart {
         {
             let cutoff = rep.cutoff_time;
             if self.chart.scaling > f32::EPSILON && self.chart.bounds.width > f32::EPSILON {
-                let base_x = match &self.kind {
-                    KlineChartKind::Footprint { .. } => {
-                        0.5 * (self.chart.bounds.width / self.chart.scaling)
-                            - (self.chart.cell_width / self.chart.scaling)
-                    }
-                    KlineChartKind::Candles | KlineChartKind::Tpo { .. } => {
-                        0.5 * (self.chart.bounds.width / self.chart.scaling)
-                            - (8.0 * self.chart.cell_width / self.chart.scaling)
-                    }
-                };
+                let base_x = self.base_x();
                 let x_offset = self.chart.interval_to_x(cutoff);
                 self.chart.translation.x = base_x - x_offset;
             }
+        }
+    }
+
+    pub fn on_user_pan(&mut self, translation: Vector) {
+        self.is_user_panning = true;
+        if let Some((active, cutoff)) = self.replay.as_ref().map(|r| (r.active, r.cutoff_time))
+            && active
+        {
+            let target_x = self.base_x() - self.chart.interval_to_x(cutoff);
+            let threshold = (self.chart.cell_width * 2.5).max(50.0);
+            if let Some(ref mut rep) = self.replay {
+                rep.auto_scroll = (translation.x - target_x).abs() <= threshold;
+            }
+        }
+    }
+
+    pub fn on_pan_released(&mut self) {
+        self.is_user_panning = false;
+        let mut should_snap = false;
+        if let Some((active, cutoff)) = self.replay.as_ref().map(|r| (r.active, r.cutoff_time))
+            && active
+        {
+            let target_x = self.base_x() - self.chart.interval_to_x(cutoff);
+            let threshold = (self.chart.cell_width * 2.5).max(50.0);
+            if (self.chart.translation.x - target_x).abs() <= threshold {
+                if let Some(ref mut rep) = self.replay {
+                    rep.auto_scroll = true;
+                }
+                should_snap = true;
+            }
+        }
+        if should_snap {
+            self.auto_scroll_to_replay_cutoff();
+            self.invalidate_all();
         }
     }
 
@@ -1791,11 +1842,11 @@ impl KlineChart {
             rep.is_playing = !rep.is_playing;
             if rep.is_playing {
                 self.last_tick = Instant::now();
+                rep.auto_scroll = true;
             }
         }
         if self.replay.as_ref().is_some_and(|r| r.is_playing) {
             self.auto_scroll_to_replay_cutoff();
-            self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         }
         self.invalidate_all();
     }
@@ -1811,9 +1862,10 @@ impl KlineChart {
                 PlotData::TickBased(_) => u64::MAX,
             };
             rep.cutoff_time = rep.cutoff_time.saturating_add(step).min(max_t);
+            if rep.auto_scroll {
+                self.auto_scroll_to_replay_cutoff();
+            }
         }
-        self.auto_scroll_to_replay_cutoff();
-        self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         self.invalidate_all();
     }
 
@@ -1828,9 +1880,10 @@ impl KlineChart {
                 PlotData::TickBased(_) => 0,
             };
             rep.cutoff_time = rep.cutoff_time.saturating_sub(step).max(min_t);
+            if rep.auto_scroll {
+                self.auto_scroll_to_replay_cutoff();
+            }
         }
-        self.auto_scroll_to_replay_cutoff();
-        self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         self.invalidate_all();
     }
 
@@ -1843,6 +1896,7 @@ impl KlineChart {
     pub fn replay_set_cutoff(&mut self, cutoff: u64) {
         if let Some(ref mut rep) = self.replay {
             rep.cutoff_time = cutoff;
+            rep.auto_scroll = true;
         } else {
             self.replay = Some(ReplayState::new(cutoff));
         }
@@ -1853,18 +1907,12 @@ impl KlineChart {
 
     pub fn scroll_to_timestamp(&mut self, timestamp: u64) {
         if self.chart.scaling > f32::EPSILON && self.chart.bounds.width > f32::EPSILON {
-            let base_x = match &self.kind {
-                KlineChartKind::Footprint { .. } => {
-                    0.5 * (self.chart.bounds.width / self.chart.scaling)
-                        - (self.chart.cell_width / self.chart.scaling)
-                }
-                KlineChartKind::Candles | KlineChartKind::Tpo { .. } => {
-                    0.5 * (self.chart.bounds.width / self.chart.scaling)
-                        - (8.0 * self.chart.cell_width / self.chart.scaling)
-                }
-            };
+            let base_x = self.base_x();
             let x_offset = self.chart.interval_to_x(timestamp);
             self.chart.translation.x = base_x - x_offset;
+        }
+        if let Some(ref mut rep) = self.replay {
+            rep.auto_scroll = true;
         }
         self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
         self.invalidate_all();
@@ -1874,6 +1922,7 @@ impl KlineChart {
         if let Some(ref mut rep) = self.replay {
             rep.cutoff_time = cutoff;
             rep.is_playing = false;
+            rep.auto_scroll = true;
         } else {
             self.replay = Some(ReplayState::new(cutoff));
         }
@@ -2239,6 +2288,7 @@ impl KlineChart {
     pub fn change_tick_size(&mut self, new_tick_size: f32) {
         self.ensure_today_trades_loaded();
         self.tpo_cache.borrow_mut().clear();
+        self.simulated_footprint_cache.borrow_mut().clear();
         let chart = self.mut_state();
 
         let step = PriceStep::from_f32(new_tick_size);
@@ -2267,6 +2317,7 @@ impl KlineChart {
     pub fn set_basis(&mut self, new_basis: Basis) -> Option<Action> {
         self.ensure_today_trades_loaded();
         self.tpo_cache.borrow_mut().clear();
+        self.simulated_footprint_cache.borrow_mut().clear();
         self.chart.last_price = None;
         self.chart.latest_x = 0;
         self.chart.basis = new_basis;
@@ -2325,6 +2376,12 @@ impl KlineChart {
             }
         } else {
             self.raw_trades.extend_from_slice(trades_buffer);
+        }
+
+        const MAX_RAW_TRADES_IN_RAM: usize = 500_000;
+        if self.raw_trades.len() > MAX_RAW_TRADES_IN_RAM {
+            let excess = self.raw_trades.len() - MAX_RAW_TRADES_IN_RAM;
+            self.raw_trades.drain(..excess);
         }
 
         match self.data_source {
@@ -2624,27 +2681,31 @@ impl KlineChart {
                         KlineChartKind::Tpo { .. } => 400.0 / y_ticks,
                     };
 
-                    let x_trans = match &self.kind {
-                        KlineChartKind::Footprint { .. } => {
-                            0.5 * (self.chart.bounds.width / self.chart.scaling)
-                                - (self.chart.cell_width / self.chart.scaling)
-                        }
-                        KlineChartKind::Candles => {
-                            0.5 * (self.chart.bounds.width / self.chart.scaling)
-                                - (8.0 * self.chart.cell_width / self.chart.scaling)
-                        }
-                        KlineChartKind::Tpo { .. } => {
-                            0.5 * (self.chart.bounds.width / self.chart.scaling)
-                                - (8.0 * self.chart.cell_width / self.chart.scaling)
-                        }
-                    };
+                    let x_trans = self.base_x();
                     self.chart.translation.x = x_trans;
                     self.chart.translation.y = -self.chart.bounds.height / 2.0;
                     self.chart.layout.autoscale = Some(Autoscale::FitToVisible);
                 } else if let Some(new_latest) = timeseries.latest_timestamp()
                     && new_latest > self.chart.latest_x
                 {
+                    let old_latest = self.chart.latest_x;
                     self.chart.latest_x = new_latest;
+
+                    if self.replay.is_none() {
+                        let base_x = self.base_x();
+                        let threshold = (self.chart.cell_width * 3.0).max(60.0);
+                        if self.chart.translation.x > base_x + threshold {
+                            let step = match self.chart.basis {
+                                Basis::Time(tf) => tf.to_milliseconds(),
+                                Basis::Tick(_) => 1,
+                            };
+                            if step > 0 {
+                                let shift = ((new_latest - old_latest) as f64 / step as f64
+                                    * self.chart.cell_width as f64) as f32;
+                                self.chart.translation.x += shift;
+                            }
+                        }
+                    }
                 }
 
                 self.indicators
@@ -2757,7 +2818,7 @@ impl KlineChart {
 
         let rounded_lowest = lowest.round_to_side_step(true, step).add_steps(-1, step);
 
-        match &self.data_source {
+        let max_qty = match &self.data_source {
             PlotData::TimeBased(timeseries) => timeseries.max_qty_ts_range(
                 cluster_kind,
                 earliest,
@@ -2777,6 +2838,24 @@ impl KlineChart {
                     rounded_lowest,
                 )
             }
+        };
+
+        if max_qty > 0.0 {
+            max_qty
+        } else if let PlotData::TimeBased(ts) = &self.data_source {
+            ts.datapoints
+                .range(earliest..=latest)
+                .map(|(_, dp)| {
+                    let sim = self.get_or_simulate_footprint(&dp.kline, step);
+                    sim.max_qty_by(rounded_highest, rounded_lowest, |b, s| match cluster_kind {
+                        ClusterKind::BidAsk => b.max(s),
+                        ClusterKind::DeltaProfile => (b - s).abs(),
+                        ClusterKind::VolumeProfile => b + s,
+                    })
+                })
+                .fold(0.0_f32, f32::max)
+        } else {
+            0.0
         }
     }
 
@@ -2819,29 +2898,28 @@ impl KlineChart {
         }
 
         if replay_advanced {
-            self.auto_scroll_to_replay_cutoff();
+            if let Some(cutoff) = self.replay.as_ref().map(|r| r.cutoff_time) {
+                let target_x = self.base_x() - self.chart.interval_to_x(cutoff);
+                let threshold = (self.chart.cell_width * 2.5).max(50.0);
+                if let Some(ref mut rep) = self.replay
+                    && !rep.auto_scroll
+                    && (self.chart.translation.x - target_x).abs() <= threshold
+                {
+                    rep.auto_scroll = true;
+                }
+            }
+            if self.replay.as_ref().is_some_and(|r| r.auto_scroll) && !self.is_user_panning {
+                self.auto_scroll_to_replay_cutoff();
+            }
             self.tpo_cache.borrow_mut().sessions.clear();
         }
 
+        let base_x = self.base_x();
         let chart = &mut self.chart;
 
         if let Some(autoscale) = chart.layout.autoscale {
             match autoscale {
                 super::Autoscale::CenterLatest => {
-                    let base_x = match &self.kind {
-                        KlineChartKind::Footprint { .. } => {
-                            0.5 * (chart.bounds.width / chart.scaling)
-                                - (chart.cell_width / chart.scaling)
-                        }
-                        KlineChartKind::Candles => {
-                            0.5 * (chart.bounds.width / chart.scaling)
-                                - (8.0 * chart.cell_width / chart.scaling)
-                        }
-                        KlineChartKind::Tpo { .. } => {
-                            0.5 * (chart.bounds.width / chart.scaling)
-                                - (8.0 * chart.cell_width / chart.scaling)
-                        }
-                    };
                     let x_offset = if let Some(rep) = &self.replay
                         && rep.active
                     {
@@ -2849,7 +2927,9 @@ impl KlineChart {
                     } else {
                         0.0
                     };
-                    chart.translation.x = base_x - x_offset;
+                    if self.replay.as_ref().is_none_or(|r| r.auto_scroll) && !self.is_user_panning {
+                        chart.translation.x = base_x - x_offset;
+                    }
 
                     let calculate_target_y = |kline: exchange::Kline| -> f32 {
                         let y_low = chart.price_to_y(kline.low);
@@ -4276,10 +4356,23 @@ impl canvas::Program<Message> for KlineChart {
                             latest,
                             interval_to_x,
                             |frame, x_position, kline, trades| {
+                                let sim_trades;
+                                let effective_trades = if trades.is_empty()
+                                    && (kline.volume.0 + kline.volume.1) > 0.0
+                                {
+                                    sim_trades = self.get_or_simulate_footprint(
+                                        kline,
+                                        chart.tick_size,
+                                    );
+                                    &sim_trades
+                                } else {
+                                    trades
+                                };
+
                                 let cluster_scaling = effective_cluster_qty(
                                     *scaling,
                                     max_cluster_qty,
-                                    trades,
+                                    effective_trades,
                                     *clusters,
                                 );
 
@@ -4298,7 +4391,7 @@ impl canvas::Program<Message> for KlineChart {
                                     show_text,
                                     imbalance,
                                     kline,
-                                    trades,
+                                    effective_trades,
                                     *clusters,
                                     content_spacing,
                                     has_npoc,
@@ -4322,7 +4415,7 @@ impl canvas::Program<Message> for KlineChart {
                                             chart.cell_width,
                                             chart.cell_height,
                                             chart.scaling,
-                                            trades,
+                                            effective_trades,
                                             *min_volume,
                                             *min_delta,
                                             *side,
@@ -9856,6 +9949,192 @@ mod tests {
     }
 
     #[test]
+    fn test_kline_chart_right_margin_offset() {
+        let mut chart = make_test_chart();
+        chart.chart.bounds = Rectangle::new(Point::ORIGIN, Size::new(1000.0, 600.0));
+        chart.chart.cell_width = 4.0;
+        chart.chart.scaling = 1.0;
+
+        // Candles margin: 12.0 * clamp(4.0, 4.0, 8.0) + 72.0 = 48.0 + 72.0 = 120.0
+        let margin_offset = chart.right_margin_offset();
+        assert!((margin_offset - 120.0).abs() < 1e-4);
+        assert!((chart.base_x() - (500.0 - 120.0)).abs() < 1e-4);
+
+        // Footprint margin: cell_width * 0.5 + 90.0 = 40.0 + 90.0 = 130.0 (90px margin from cluster border)
+        chart.kind = KlineChartKind::Footprint {
+            clusters: data::chart::kline::ClusterKind::BidAsk,
+            scaling: data::chart::kline::ClusterScaling::default(),
+            studies: vec![],
+            show_bottom_volume: false,
+            aggregate: false,
+            aggregate_exchanges: vec![],
+            history_lookback_days: None,
+        };
+        chart.chart.cell_width = 80.0;
+        assert!((chart.right_margin_offset() - 130.0).abs() < 1e-4);
+        assert!((chart.base_x() - (500.0 - 130.0)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_kline_chart_replay_pan_detaches_and_reattaches_auto_scroll() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &(0..50)
+                .map(|i| Kline {
+                    time: 1000 + i * 300_000,
+                    open: Price::from_f32(100.0),
+                    high: Price::from_f32(105.0),
+                    low: Price::from_f32(95.0),
+                    close: Price::from_f32(102.0),
+                    volume: (10.0, 10.0),
+                })
+                .collect::<Vec<_>>(),
+            vec![],
+            &[],
+            ticker_info,
+            &KlineChartKind::Candles,
+            None,
+        );
+        chart.chart.bounds = Rectangle::new(Point::ORIGIN, Size::new(1000.0, 600.0));
+
+        chart.toggle_replay();
+        assert!(chart.is_replay_active());
+        assert!(chart.replay_state().unwrap().auto_scroll);
+
+        // Jump to bar 10
+        chart.replay_set_cutoff_and_jump(1000 + 10 * 300_000);
+        let live_trans_x = chart.chart.translation.x;
+        assert!(chart.replay_state().unwrap().auto_scroll);
+
+        // User pans into history (older bars): translation.x increases
+        let history_trans = Vector::new(live_trans_x + 300.0, chart.chart.translation.y);
+        chart.on_user_pan(history_trans);
+        chart.chart.translation.x = history_trans.x;
+        assert!(
+            !chart.replay_state().unwrap().auto_scroll,
+            "Auto-scroll should detach when panning to history"
+        );
+
+        // Start playback while detached
+        chart.replay_play_pause();
+        assert!(chart.replay_state().unwrap().is_playing);
+        // replay_play_pause re-engages auto-scroll and snaps to cutoff
+        assert!(chart.replay_state().unwrap().auto_scroll);
+
+        // Detach again during playback
+        let history_trans2 =
+            Vector::new(chart.chart.translation.x + 200.0, chart.chart.translation.y);
+        chart.on_user_pan(history_trans2);
+        chart.chart.translation.x = history_trans2.x;
+        assert!(!chart.replay_state().unwrap().auto_scroll);
+
+        // Advance playback: cutoff advances, but chart position must NOT snap back!
+        let saved_x = chart.chart.translation.x;
+        let now = Instant::now() + Duration::from_millis(1500);
+        let _ = chart.invalidate(Some(now));
+        assert!(chart.replay_state().unwrap().cutoff_time > 1000 + 10 * 300_000);
+        assert_eq!(
+            chart.chart.translation.x, saved_x,
+            "Chart translation must NOT snap back while auto_scroll is detached"
+        );
+
+        // User pans back to the right near the cutoff: auto_scroll automatically re-attaches!
+        let target_x = chart.base_x()
+            - chart
+                .chart
+                .interval_to_x(chart.replay_state().unwrap().cutoff_time);
+        chart.on_user_pan(Vector::new(target_x, chart.chart.translation.y));
+        assert!(
+            chart.replay_state().unwrap().auto_scroll,
+            "Panning near cutoff automatically re-attaches auto-scroll"
+        );
+
+        // Release pan
+        chart.on_pan_released();
+        assert!(chart.replay_state().unwrap().auto_scroll);
+
+        // Advance again: now it should follow the cutoff
+        let now2 = now + Duration::from_millis(1500);
+        let _ = chart.invalidate(Some(now2));
+        assert!(
+            chart.chart.translation.x < target_x,
+            "Chart should resume auto-scrolling with replay after re-attaching"
+        );
+
+        // User pans FORWARD into future empty space: translation.x decreases below target_x
+        let current_target_x = chart.base_x()
+            - chart
+                .chart
+                .interval_to_x(chart.replay_state().unwrap().cutoff_time);
+        let future_trans = Vector::new(current_target_x - 300.0, chart.chart.translation.y);
+        chart.on_user_pan(future_trans);
+        assert!(
+            !chart.replay_state().unwrap().auto_scroll,
+            "Panning forward into future space must detach auto-scroll"
+        );
+        chart.chart.translation.x = future_trans.x;
+        chart.on_pan_released();
+        assert!(
+            !chart.replay_state().unwrap().auto_scroll,
+            "Releasing pan in future space must stay detached"
+        );
+        assert_eq!(
+            chart.chart.translation.x, future_trans.x,
+            "Chart must NOT snap back when released in future space"
+        );
+    }
+
+    #[test]
+    fn test_footprint_simulation_fallback_in_calc_qty_scales() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let klines: Vec<Kline> = (0..20)
+            .map(|i| Kline {
+                time: 1_000_000 + i * 300_000,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(90.0),
+                close: Price::from_f32(105.0),
+                volume: (50.0, 50.0),
+            })
+            .collect();
+        let chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &klines,
+            vec![], // No raw trades: footprint is empty!
+            &[],
+            ticker_info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::BidAsk,
+                scaling: data::chart::kline::ClusterScaling::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: vec![],
+                history_lookback_days: None,
+            },
+            None,
+        );
+
+        // calc_qty_scales must NOT return 0.0: it must fall back to simulated clusters!
+        let max_qty = chart.calc_qty_scales(
+            1_000_000,
+            1_000_000 + 5 * 300_000,
+            Price::from_f32(115.0),
+            Price::from_f32(85.0),
+            PriceStep::from_f32(1.0),
+            data::chart::kline::ClusterKind::VolumeProfile,
+        );
+        assert!(max_qty > 0.0, "Simulated footprint fallback must produce max_qty > 0, got {max_qty}");
+    }
+
+    #[test]
     fn test_inverted_range_does_not_panic() {
         let chart = make_test_chart();
         let qty = chart.calc_qty_scales(
@@ -10466,9 +10745,10 @@ mod tests {
 
         let candle_x = chart.chart.interval_to_x(1_000_000);
         let cursor_pt = Point::new(
-            bounds.width / 2.0 + candle_x * chart.chart.scaling,
+            bounds.width / 2.0 + (candle_x + chart.chart.translation.x) * chart.chart.scaling,
             bounds.height / 2.0
-                + chart.chart.price_to_y(Price::from_f32(108.0)) * chart.chart.scaling,
+                + (chart.chart.price_to_y(Price::from_f32(108.0)) + chart.chart.translation.y)
+                    * chart.chart.scaling,
         );
 
         // 1. First click: start trendline -> snaps to High (110.0)
@@ -10489,9 +10769,10 @@ mod tests {
 
         // 2. Cursor moved near Close (104.0) -> p2 snaps to 105.0
         let move_near_close = Point::new(
-            bounds.width / 2.0 + candle_x * chart.chart.scaling,
+            bounds.width / 2.0 + (candle_x + chart.chart.translation.x) * chart.chart.scaling,
             bounds.height / 2.0
-                + chart.chart.price_to_y(Price::from_f32(104.0)) * chart.chart.scaling,
+                + (chart.chart.price_to_y(Price::from_f32(104.0)) + chart.chart.translation.y)
+                    * chart.chart.scaling,
         );
         let move_event = Event::Mouse(mouse::Event::CursorMoved {
             position: move_near_close,

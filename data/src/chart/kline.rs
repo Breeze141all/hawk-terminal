@@ -348,6 +348,92 @@ impl KlineTrades {
         self.cached_first_time = None;
         self.cached_last_time = None;
     }
+
+    /// Generates synthetic / simulated footprint clusters for a Kline when historical raw trades
+    /// are unavailable (e.g. during historical Market Replay).
+    /// Distributes buy and sell volumes across price levels using a volume profile centered on the body/VWAP,
+    /// with delta distribution reflecting buy/sell aggression.
+    pub fn simulate_from_kline(kline: &Kline, step: PriceStep) -> Self {
+        let mut footprint = Self::new();
+        let total_buy = kline.volume.0;
+        let total_sell = kline.volume.1;
+        let total_vol = total_buy + total_sell;
+        if total_vol <= 0.0 {
+            return footprint;
+        }
+
+        let step_units = step.units.max(1);
+        let low_binned = (kline.low.units / step_units) * step_units;
+        let high_binned = ((kline.high.units + step_units - 1) / step_units) * step_units;
+        let count = ((high_binned - low_binned) / step_units + 1).clamp(1, 500) as usize;
+
+        let mut prices = Vec::with_capacity(count);
+        let mut curr_units = low_binned;
+        while curr_units <= high_binned && prices.len() < 500 {
+            prices.push(Price { units: curr_units });
+            curr_units += step_units;
+        }
+        if prices.is_empty() {
+            prices.push(kline.low.round_to_step(step));
+        }
+
+        let center_units = (kline.open.units + kline.close.units) / 2;
+        let span_units = (high_binned - low_binned).max(step_units) as f32;
+        let sigma = (span_units / 3.0).max(step_units as f32);
+
+        let mut weights: Vec<f32> = prices
+            .iter()
+            .map(|p| {
+                let diff = (p.units - center_units) as f32;
+                (-0.5 * (diff / sigma).powi(2)).exp()
+            })
+            .collect();
+        let sum_w: f32 = weights.iter().sum();
+        let norm_factor = if sum_w > 0.0 {
+            1.0 / sum_w
+        } else {
+            1.0 / weights.len() as f32
+        };
+        for w in &mut weights {
+            *w *= norm_factor;
+        }
+
+        let overall_buy_ratio = (total_buy / total_vol).clamp(0.05, 0.95);
+        let mut raw_buys = Vec::with_capacity(prices.len());
+        let mut raw_sells = Vec::with_capacity(prices.len());
+
+        for (i, p) in prices.iter().enumerate() {
+            let diff = (p.units - center_units) as f32;
+            let p_norm = (diff / span_units).clamp(-0.5, 0.5);
+            let level_buy_ratio = (overall_buy_ratio + p_norm * 0.3).clamp(0.05, 0.95);
+            let level_vol = total_vol * weights[i];
+            raw_buys.push(level_vol * level_buy_ratio);
+            raw_sells.push(level_vol * (1.0 - level_buy_ratio));
+        }
+
+        let sum_raw_buy: f32 = raw_buys.iter().sum();
+        let sum_raw_sell: f32 = raw_sells.iter().sum();
+        let buy_scale = if sum_raw_buy > 0.0 { total_buy / sum_raw_buy } else { 1.0 };
+        let sell_scale = if sum_raw_sell > 0.0 { total_sell / sum_raw_sell } else { 1.0 };
+
+        for (i, p) in prices.iter().enumerate() {
+            let level_buy = raw_buys[i] * buy_scale;
+            let level_sell = raw_sells[i] * sell_scale;
+
+            let group = footprint.trades.entry(*p).or_default();
+            group.buy_qty = level_buy;
+            group.sell_qty = level_sell;
+            group.first_time = kline.time;
+            group.last_time = kline.time;
+            group.buy_count = (level_buy * 5.0).max(if level_buy > 0.0 { 1.0 } else { 0.0 }) as usize;
+            group.sell_count = (level_sell * 5.0).max(if level_sell > 0.0 { 1.0 } else { 0.0 }) as usize;
+        }
+
+        footprint.calculate_poc();
+        footprint.cached_first_time = Some(kline.time);
+        footprint.cached_last_time = Some(kline.time);
+        footprint
+    }
 }
 
 const fn default_true() -> bool {
@@ -1916,5 +2002,38 @@ mod tests {
             Err(err) => assert!(err.contains("exceeds buffer bounds")),
             Ok(_) => panic!("expected Err on corrupted count"),
         }
+    }
+
+    #[test]
+    fn test_simulate_from_kline_distribution_and_poc() {
+        let kline = Kline {
+            time: 1_700_000_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(110.0),
+            low: Price::from_f32(90.0),
+            close: Price::from_f32(105.0),
+            volume: (60.0, 40.0), // 60 buy, 40 sell -> total 100
+        };
+        let step = PriceStep::from_f32(1.0);
+        let footprint = KlineTrades::simulate_from_kline(&kline, step);
+
+        assert!(!footprint.is_empty());
+        assert!(footprint.trades.len() >= 10);
+
+        // Sum of volumes should be close to 100.0
+        let total_vol: f32 = footprint.trades.values().map(|g| g.total_qty()).sum();
+        assert!((total_vol - 100.0).abs() < 1e-2, "total volume must equal 100.0, got {total_vol}");
+
+        // Total buy must be ~60, total sell must be ~40
+        let total_buy: f32 = footprint.trades.values().map(|g| g.buy_qty).sum();
+        let total_sell: f32 = footprint.trades.values().map(|g| g.sell_qty).sum();
+        assert!((total_buy - 60.0).abs() < 1e-1, "total buy must equal ~60, got {total_buy}");
+        assert!((total_sell - 40.0).abs() < 1e-1, "total sell must equal ~40, got {total_sell}");
+
+        // POC must exist and be within [90, 110]
+        let poc = footprint.poc.as_ref().expect("POC must exist");
+        let poc_price = poc.price.to_f32_lossy();
+        assert!((90.0..=110.0).contains(&poc_price), "POC {poc_price} out of range");
+        assert!(poc.volume > 0.0);
     }
 }

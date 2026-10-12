@@ -167,6 +167,7 @@ pub enum Event {
     ReplaySetSpeed(u64),
     ToggleReplayDatePicker,
     ReplayDatePickerAction(modal::pane::replay_calendar::Action),
+    ReplayAutoScrollToCutoff,
     /// Price Alerts
     AddPriceAlert(f32),
     DeletePriceAlert(uuid::Uuid),
@@ -1638,6 +1639,26 @@ impl State {
                     chart::Message::AutofillPosition(autofill) => {
                         return Some(Effect::AutofillJournal(autofill.clone()));
                     }
+                    chart::Message::Translated(translation) => {
+                        c.on_user_pan(*translation);
+                        super::chart::update(c, &msg);
+                    }
+                    chart::Message::PanReleased => {
+                        c.on_pan_released();
+                        super::chart::update(c, &msg);
+                    }
+                    chart::Message::DoubleClick(chart::AxisScaleClicked::X) => {
+                        if let Some(ref mut rep) = c.replay {
+                            rep.auto_scroll = true;
+                        }
+                        super::chart::update(c, &msg);
+                    }
+                    chart::Message::AutoscaleToggled => {
+                        if let Some(ref mut rep) = c.replay {
+                            rep.auto_scroll = true;
+                        }
+                        super::chart::update(c, &msg);
+                    }
                     _ => {
                         super::chart::update(c, &msg);
                     }
@@ -2530,6 +2551,15 @@ impl State {
                     c.replay_set_speed(speed);
                 }
             }
+            Event::ReplayAutoScrollToCutoff => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    c.auto_scroll_to_replay_cutoff();
+                    if let Some(ref mut rep) = c.replay {
+                        rep.auto_scroll = true;
+                    }
+                    c.invalidate_all();
+                }
+            }
             Event::AddPriceAlert(price) => {
                 let ticker_info = self.stream_pair();
                 let ticker = ticker_info.map(|ti| ti.ticker);
@@ -2945,8 +2975,7 @@ impl State {
             let play_btn_text = if rep.is_playing { "PAUSE" } else { "PLAY" };
             let is_picker_open = matches!(self.modal, Some(Modal::ReplayDatePicker(_)));
 
-            let replay_bar = container(
-                row![
+            let replay_row = row![
                     container(text("REPLAY").size(10).font(style::AZERET_MONO))
                         .padding([2, 6])
                         .style(|theme: &Theme| {
@@ -3041,16 +3070,41 @@ impl State {
                             ),
                         ))
                         .padding([3, 6]),
-                    button(icon_text(Icon::Close, 11))
-                        .style(|theme, status| style::button::transparent(theme, status, false))
-                        .on_press(Message::PaneEvent(pane, Event::ToggleReplay))
-                        .padding([3, 5]),
                 ]
                 .spacing(6)
-                .align_y(Alignment::Center),
-            )
-            .padding([4, 8])
-            .style(style::chart_modal);
+                .align_y(Alignment::Center);
+
+            let mut replay_row = replay_row;
+            if !rep.auto_scroll {
+                replay_row = replay_row.push(
+                    tooltip(
+                        button(
+                            row![
+                                text("TO CUTOFF").size(10).font(style::AZERET_MONO),
+                                text(">|").size(10).font(style::AZERET_MONO),
+                            ]
+                            .spacing(3)
+                            .align_y(Alignment::Center),
+                        )
+                        .style(|theme, status| style::button::modifier(theme, status, false))
+                        .on_press(Message::PaneEvent(pane, Event::ReplayAutoScrollToCutoff))
+                        .padding([2, 6]),
+                        Some("Jump to cutoff bar and resume following"),
+                        tooltip::Position::Top,
+                    ),
+                );
+            }
+
+            replay_row = replay_row.push(
+                button(icon_text(Icon::Close, 11))
+                    .style(|theme, status| style::button::transparent(theme, status, false))
+                    .on_press(Message::PaneEvent(pane, Event::ToggleReplay))
+                    .padding([3, 5]),
+            );
+
+            let replay_bar = container(replay_row)
+                .padding([4, 8])
+                .style(style::chart_modal);
 
             let dock = container(replay_bar)
                 .width(Length::Fill)

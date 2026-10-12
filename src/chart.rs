@@ -73,6 +73,7 @@ pub enum Message {
     AutofillPosition(data::journal::PositionAutofill),
     UndoDrawing,
     RedoDrawing,
+    PanReleased,
 }
 
 pub trait Chart: PlotConstants + canvas::Program<Message> {
@@ -117,12 +118,17 @@ fn canvas_interaction<T: Chart>(
     let shrunken_bounds = bounds.shrink(DRAG_SIZE * 4.0);
     let cursor_position = cursor.position_in(shrunken_bounds);
 
-    if let Event::Mouse(mouse::Event::ButtonReleased(_)) = event {
+    if let Event::Mouse(mouse::Event::ButtonReleased(button)) = event {
+        let was_panning = matches!(interaction, Interaction::Panning { .. })
+            && matches!(button, mouse::Button::Left);
         match interaction {
             Interaction::Panning { .. } | Interaction::Zoomin { .. } => {
                 *interaction = Interaction::None;
             }
             _ => {}
+        }
+        if was_panning {
+            return Some(canvas::Action::publish(Message::PanReleased).and_capture());
         }
     }
 
@@ -326,10 +332,16 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
             let state = chart.mut_state();
 
             if let Some(Autoscale::FitToVisible) = state.layout.autoscale {
-                state.translation.x = translation.x;
+                let dy = (translation.y - state.translation.y).abs();
+                let dx = (translation.x - state.translation.x).abs();
+                if dy > 25.0 && dy > dx * 1.5 {
+                    state.translation = *translation;
+                    state.layout.autoscale = None;
+                } else {
+                    state.translation.x = translation.x;
+                }
             } else {
                 state.translation = *translation;
-                state.layout.autoscale = None;
             }
         }
         Message::Scaled(scaling, translation) => {
@@ -528,7 +540,8 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
         | Message::ReplayCutoff(_)
         | Message::AutofillPosition(_)
         | Message::UndoDrawing
-        | Message::RedoDrawing => return,
+        | Message::RedoDrawing
+        | Message::PanReleased => return,
     }
     chart.invalidate_all();
 }
