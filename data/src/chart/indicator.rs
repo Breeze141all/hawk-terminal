@@ -13,6 +13,7 @@ pub trait Indicator: PartialEq + Display + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Eq, Enum)]
 pub enum KlineIndicator {
     Volume,
+    BarAnalysis,
     OpenInterest,
     MarketPulse,
     NetOi,
@@ -39,8 +40,9 @@ impl KlineIndicator {
     // Indicator togglers on UI menus depend on these arrays.
     // Every variant needs to be in either SPOT, PERPS or both.
     /// Indicators that can be used with spot market tickers
-    const FOR_SPOT: [KlineIndicator; 8] = [
+    const FOR_SPOT: [KlineIndicator; 9] = [
         KlineIndicator::Volume,
+        KlineIndicator::BarAnalysis,
         KlineIndicator::Vpin,
         KlineIndicator::Vwap,
         KlineIndicator::Tpo,
@@ -50,8 +52,9 @@ impl KlineIndicator {
         KlineIndicator::PositionFlow,
     ];
     /// Indicators that can be used with perpetual swap market tickers
-    const FOR_PERPS: [KlineIndicator; 12] = [
+    const FOR_PERPS: [KlineIndicator; 13] = [
         KlineIndicator::Volume,
+        KlineIndicator::BarAnalysis,
         KlineIndicator::OpenInterest,
         KlineIndicator::MarketPulse,
         KlineIndicator::NetOi,
@@ -79,6 +82,7 @@ impl Display for KlineIndicator {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             KlineIndicator::Volume => write!(f, "Volume"),
+            KlineIndicator::BarAnalysis => write!(f, "Bar Analysis"),
             KlineIndicator::OpenInterest => write!(f, "Open Interest"),
             KlineIndicator::MarketPulse => write!(f, "Market Pulse"),
             KlineIndicator::NetOi => write!(f, "Net OI"),

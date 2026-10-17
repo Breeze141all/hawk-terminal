@@ -19,7 +19,7 @@ pub struct KlineDataPoint {
 impl KlineDataPoint {
     pub fn max_cluster_qty(&self, cluster_kind: ClusterKind, highest: Price, lowest: Price) -> f32 {
         match cluster_kind {
-            ClusterKind::BidAsk => self.footprint.max_qty_by(highest, lowest, f32::max),
+            ClusterKind::BidAsk | ClusterKind::Table => self.footprint.max_qty_by(highest, lowest, f32::max),
             ClusterKind::DeltaProfile => self
                 .footprint
                 .max_qty_by(highest, lowest, |buy, sell| (buy - sell).abs()),
@@ -709,6 +709,13 @@ impl KlineChartKind {
             KlineChartKind::Tpo { .. } => 8.0,
         }
     }
+
+    pub fn allows_indicator(&self, indicator: super::indicator::KlineIndicator) -> bool {
+        !matches!(
+            (self, indicator),
+            (KlineChartKind::Candles, super::indicator::KlineIndicator::BarAnalysis)
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -717,14 +724,24 @@ pub enum ClusterKind {
     BidAsk,
     VolumeProfile,
     DeltaProfile,
+    Table,
 }
 
 impl ClusterKind {
-    pub const ALL: [ClusterKind; 3] = [
+    pub const ALL: [ClusterKind; 4] = [
         ClusterKind::BidAsk,
         ClusterKind::VolumeProfile,
         ClusterKind::DeltaProfile,
+        ClusterKind::Table,
     ];
+
+    pub fn min_footprint_width(self) -> f32 {
+        match self {
+            ClusterKind::VolumeProfile | ClusterKind::DeltaProfile => 50.0,
+            ClusterKind::BidAsk => 80.0,
+            ClusterKind::Table => 100.0,
+        }
+    }
 }
 
 impl std::fmt::Display for ClusterKind {
@@ -733,7 +750,53 @@ impl std::fmt::Display for ClusterKind {
             ClusterKind::BidAsk => write!(f, "Bid/Ask"),
             ClusterKind::VolumeProfile => write!(f, "Volume Profile"),
             ClusterKind::DeltaProfile => write!(f, "Delta Profile"),
+            ClusterKind::Table => write!(f, "Table"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FootprintSummary {
+    pub buy: f32,
+    pub sell: f32,
+    pub total: f32,
+    pub delta: f32,
+    pub delta_pct: f64,
+}
+
+impl FootprintSummary {
+    pub fn new(buy: f32, sell: f32) -> Self {
+        let total = buy + sell;
+        let delta = buy - sell;
+        let total_f = total as f64;
+        let delta_pct = if total_f > 0.0 {
+            (delta as f64 / total_f) * 100.0
+        } else {
+            0.0
+        };
+
+        Self {
+            buy,
+            sell,
+            total,
+            delta,
+            delta_pct,
+        }
+    }
+
+    pub fn from_trades(footprint: &KlineTrades) -> Option<Self> {
+        if footprint.trades.is_empty() {
+            return None;
+        }
+
+        let (buy, sell) = footprint
+            .trades
+            .values()
+            .fold((0.0f32, 0.0f32), |(buy, sell), group| {
+                (buy + group.buy_qty, sell + group.sell_qty)
+            });
+
+        Some(Self::new(buy, sell))
     }
 }
 
@@ -881,6 +944,10 @@ pub struct Config {
     pub magnet_mode: bool,
     #[serde(default = "default_true")]
     pub alert_drag_handle_only: bool,
+    #[serde(default = "default_false")]
+    pub show_footprint_summary: bool,
+    #[serde(default = "default_false")]
+    pub data_labels_always_visible: bool,
 }
 
 static USER_DEFAULT_CONFIG: std::sync::LazyLock<std::sync::RwLock<Option<Config>>> =
@@ -911,6 +978,8 @@ impl Config {
             liq_show_histogram: true,
             magnet_mode: true,
             alert_drag_handle_only: true,
+            show_footprint_summary: false,
+            data_labels_always_visible: false,
         }
     }
 }
@@ -2057,5 +2126,38 @@ mod tests {
             "POC {poc_price} out of range"
         );
         assert!(poc.volume > 0.0);
+    }
+
+    #[test]
+    fn test_ter13_table_cluster_and_footprint_summary() {
+        assert_eq!(ClusterKind::ALL.len(), 4);
+        assert!(ClusterKind::ALL.contains(&ClusterKind::Table));
+        assert_eq!(ClusterKind::Table.to_string(), "Table");
+        assert_eq!(ClusterKind::Table.min_footprint_width(), 100.0);
+
+        let kline = Kline {
+            time: 1_700_000_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(95.0),
+            close: Price::from_f32(102.0),
+            volume: (75.0, 25.0),
+        };
+        let step = PriceStep::from_f32(1.0);
+        let footprint = KlineTrades::simulate_from_kline(&kline, step);
+
+        let summary = FootprintSummary::from_trades(&footprint).expect("summary from trades");
+        assert!((summary.total - 100.0).abs() < 1e-1);
+        assert!(summary.delta > 0.0);
+        assert!(summary.delta_pct > 0.0);
+
+        let dp = KlineDataPoint {
+            kline,
+            footprint,
+            trades_fetched: true,
+        };
+        let max_qty_table = dp.max_cluster_qty(ClusterKind::Table, Price::from_f32(110.0), Price::from_f32(90.0));
+        let max_qty_bidask = dp.max_cluster_qty(ClusterKind::BidAsk, Price::from_f32(110.0), Price::from_f32(90.0));
+        assert_eq!(max_qty_table, max_qty_bidask);
     }
 }

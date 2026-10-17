@@ -6,6 +6,7 @@ use data::chart::kline::KlineDataPoint;
 use exchange::fetcher::FetchRange;
 use exchange::{Kline, Timeframe, Trade};
 
+pub mod bar_analysis;
 pub mod bid_ask_ratio;
 pub mod cvd;
 pub mod liquidation_heatmap;
@@ -84,6 +85,9 @@ pub struct FetchCtx<'a> {
 pub fn make_empty(which: KlineIndicator) -> Box<dyn KlineIndicatorImpl> {
     match which {
         KlineIndicator::Volume => Box::new(super::kline::volume::VolumeIndicator::new()),
+        KlineIndicator::BarAnalysis => {
+            Box::new(super::kline::bar_analysis::BarAnalysisIndicator::new())
+        }
         KlineIndicator::OpenInterest => {
             Box::new(super::kline::open_interest::OpenInterestIndicator::new())
         }

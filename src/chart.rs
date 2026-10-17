@@ -23,7 +23,7 @@ use iced::{
 };
 
 const ZOOM_SENSITIVITY: f32 = 12.0;
-const TEXT_SIZE: f32 = 12.0;
+pub const TEXT_SIZE: f32 = 12.0;
 
 #[derive(Default, Debug, Clone, Copy)]
 pub enum Interaction {
