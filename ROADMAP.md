@@ -57,20 +57,20 @@
 
 ### 1.2. Пріоритет P1: Order Flow, Footprint та GPU Рендеринг (Core Capabilities)
 
-- [ ] **[#88] Індикатор Bar Analysis та табличний режим Footprint Table (TER-13, UP-06)**
+- [x] **[#88] Індикатор Bar Analysis та табличний режим Footprint Table (TER-13, UP-06)**
   - **Файли**: `src/chart/indicator/kline/bar_analysis.rs`, `data/src/chart/kline.rs`, `src/chart/kline.rs`, `src/modal/pane/settings.rs`
   - **Джерело**: Flowsurface `9d2d8eb`, `ad0ad97`, `1738638`
   - **Концепція**:
     1. **`BarAnalysisIndicator`**: Спеціалізований підпанельний індикатор під графіком, синхронізований із шириною свічок (`cell_width`), який виводить матрицю: **Buy Volume**, **Sell Volume**, **Total Volume**, **Delta ($\Delta$)**, **Delta % ($\Delta\%$)**.
     2. **`ClusterKind::Table`**: Четвертий режим кластера Footprint на додачу до `BidAsk`, `VolumeProfile` та `DeltaProfile`. Відображає чітку сітку з адаптивною шириною під дисбаланси та підтримкою розрахунку nPOC (Naked POC).
 
-- [ ] **[#89] Дискове кешування біржових метаданих для миттєвого старту (DAT-14, UP-07)**
+- [x] **[#89] Дискове кешування біржових метаданих для миттєвого старту (DAT-14, UP-07)**
   - **Файли**: `data/src/metadata.rs`, `data/src/lib.rs`, `src/screen/dashboard/tickers_table.rs`
   - **Джерело**: Flowsurface `3df72f8`
   - **Концепція**: Збереження структури `metadata-cache.json` з інформацією про тікери, мінімальні розміри лотів (`min_qty`), кроки ціни (`min_ticksize`) та мультиплікатори контрактів. Валідність кешу — 24 години.
   - **Результат**: Запуск Hawk Terminal відбувається за мілісекунди без очікування відповідей від REST API Binance, Bybit, OKX та Hyperliquid. Додавання кнопки «Refresh Metadata» у таблицю тікерів.
 
-- [ ] **[#90] Автоматичне успадкування конфігурації при створенні панелей (TER-14, UP-08)**
+- [x] **[#90] Автоматичне успадкування конфігурації при створенні панелей (TER-14, UP-08)**
   - **Файли**: `src/screen/dashboard.rs`, `src/screen/dashboard/pane.rs`
   - **Джерело**: Flowsurface `0bd18d4`, `7d73b7f`
   - **Концепція**: Метод `borrow_synced_settings`. При додаванні або спліті нової панелі вона автоматично переймає візуальні параметри, вибрані дослідження (studies), індикатори та тип кластера з існуючої панелі такого самого типу, усуваючи необхідність повторного ручного налаштування.
