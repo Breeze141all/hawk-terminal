@@ -174,6 +174,10 @@ impl AdapterError {
             }
         }
     }
+
+    pub fn ui_message(&self) -> String {
+        self.to_user_message().to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -469,6 +473,21 @@ impl ExchangeInclusive {
             Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => Self::Hyperliquid,
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Self::Okex,
         }
+    }
+}
+
+impl std::fmt::Display for ExchangeInclusive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                ExchangeInclusive::Bybit => "Bybit",
+                ExchangeInclusive::Binance => "Binance",
+                ExchangeInclusive::Hyperliquid => "Hyperliquid",
+                ExchangeInclusive::Okex => "Okex",
+            }
+        )
     }
 }
 

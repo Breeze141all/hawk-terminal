@@ -172,6 +172,13 @@ impl Price {
         Self::from_f32_lossy(v)
     }
 
+    #[inline]
+    pub fn from_f64(v: f64) -> Self {
+        let scale = 10f64.powi(Self::PRICE_SCALE);
+        let u = (v * scale).round() as i64;
+        Self { units: u }
+    }
+
     pub fn to_f32(self) -> f32 {
         self.to_f32_lossy()
     }

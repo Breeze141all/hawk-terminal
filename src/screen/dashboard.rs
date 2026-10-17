@@ -30,7 +30,7 @@ use exchange::{
 
 use iced::{
     Element, Length, Subscription, Task, Vector,
-    task::{Straw, sipper},
+    task::Straw,
     widget::{
         PaneGrid, center, container,
         pane_grid::{self, Configuration},
@@ -2316,72 +2316,14 @@ pub fn fetch_trades_batched(
     to_time: u64,
     data_path: PathBuf,
 ) -> impl Straw<u64, Vec<Trade>, AdapterError> {
-    sipper(async move |mut progress| {
-        let mut latest_trade_t = from_time;
-        let mut actual_last_trade_t = from_time;
-        let mut reached_end = false;
-
-        if exchange::clock::is_sync_needed(ticker_info.exchange(), 60_000) {
-            let _ = exchange::clock::ping_server_time(ticker_info.exchange()).await;
-        }
-
-        while latest_trade_t < to_time {
-            match exchange::trades::fetch_trades(ticker_info, latest_trade_t, data_path.clone())
-                .await
-            {
-                Ok((mut batch, next_trade_t)) => {
-                    let batch_len = batch.len();
-                    let now_ms = exchange::clock::server_time_ms(Some(ticker_info.exchange()));
-                    let is_at_market_tip = latest_trade_t >= now_ms.saturating_sub(120_000)
-                        || next_trade_t >= now_ms.saturating_sub(120_000);
-                    if batch_len == 0 && is_at_market_tip {
-                        reached_end = true;
-                        break;
-                    }
-                    let had_trades_beyond_to_time = batch.iter().any(|t| t.time >= to_time);
-                    batch.retain(|t| t.time < to_time);
-
-                    if let Some(last_trade) = batch.last() {
-                        actual_last_trade_t = actual_last_trade_t.max(last_trade.time);
-                    }
-                    if !batch.is_empty() {
-                        let () = progress.send(batch).await;
-                    }
-
-                    if had_trades_beyond_to_time || next_trade_t >= to_time {
-                        reached_end = true;
-                        break;
-                    }
-
-                    if next_trade_t <= latest_trade_t {
-                        reached_end = true;
-                        break;
-                    }
-
-                    let sleep_ms = match ticker_info.exchange() {
-                        Exchange::OkexSpot | Exchange::OkexLinear | Exchange::OkexInverse => 200,
-                        Exchange::BybitSpot | Exchange::BybitLinear | Exchange::BybitInverse => 100,
-                        _ => 50,
-                    };
-
-                    if (100..=2000).contains(&batch_len) {
-                        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-                    } else if batch_len == 0 {
-                        tokio::task::yield_now().await;
-                    }
-
-                    latest_trade_t = next_trade_t;
-                }
-                Err(err) => return Err(err),
-            }
-        }
-
-        Ok(if reached_end {
-            to_time
-        } else {
-            actual_last_trade_t
-        })
-    })
+    let server = crate::connector::fetcher::active_server_client();
+    crate::connector::fetcher::fetch_trades_paged(
+        server,
+        ticker_info,
+        from_time,
+        to_time,
+        data_path,
+    )
 }
 
 pub fn depth_subscription(

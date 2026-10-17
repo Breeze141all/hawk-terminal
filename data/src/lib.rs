@@ -20,6 +20,7 @@ pub use audio::AudioStream;
 #[cfg(feature = "volume-search")]
 pub use chart::volume_search;
 pub use config::ScaleFactor;
+pub use config::network::{Network, TradeFetchMode};
 pub use config::bundle::{
     BundleMetadata, BundlePayload, BundleValidationError, ConfigBundle, ExportType, WorkspaceBundle,
 };

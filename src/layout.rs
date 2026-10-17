@@ -339,6 +339,10 @@ pub fn state_to_saved_state(state: data::State) -> SavedState {
     exchange::fetcher::set_trade_history_lookback_days(state.trade_history_lookback_days);
     exchange::set_preferred_currency(state.size_in_quote_ccy);
 
+    crate::connector::fetcher::set_trade_fetch_mode(state.network.trade_fetch_mode.clone());
+    let ds = crate::connector::client::DataSources::new(&state.network);
+    crate::connector::fetcher::set_server_client(ds.server);
+
     if let Some(kline_cfg) = state.default_kline_config {
         data::chart::kline::set_user_default_kline_config(kline_cfg);
     }

@@ -50,6 +50,8 @@ pub struct State {
     pub default_kline_config: Option<crate::chart::kline::Config>,
     #[serde(default)]
     pub cache_market_metadata: bool,
+    #[serde(default)]
+    pub network: crate::config::network::Network,
 }
 
 fn default_trade_history_lookback_days() -> u32 {
@@ -86,6 +88,7 @@ impl State {
             journal_mode,
             default_kline_config,
             cache_market_metadata,
+            network: crate::config::network::Network::default(),
         }
     }
 }

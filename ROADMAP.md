@@ -83,7 +83,7 @@
     - Оновлення тільки брудних стовпчиків (`dirty_cols`).
     - Рендеринг усього теплового стакана за **1 draw call** на GPU, що знижує навантаження на процесор із 80% до <5%.
 
-- [ ] **[#92] Конектор історичних угод через Apache Arrow IPC (EX-17, UP-10)**
+- [x] **[#92] Конектор історичних угод через Apache Arrow IPC (EX-17, UP-10)**
   - **Файли**: `src/connector/client.rs`, `src/connector/fetcher.rs`, `Cargo.toml`
   - **Джерело**: Flowsurface `14b7551`
   - **Концепція**: Підтримка потокового протоколу `GET /trades.arrow` (Apache Arrow IPC stream: `ts`, `price`, `qty`, `is_sell`). Дозволяє підключати зовнішній локальний сервер на базі DuckDB/Parquet ([flowsurface-server](https://github.com/flowsurface-rs/server)) для необмеженого за часом та швидкісного бекфілу тікових кластерів для всіх бірж без rate-limits.

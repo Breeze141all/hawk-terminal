@@ -2,6 +2,7 @@
 
 mod audio;
 mod chart;
+pub mod connector;
 pub mod journal_media;
 mod layout;
 mod logger;

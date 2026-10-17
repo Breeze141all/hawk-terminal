@@ -40,6 +40,12 @@ rustc-hash = "2.1.1"
 enum-map = "2.7.3"
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 lz4_flex = "0.11"
+arrow-ipc = { version = "59.1", default-features = false }
+arrow-array = { version = "59.1", default-features = false }
+arrow-schema = { version = "59.1", default-features = false }
+bytes = "1.8.0"
+url = "2.5"
+reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
 
 
 [dependencies]
@@ -70,6 +76,12 @@ enum-map.workspace = true
 fern = "0.7.1"
 rodio = { version = "0.20.1", default-features = false, features = [ "wav" ]}
 tokio = { version = "1.43", default-features = false, features = ["time"] }
+arrow-ipc.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+reqwest.workspace = true
+bytes.workspace = true
+url.workspace = true
 
 exchange = { version = "0.1.0", path = "exchange", package = "hawk-exchange" }
 data = { version = "0.1.0", path = "data", package = "hawk-data", default-features = false }
