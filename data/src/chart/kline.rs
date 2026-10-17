@@ -413,8 +413,16 @@ impl KlineTrades {
 
         let sum_raw_buy: f32 = raw_buys.iter().sum();
         let sum_raw_sell: f32 = raw_sells.iter().sum();
-        let buy_scale = if sum_raw_buy > 0.0 { total_buy / sum_raw_buy } else { 1.0 };
-        let sell_scale = if sum_raw_sell > 0.0 { total_sell / sum_raw_sell } else { 1.0 };
+        let buy_scale = if sum_raw_buy > 0.0 {
+            total_buy / sum_raw_buy
+        } else {
+            1.0
+        };
+        let sell_scale = if sum_raw_sell > 0.0 {
+            total_sell / sum_raw_sell
+        } else {
+            1.0
+        };
 
         for (i, p) in prices.iter().enumerate() {
             let level_buy = raw_buys[i] * buy_scale;
@@ -425,8 +433,10 @@ impl KlineTrades {
             group.sell_qty = level_sell;
             group.first_time = kline.time;
             group.last_time = kline.time;
-            group.buy_count = (level_buy * 5.0).max(if level_buy > 0.0 { 1.0 } else { 0.0 }) as usize;
-            group.sell_count = (level_sell * 5.0).max(if level_sell > 0.0 { 1.0 } else { 0.0 }) as usize;
+            group.buy_count =
+                (level_buy * 5.0).max(if level_buy > 0.0 { 1.0 } else { 0.0 }) as usize;
+            group.sell_count =
+                (level_sell * 5.0).max(if level_sell > 0.0 { 1.0 } else { 0.0 }) as usize;
         }
 
         footprint.calculate_poc();
@@ -2022,18 +2032,30 @@ mod tests {
 
         // Sum of volumes should be close to 100.0
         let total_vol: f32 = footprint.trades.values().map(|g| g.total_qty()).sum();
-        assert!((total_vol - 100.0).abs() < 1e-2, "total volume must equal 100.0, got {total_vol}");
+        assert!(
+            (total_vol - 100.0).abs() < 1e-2,
+            "total volume must equal 100.0, got {total_vol}"
+        );
 
         // Total buy must be ~60, total sell must be ~40
         let total_buy: f32 = footprint.trades.values().map(|g| g.buy_qty).sum();
         let total_sell: f32 = footprint.trades.values().map(|g| g.sell_qty).sum();
-        assert!((total_buy - 60.0).abs() < 1e-1, "total buy must equal ~60, got {total_buy}");
-        assert!((total_sell - 40.0).abs() < 1e-1, "total sell must equal ~40, got {total_sell}");
+        assert!(
+            (total_buy - 60.0).abs() < 1e-1,
+            "total buy must equal ~60, got {total_buy}"
+        );
+        assert!(
+            (total_sell - 40.0).abs() < 1e-1,
+            "total sell must equal ~40, got {total_sell}"
+        );
 
         // POC must exist and be within [90, 110]
         let poc = footprint.poc.as_ref().expect("POC must exist");
         let poc_price = poc.price.to_f32_lossy();
-        assert!((90.0..=110.0).contains(&poc_price), "POC {poc_price} out of range");
+        assert!(
+            (90.0..=110.0).contains(&poc_price),
+            "POC {poc_price} out of range"
+        );
         assert!(poc.volume > 0.0);
     }
 }

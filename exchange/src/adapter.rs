@@ -14,6 +14,7 @@ pub mod bitcoincounterflow;
 pub mod bybit;
 pub mod hyperliquid;
 pub mod okex;
+pub mod ws;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedStream {

@@ -1783,9 +1783,7 @@ impl State {
                         && days > 0
                     {
                         *history_lookback_days = Some(days);
-                        if days > exchange::fetcher::trade_history_lookback_days() {
-                            exchange::fetcher::set_trade_history_lookback_days(days);
-                        }
+                        exchange::fetcher::set_trade_history_lookback_days(days);
                     }
                 }
             }
@@ -1800,9 +1798,7 @@ impl State {
                     } = kind
                     {
                         *history_lookback_days = Some(days);
-                        if days > exchange::fetcher::trade_history_lookback_days() {
-                            exchange::fetcher::set_trade_history_lookback_days(days);
-                        }
+                        exchange::fetcher::set_trade_history_lookback_days(days);
                     }
                 }
             }
@@ -2705,22 +2701,24 @@ impl State {
             control_btn_style(false),
         ));
 
-        if is_popout {
-            buttons = buttons.push(button_with_tooltip(
-                icon_text(Icon::Popout, 12),
-                Message::Merge,
-                Some("Merge"),
-                tooltip_pos,
-                control_btn_style(is_popout),
-            ));
-        } else if total_panes > 1 {
-            buttons = buttons.push(button_with_tooltip(
-                icon_text(Icon::Popout, 12),
-                Message::Popout,
-                Some("Pop out"),
-                tooltip_pos,
-                control_btn_style(is_popout),
-            ));
+        if window::MULTI_WINDOW_SUPPORTED {
+            if is_popout {
+                buttons = buttons.push(button_with_tooltip(
+                    icon_text(Icon::Popout, 12),
+                    Message::Merge,
+                    Some("Merge"),
+                    tooltip_pos,
+                    control_btn_style(is_popout),
+                ));
+            } else if total_panes > 1 {
+                buttons = buttons.push(button_with_tooltip(
+                    icon_text(Icon::Popout, 12),
+                    Message::Popout,
+                    Some("Pop out"),
+                    tooltip_pos,
+                    control_btn_style(is_popout),
+                ));
+            }
         }
 
         if total_panes > 1 {
@@ -2976,123 +2974,121 @@ impl State {
             let is_picker_open = matches!(self.modal, Some(Modal::ReplayDatePicker(_)));
 
             let replay_row = row![
-                    container(text("REPLAY").size(10).font(style::AZERET_MONO))
-                        .padding([2, 6])
-                        .style(|theme: &Theme| {
-                            let p = theme.extended_palette();
-                            container::Style {
-                                background: Some(p.primary.weak.color.into()),
-                                text_color: Some(p.primary.weak.text),
-                                border: iced::Border {
-                                    radius: 2.0.into(),
-                                    ..Default::default()
-                                },
-                                ..Default::default()
-                            }
-                        }),
-                    button(modal::pane::replay_calendar::step_backward_icon(
-                        None, 12.0, 10.0
-                    ))
-                    .style(|theme, status| style::button::transparent(theme, status, false))
-                    .on_press(Message::PaneEvent(pane, Event::ReplayStepBackward))
-                    .padding([3, 7]),
-                    tooltip(
-                        button(text(play_btn_text).size(10).font(style::AZERET_MONO))
-                            .style(|theme, status| style::button::modifier(
-                                theme,
-                                status,
-                                rep.is_playing
-                            ))
-                            .on_press(Message::PaneEvent(pane, Event::ReplayPlayPause))
-                            .padding([3, 10]),
-                        Some("Play / Pause (Space)"),
-                        tooltip::Position::Top,
-                    ),
-                    button(modal::pane::replay_calendar::step_forward_icon(
-                        None, 12.0, 10.0
-                    ))
-                    .style(|theme, status| style::button::transparent(theme, status, false))
-                    .on_press(Message::PaneEvent(pane, Event::ReplayStepForward))
-                    .padding([3, 7]),
-                    row![
-                        speed_btn(1000, "1x"),
-                        speed_btn(500, "2x"),
-                        speed_btn(200, "5x"),
-                        speed_btn(100, "10x"),
-                    ]
-                    .spacing(2),
-                    button(
-                        row![
-                            modal::pane::replay_calendar::calendar_icon(None, is_picker_open, 12.0),
-                            text(dt_str).size(11).font(style::AZERET_MONO),
-                        ]
-                        .spacing(5)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([2, 8])
-                    .style(move |theme: &Theme, status| {
+                container(text("REPLAY").size(10).font(style::AZERET_MONO))
+                    .padding([2, 6])
+                    .style(|theme: &Theme| {
                         let p = theme.extended_palette();
-                        let is_hovered = matches!(status, button::Status::Hovered);
-                        let bg = if is_picker_open {
-                            p.primary.weak.color
-                        } else if is_hovered {
-                            p.background.strong.color
-                        } else {
-                            p.background.weak.color
-                        };
-                        let border_color = if is_picker_open {
-                            p.primary.strong.color
-                        } else {
-                            p.background.strong.color
-                        };
-                        button::Style {
-                            background: Some(bg.into()),
-                            text_color: if is_picker_open {
-                                p.primary.weak.text
-                            } else {
-                                p.background.base.text
-                            },
+                        container::Style {
+                            background: Some(p.primary.weak.color.into()),
+                            text_color: Some(p.primary.weak.text),
                             border: iced::Border {
                                 radius: 2.0.into(),
-                                width: 1.0,
-                                color: border_color,
+                                ..Default::default()
                             },
                             ..Default::default()
                         }
-                    })
-                    .on_press(Message::PaneEvent(pane, Event::ToggleReplayDatePicker)),
-                    button(modal::pane::replay_calendar::random_icon(None, 12.0))
-                        .style(|theme, status| style::button::transparent(theme, status, false))
-                        .on_press(Message::PaneEvent(
-                            pane,
-                            Event::ReplayDatePickerAction(
-                                modal::pane::replay_calendar::Action::RandomBar
-                            ),
+                    }),
+                button(modal::pane::replay_calendar::step_backward_icon(
+                    None, 12.0, 10.0
+                ))
+                .style(|theme, status| style::button::transparent(theme, status, false))
+                .on_press(Message::PaneEvent(pane, Event::ReplayStepBackward))
+                .padding([3, 7]),
+                tooltip(
+                    button(text(play_btn_text).size(10).font(style::AZERET_MONO))
+                        .style(|theme, status| style::button::modifier(
+                            theme,
+                            status,
+                            rep.is_playing
                         ))
-                        .padding([3, 6]),
+                        .on_press(Message::PaneEvent(pane, Event::ReplayPlayPause))
+                        .padding([3, 10]),
+                    Some("Play / Pause (Space)"),
+                    tooltip::Position::Top,
+                ),
+                button(modal::pane::replay_calendar::step_forward_icon(
+                    None, 12.0, 10.0
+                ))
+                .style(|theme, status| style::button::transparent(theme, status, false))
+                .on_press(Message::PaneEvent(pane, Event::ReplayStepForward))
+                .padding([3, 7]),
+                row![
+                    speed_btn(1000, "1x"),
+                    speed_btn(500, "2x"),
+                    speed_btn(200, "5x"),
+                    speed_btn(100, "10x"),
                 ]
-                .spacing(6)
-                .align_y(Alignment::Center);
+                .spacing(2),
+                button(
+                    row![
+                        modal::pane::replay_calendar::calendar_icon(None, is_picker_open, 12.0),
+                        text(dt_str).size(11).font(style::AZERET_MONO),
+                    ]
+                    .spacing(5)
+                    .align_y(Alignment::Center),
+                )
+                .padding([2, 8])
+                .style(move |theme: &Theme, status| {
+                    let p = theme.extended_palette();
+                    let is_hovered = matches!(status, button::Status::Hovered);
+                    let bg = if is_picker_open {
+                        p.primary.weak.color
+                    } else if is_hovered {
+                        p.background.strong.color
+                    } else {
+                        p.background.weak.color
+                    };
+                    let border_color = if is_picker_open {
+                        p.primary.strong.color
+                    } else {
+                        p.background.strong.color
+                    };
+                    button::Style {
+                        background: Some(bg.into()),
+                        text_color: if is_picker_open {
+                            p.primary.weak.text
+                        } else {
+                            p.background.base.text
+                        },
+                        border: iced::Border {
+                            radius: 2.0.into(),
+                            width: 1.0,
+                            color: border_color,
+                        },
+                        ..Default::default()
+                    }
+                })
+                .on_press(Message::PaneEvent(pane, Event::ToggleReplayDatePicker)),
+                button(modal::pane::replay_calendar::random_icon(None, 12.0))
+                    .style(|theme, status| style::button::transparent(theme, status, false))
+                    .on_press(Message::PaneEvent(
+                        pane,
+                        Event::ReplayDatePickerAction(
+                            modal::pane::replay_calendar::Action::RandomBar
+                        ),
+                    ))
+                    .padding([3, 6]),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center);
 
             let mut replay_row = replay_row;
             if !rep.auto_scroll {
-                replay_row = replay_row.push(
-                    tooltip(
-                        button(
-                            row![
-                                text("TO CUTOFF").size(10).font(style::AZERET_MONO),
-                                text(">|").size(10).font(style::AZERET_MONO),
-                            ]
-                            .spacing(3)
-                            .align_y(Alignment::Center),
-                        )
-                        .style(|theme, status| style::button::modifier(theme, status, false))
-                        .on_press(Message::PaneEvent(pane, Event::ReplayAutoScrollToCutoff))
-                        .padding([2, 6]),
-                        Some("Jump to cutoff bar and resume following"),
-                        tooltip::Position::Top,
-                    ),
-                );
+                replay_row = replay_row.push(tooltip(
+                    button(
+                        row![
+                            text("TO CUTOFF").size(10).font(style::AZERET_MONO),
+                            text(">|").size(10).font(style::AZERET_MONO),
+                        ]
+                        .spacing(3)
+                        .align_y(Alignment::Center),
+                    )
+                    .style(|theme, status| style::button::modifier(theme, status, false))
+                    .on_press(Message::PaneEvent(pane, Event::ReplayAutoScrollToCutoff))
+                    .padding([2, 6]),
+                    Some("Jump to cutoff bar and resume following"),
+                    tooltip::Position::Top,
+                ));
             }
 
             replay_row = replay_row.push(

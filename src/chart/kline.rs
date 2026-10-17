@@ -381,9 +381,7 @@ impl KlineChart {
                 // TradingView standard: 10 to 14 bars (~120 to 160 screen pixels of right margin padding).
                 (12.0 * cell_width.clamp(4.0, 8.0) + 72.0) / safe_scaling
             }
-            KlineChartKind::Tpo { .. } => {
-                (8.0 * cell_width.clamp(4.0, 12.0) + 64.0) / safe_scaling
-            }
+            KlineChartKind::Tpo { .. } => (8.0 * cell_width.clamp(4.0, 12.0) + 64.0) / safe_scaling,
         }
     }
 
@@ -658,9 +656,7 @@ impl KlineChart {
         {
             *history_lookback_days = Some(days);
         }
-        if days > exchange::fetcher::trade_history_lookback_days() {
-            exchange::fetcher::set_trade_history_lookback_days(days);
-        }
+        exchange::fetcher::set_trade_history_lookback_days(days);
         self.reset_request_handler();
         self.invalidate_unfetched_empty_footprints();
         self.invalidate_all();
@@ -678,9 +674,7 @@ impl KlineChart {
             {
                 *history_lookback_days = Some(days);
             }
-            if days > exchange::fetcher::trade_history_lookback_days() {
-                exchange::fetcher::set_trade_history_lookback_days(days);
-            }
+            exchange::fetcher::set_trade_history_lookback_days(days);
             self.reset_request_handler();
             self.invalidate_unfetched_empty_footprints();
             self.invalidate_all();
@@ -2701,7 +2695,8 @@ impl KlineChart {
                             };
                             if step > 0 {
                                 let shift = ((new_latest - old_latest) as f64 / step as f64
-                                    * self.chart.cell_width as f64) as f32;
+                                    * self.chart.cell_width as f64)
+                                    as f32;
                                 self.chart.translation.x += shift;
                             }
                         }
@@ -2840,22 +2835,27 @@ impl KlineChart {
             }
         };
 
-        if max_qty > 0.0 {
-            max_qty
-        } else if let PlotData::TimeBased(ts) = &self.data_source {
-            ts.datapoints
-                .range(earliest..=latest)
-                .map(|(_, dp)| {
-                    let sim = self.get_or_simulate_footprint(&dp.kline, step);
-                    sim.max_qty_by(rounded_highest, rounded_lowest, |b, s| match cluster_kind {
-                        ClusterKind::BidAsk => b.max(s),
-                        ClusterKind::DeltaProfile => (b - s).abs(),
-                        ClusterKind::VolumeProfile => b + s,
+        if self.replay.is_some() {
+            if let PlotData::TimeBased(ts) = &self.data_source {
+                let sim_max = ts
+                    .datapoints
+                    .range(earliest..=latest)
+                    .filter(|(_, dp)| dp.footprint.trades.is_empty())
+                    .map(|(_, dp)| {
+                        let sim = self.get_or_simulate_footprint(&dp.kline, step);
+                        sim.max_qty_by(rounded_highest, rounded_lowest, |b, s| match cluster_kind {
+                            ClusterKind::BidAsk => b.max(s),
+                            ClusterKind::DeltaProfile => (b - s).abs(),
+                            ClusterKind::VolumeProfile => b + s,
+                        })
                     })
-                })
-                .fold(0.0_f32, f32::max)
+                    .fold(0.0_f32, f32::max);
+                max_qty.max(sim_max)
+            } else {
+                max_qty
+            }
         } else {
-            0.0
+            max_qty
         }
     }
 
@@ -4356,8 +4356,10 @@ impl canvas::Program<Message> for KlineChart {
                             latest,
                             interval_to_x,
                             |frame, x_position, kline, trades| {
+                                let is_replay = self.replay.is_some();
                                 let sim_trades;
-                                let effective_trades = if trades.is_empty()
+                                let effective_trades = if is_replay
+                                    && trades.is_empty()
                                     && (kline.volume.0 + kline.volume.1) > 0.0
                                 {
                                     sim_trades = self.get_or_simulate_footprint(
@@ -5249,14 +5251,17 @@ fn draw_clusters(
             let bar_alpha = if show_text { 0.25 } else { 1.0 };
 
             let mut process_level = |price: Price, group: Option<&GroupedTrades>| {
+                let Some(g) = group else {
+                    return;
+                };
+                if g.buy_qty <= 0.0 && g.sell_qty <= 0.0 {
+                    return;
+                }
                 let y = price_to_y(price);
 
                 match cluster_kind {
                     ClusterKind::VolumeProfile => {
-                        let (buy_qty, sell_qty, total_qty) = match group {
-                            Some(g) => (g.buy_qty, g.sell_qty, g.total_qty()),
-                            None => (0.0, 0.0, 0.0),
-                        };
+                        let (buy_qty, sell_qty, total_qty) = (g.buy_qty, g.sell_qty, g.total_qty());
 
                         if total_qty > 0.0 {
                             super::draw_volume_bar(
@@ -5275,12 +5280,8 @@ fn draw_clusters(
                             );
                         }
 
-                        if show_text {
-                            let text_str = if total_qty > 0.0 {
-                                abbr_large_numbers(total_qty)
-                            } else {
-                                "0".to_string()
-                            };
+                        if show_text && total_qty > 0.0 {
+                            let text_str = abbr_large_numbers(total_qty);
                             let fit_size = if !text_str.is_empty() {
                                 let max_char_w = (area.bars_width * 0.90) / (text_str.len() as f32);
                                 text_size.min(max_char_w / 0.60)
@@ -5299,7 +5300,7 @@ fn draw_clusters(
                         }
                     }
                     ClusterKind::DeltaProfile => {
-                        let delta = group.map_or(0.0, |g| g.delta_qty());
+                        let delta = g.delta_qty();
                         if show_text {
                             let text_str = abbr_large_numbers(delta);
                             let fit_size = if !text_str.is_empty() {
@@ -5320,7 +5321,8 @@ fn draw_clusters(
                         }
 
                         if max_cluster_qty > 0.0 {
-                            let bar_width = (delta.abs() / max_cluster_qty) * area.bars_width;
+                            let bar_width = ((delta.abs() / max_cluster_qty) * area.bars_width)
+                                .min(area.bars_width);
                             if bar_width > 0.0 && bar_width.is_finite() {
                                 let color = if delta >= 0.0 {
                                     palette.success.base.color.scale_alpha(bar_alpha)
@@ -5338,9 +5340,7 @@ fn draw_clusters(
                     _ => {}
                 }
 
-                if let Some((threshold, color_scale, ignore_zeros)) = imbalance
-                    && let Some(g) = group
-                {
+                if let Some((threshold, color_scale, ignore_zeros)) = imbalance {
                     let higher_price =
                         Price::from_f32(price.to_f32() + tick_size).round_to_step(step);
 
@@ -5416,11 +5416,14 @@ fn draw_clusters(
             let left_area_width = (area.ask_area_right - left_min_x).max(0.0);
 
             let mut process_level = |price: Price, group: Option<&GroupedTrades>| {
-                let y = price_to_y(price);
-                let (buy_qty, sell_qty) = match group {
-                    Some(g) => (g.buy_qty, g.sell_qty),
-                    None => (0.0, 0.0),
+                let Some(g) = group else {
+                    return;
                 };
+                if g.buy_qty <= 0.0 && g.sell_qty <= 0.0 {
+                    return;
+                }
+                let y = price_to_y(price);
+                let (buy_qty, sell_qty) = (g.buy_qty, g.sell_qty);
 
                 if right_area_width > 0.0 {
                     if show_text {
@@ -5443,7 +5446,8 @@ fn draw_clusters(
                     }
 
                     if max_cluster_qty > 0.0 {
-                        let bar_width = (buy_qty / max_cluster_qty) * right_area_width;
+                        let bar_width =
+                            ((buy_qty / max_cluster_qty) * right_area_width).min(right_area_width);
                         if bar_width > 0.0 && bar_width.is_finite() {
                             frame.fill_rectangle(
                                 Point::new(area.bid_area_left, y - (cell_height / 2.0)),
@@ -5474,9 +5478,10 @@ fn draw_clusters(
                     }
 
                     if max_cluster_qty > 0.0 {
-                        let bar_width = (sell_qty / max_cluster_qty) * left_area_width;
+                        let bar_width =
+                            ((sell_qty / max_cluster_qty) * left_area_width).min(left_area_width);
                         if bar_width > 0.0 && bar_width.is_finite() {
-                            let left = (area.ask_area_right - bar_width).max(area.bid_area_left);
+                            let left = (area.ask_area_right - bar_width).max(left_min_x);
                             frame.fill_rectangle(
                                 Point::new(left, y - (cell_height / 2.0)),
                                 Size::new(bar_width, cell_height),
@@ -5488,7 +5493,6 @@ fn draw_clusters(
 
                 if let Some((threshold, color_scale, ignore_zeros)) = imbalance
                     && area.imb_marker_width > 0.0
-                    && let Some(g) = group
                 {
                     let higher_price =
                         Price::from_f32(price.to_f32() + tick_size).round_to_step(step);
@@ -10102,7 +10106,7 @@ mod tests {
                 volume: (50.0, 50.0),
             })
             .collect();
-        let chart = KlineChart::new(
+        let mut chart = KlineChart::new(
             ViewConfig::default(),
             Basis::Time(exchange::Timeframe::M5),
             1.0,
@@ -10121,6 +10125,7 @@ mod tests {
             },
             None,
         );
+        chart.toggle_replay();
 
         // calc_qty_scales must NOT return 0.0: it must fall back to simulated clusters!
         let max_qty = chart.calc_qty_scales(
@@ -10131,7 +10136,49 @@ mod tests {
             PriceStep::from_f32(1.0),
             data::chart::kline::ClusterKind::VolumeProfile,
         );
-        assert!(max_qty > 0.0, "Simulated footprint fallback must produce max_qty > 0, got {max_qty}");
+        assert!(
+            max_qty > 0.0,
+            "Simulated footprint fallback must produce max_qty > 0, got {max_qty}"
+        );
+    }
+
+    #[test]
+    fn test_footprint_lookback_can_be_lowered() {
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceLinear);
+        let ticker_info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M5),
+            1.0,
+            &[],
+            vec![],
+            &[],
+            ticker_info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::DeltaProfile,
+                scaling: data::chart::kline::ClusterScaling::default(),
+                studies: vec![],
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: vec![],
+                history_lookback_days: Some(365),
+            },
+            None,
+        );
+
+        // Initially global might be 365
+        exchange::fetcher::set_trade_history_lookback_days(365);
+        assert_eq!(exchange::fetcher::trade_history_lookback_days(), 365);
+
+        // Setting a smaller lookback MUST update global and local
+        chart.set_history_lookback_days(30);
+        assert_eq!(chart.effective_history_lookback_days(), 30);
+        assert_eq!(exchange::fetcher::trade_history_lookback_days(), 30);
+
+        // Input string method also lowers properly
+        chart.set_history_lookback_input("14".to_string());
+        assert_eq!(chart.effective_history_lookback_days(), 14);
+        assert_eq!(exchange::fetcher::trade_history_lookback_days(), 14);
     }
 
     #[test]

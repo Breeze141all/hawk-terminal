@@ -146,7 +146,7 @@ impl From<&pane::State> for data::Pane {
 
                 data::Pane::KlineChart {
                     layout: chart.as_ref().map_or(layout.clone(), |c| c.chart_layout()),
-                    kind: kind.clone(),
+                    kind: chart.as_ref().map_or(kind.clone(), |c| c.kind().clone()),
                     stream_type: streams,
                     settings,
                     indicators: indicators.clone(),

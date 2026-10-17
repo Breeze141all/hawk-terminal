@@ -88,6 +88,8 @@ impl std::fmt::Display for Timeframe {
                 Timeframe::H4 => "4h",
                 Timeframe::H12 => "12h",
                 Timeframe::D1 => "1d",
+                Timeframe::W1 => "1w",
+                Timeframe::MN1 => "1M",
             }
         )
     }
@@ -110,10 +112,14 @@ pub enum Timeframe {
     H4,
     H12,
     D1,
+    #[serde(alias = "1w", alias = "1W")]
+    W1,
+    #[serde(alias = "1M", alias = "1mo", alias = "1Month", alias = "Month1")]
+    MN1,
 }
 
 impl Timeframe {
-    pub const KLINE: [Timeframe; 10] = [
+    pub const KLINE: [Timeframe; 12] = [
         Timeframe::M1,
         Timeframe::M3,
         Timeframe::M5,
@@ -124,6 +130,8 @@ impl Timeframe {
         Timeframe::H4,
         Timeframe::H12,
         Timeframe::D1,
+        Timeframe::W1,
+        Timeframe::MN1,
     ];
 
     pub const HEATMAP: [Timeframe; 5] = [
@@ -147,6 +155,8 @@ impl Timeframe {
             Timeframe::H4 => 240,
             Timeframe::H12 => 720,
             Timeframe::D1 => 1440,
+            Timeframe::W1 => 10080,
+            Timeframe::MN1 => 43200,
             Timeframe::MS100
             | Timeframe::MS200
             | Timeframe::MS300
@@ -1292,5 +1302,41 @@ mod tests {
         assert_eq!(Timeframe::H1.try_to_minutes(), Some(60));
         assert_eq!(Timeframe::D1.to_minutes(), 1440);
         assert_eq!(Timeframe::D1.try_to_minutes(), Some(1440));
+        assert_eq!(Timeframe::W1.to_minutes(), 10080);
+        assert_eq!(Timeframe::W1.try_to_minutes(), Some(10080));
+        assert_eq!(Timeframe::W1.to_milliseconds(), 604_800_000);
+        assert_eq!(Timeframe::W1.to_string(), "1w");
+
+        assert_eq!(Timeframe::MN1.to_minutes(), 43200);
+        assert_eq!(Timeframe::MN1.try_to_minutes(), Some(43200));
+        assert_eq!(Timeframe::MN1.to_milliseconds(), 2_592_000_000);
+        assert_eq!(Timeframe::MN1.to_string(), "1M");
+
+        // Serde aliases
+        assert_eq!(
+            serde_json::from_str::<Timeframe>("\"W1\"").unwrap(),
+            Timeframe::W1
+        );
+        assert_eq!(
+            serde_json::from_str::<Timeframe>("\"1w\"").unwrap(),
+            Timeframe::W1
+        );
+        assert_eq!(
+            serde_json::from_str::<Timeframe>("\"1W\"").unwrap(),
+            Timeframe::W1
+        );
+
+        assert_eq!(
+            serde_json::from_str::<Timeframe>("\"MN1\"").unwrap(),
+            Timeframe::MN1
+        );
+        assert_eq!(
+            serde_json::from_str::<Timeframe>("\"1M\"").unwrap(),
+            Timeframe::MN1
+        );
+        assert_eq!(
+            serde_json::from_str::<Timeframe>("\"1mo\"").unwrap(),
+            Timeframe::MN1
+        );
     }
 }

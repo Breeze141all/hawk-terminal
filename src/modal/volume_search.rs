@@ -1754,7 +1754,8 @@ pub fn scan_local_cache_for_day(
         let dps = data::aggr::time::aggregate_trades_for_day(&trades, timeframe, effective_step);
         if !dps.is_empty() {
             let interval_ms = timeframe.to_milliseconds();
-            let expected_count = 86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
+            let expected_count =
+                86_400_000u64.checked_div(interval_ms).unwrap_or(1).max(1) as usize;
             let is_day_complete = dps.len() >= expected_count
                 && dps.iter().all(|(_, dp)| {
                     (dp.kline.volume.0 + dp.kline.volume.1) == 0.0 || !dp.footprint.is_empty()
@@ -1935,7 +1936,7 @@ pub async fn download_and_cache_day(
     let dps = data::aggr::time::aggregate_trades_for_day(&trades, timeframe, effective_step);
     if !dps.is_empty() {
         let interval_ms = timeframe.to_milliseconds();
-        let expected_count = 86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
+        let expected_count = 86_400_000u64.checked_div(interval_ms).unwrap_or(1).max(1) as usize;
         let is_day_complete = dps.len() >= expected_count
             && dps.iter().all(|(_, dp)| {
                 (dp.kline.volume.0 + dp.kline.volume.1) == 0.0 || !dp.footprint.is_empty()

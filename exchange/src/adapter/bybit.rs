@@ -520,12 +520,11 @@ pub fn connect_kline_stream(
                         .iter()
                         .map(|(ticker_info, timeframe)| {
                             let ticker = ticker_info.ticker;
-                            let timeframe_str = {
-                                if Timeframe::D1 == *timeframe {
-                                    "D".to_string()
-                                } else {
-                                    timeframe.to_minutes().to_string()
-                                }
+                            let timeframe_str = match *timeframe {
+                                Timeframe::D1 => "D".to_string(),
+                                Timeframe::W1 => "W".to_string(),
+                                Timeframe::MN1 => "M".to_string(),
+                                _ => timeframe.to_minutes().to_string(),
                             };
                             format!(
                                 "kline.{timeframe_str}.{}",
@@ -620,18 +619,15 @@ pub fn connect_kline_stream(
 }
 
 fn string_to_timeframe(interval: &str) -> Option<Timeframe> {
-    Timeframe::KLINE
-        .iter()
-        .find(|&tf| {
-            tf.to_minutes().to_string() == interval || {
-                if tf == &Timeframe::D1 {
-                    interval == "D"
-                } else {
-                    false
-                }
-            }
-        })
-        .copied()
+    match interval {
+        "D" => Some(Timeframe::D1),
+        "W" => Some(Timeframe::W1),
+        "M" => Some(Timeframe::MN1),
+        _ => Timeframe::KLINE
+            .iter()
+            .find(|&tf| tf.to_minutes().to_string() == interval)
+            .copied(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -782,12 +778,11 @@ pub async fn fetch_klines(
     let ticker = ticker_info.ticker;
 
     let (symbol_str, market_type) = &ticker.to_full_symbol_and_type();
-    let timeframe_str = {
-        if Timeframe::D1 == timeframe {
-            "D".to_string()
-        } else {
-            timeframe.to_minutes().to_string()
-        }
+    let timeframe_str = match timeframe {
+        Timeframe::D1 => "D".to_string(),
+        Timeframe::W1 => "W".to_string(),
+        Timeframe::MN1 => "M".to_string(),
+        _ => timeframe.to_minutes().to_string(),
     };
 
     let market = match market_type {
@@ -1495,5 +1490,16 @@ mod tests {
         assert_eq!(resp.ret_code, 10001);
         assert_eq!(resp.ret_msg, "Params error");
         assert!(resp.result.is_none() || resp.result.unwrap().list.is_empty());
+    }
+
+    #[test]
+    fn test_bybit_string_to_timeframe() {
+        assert_eq!(string_to_timeframe("1"), Some(Timeframe::M1));
+        assert_eq!(string_to_timeframe("5"), Some(Timeframe::M5));
+        assert_eq!(string_to_timeframe("60"), Some(Timeframe::H1));
+        assert_eq!(string_to_timeframe("D"), Some(Timeframe::D1));
+        assert_eq!(string_to_timeframe("W"), Some(Timeframe::W1));
+        assert_eq!(string_to_timeframe("M"), Some(Timeframe::MN1));
+        assert_eq!(string_to_timeframe("invalid"), None);
     }
 }

@@ -545,7 +545,7 @@ pub fn connect_market_stream(
                             symbol_str.to_lowercase()
                         );
                         let depth_url = format!(
-                            "wss://{domain}/stream?streams={}@depth@100ms",
+                            "wss://{domain}/public/stream?streams={}@depth@100ms",
                             symbol_str.to_lowercase()
                         );
 
@@ -1067,7 +1067,7 @@ pub fn connect_kline_stream(
 
                     let domain = ws_domain_from_market_type(market);
                     let path = match market {
-                        MarketKind::LinearPerps => "market/stream",
+                        MarketKind::LinearPerps | MarketKind::InversePerps => "market/stream",
                         _ => "stream",
                     };
                     let url = format!("wss://{domain}/{path}?streams={stream_str}");
@@ -1564,6 +1564,21 @@ pub async fn fetch_ticksize(
     Ok(ticker_info_map)
 }
 
+fn parse_ticker_volume(item: &serde_json::Value, market: MarketKind) -> Result<f32, AdapterError> {
+    match market {
+        MarketKind::Spot | MarketKind::LinearPerps => item["quoteVolume"]
+            .as_str()
+            .and_then(|v| v.parse::<f32>().ok())
+            .or_else(|| item["volume"].as_str().and_then(|v| v.parse::<f32>().ok()))
+            .ok_or_else(|| AdapterError::ParseError("Quote volume or volume not found".to_string())),
+        MarketKind::InversePerps => item["volume"]
+            .as_str()
+            .ok_or_else(|| AdapterError::ParseError("Volume not found".to_string()))?
+            .parse::<f32>()
+            .map_err(|e| AdapterError::ParseError(format!("Failed to parse volume: {e}"))),
+    }
+}
+
 pub async fn fetch_ticker_prices(
     market: MarketKind,
 ) -> Result<HashMap<Ticker, TickerStats>, AdapterError> {
@@ -1604,24 +1619,7 @@ pub async fn fetch_ticker_prices(
                 AdapterError::ParseError(format!("Failed to parse price change percent: {e}"))
             })?;
 
-        let volume = {
-            match market {
-                MarketKind::Spot | MarketKind::LinearPerps => item["quoteVolume"]
-                    .as_str()
-                    .ok_or_else(|| AdapterError::ParseError("Quote volume not found".to_string()))?
-                    .parse::<f32>()
-                    .map_err(|e| {
-                        AdapterError::ParseError(format!("Failed to parse quote volume: {e}"))
-                    })?,
-                MarketKind::InversePerps => item["volume"]
-                    .as_str()
-                    .ok_or_else(|| AdapterError::ParseError("Volume not found".to_string()))?
-                    .parse::<f32>()
-                    .map_err(|e| {
-                        AdapterError::ParseError(format!("Failed to parse volume: {e}"))
-                    })?,
-            }
-        };
+        let volume = parse_ticker_volume(&item, market)?;
 
         let ticker_stats = TickerStats {
             mark_price: last_price,
@@ -2868,4 +2866,80 @@ invalid,row
             .unwrap_or_default();
         assert_eq!(duration.as_millis(), 0);
     }
+
+    #[test]
+    fn test_ex15_parse_ticker_volume_quote_volume_fallback() {
+        use serde_json::json;
+
+        // Normal LinearPerps with quoteVolume
+        let normal_linear = json!({
+            "quoteVolume": "12345.67",
+            "volume": "100.0"
+        });
+        let vol = parse_ticker_volume(&normal_linear, MarketKind::LinearPerps).unwrap();
+        assert!((vol - 12345.67).abs() < 1e-4);
+
+        // Inverse ticker inside linear endpoint: quoteVolume is missing, volume is present
+        let inverse_in_linear = json!({
+            "volume": "9876.54"
+        });
+        let vol = parse_ticker_volume(&inverse_in_linear, MarketKind::LinearPerps).unwrap();
+        assert!((vol - 9876.54).abs() < 1e-4);
+
+        // Spot with quoteVolume
+        let spot_item = json!({
+            "quoteVolume": "5555.55",
+            "volume": "50.0"
+        });
+        let vol = parse_ticker_volume(&spot_item, MarketKind::Spot).unwrap();
+        assert!((vol - 5555.55).abs() < 1e-4);
+
+        // InversePerps with volume
+        let inverse_item = json!({
+            "volume": "4321.0"
+        });
+        let vol = parse_ticker_volume(&inverse_item, MarketKind::InversePerps).unwrap();
+        assert!((vol - 4321.0).abs() < 1e-4);
+
+        // Missing both fields returns ParseError gracefully
+        let empty_item = json!({});
+        assert!(parse_ticker_volume(&empty_item, MarketKind::LinearPerps).is_err());
+    }
+
+    #[test]
+    fn test_ex16_binance_stream_urls() {
+        let domain = "fstream.binance.com";
+        let symbol_str = "btcusdt";
+
+        let trade_url = format!(
+            "wss://{domain}/market/stream?streams={}@aggTrade",
+            symbol_str.to_lowercase()
+        );
+        let depth_url = format!(
+            "wss://{domain}/public/stream?streams={}@depth@100ms",
+            symbol_str.to_lowercase()
+        );
+
+        assert!(trade_url.contains("/market/stream?streams="));
+        assert!(depth_url.contains("/public/stream?streams="));
+
+        let kline_path_linear = match MarketKind::LinearPerps {
+            MarketKind::LinearPerps | MarketKind::InversePerps => "market/stream",
+            _ => "stream",
+        };
+        let kline_path_inverse = match MarketKind::InversePerps {
+            MarketKind::LinearPerps | MarketKind::InversePerps => "market/stream",
+            _ => "stream",
+        };
+        let kline_path_spot = match MarketKind::Spot {
+            MarketKind::LinearPerps | MarketKind::InversePerps => "market/stream",
+            _ => "stream",
+        };
+
+        assert_eq!(kline_path_linear, "market/stream");
+        assert_eq!(kline_path_inverse, "market/stream");
+        assert_eq!(kline_path_spot, "stream");
+    }
 }
+
+

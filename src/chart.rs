@@ -1235,7 +1235,7 @@ fn draw_volume_bar(
         return;
     }
 
-    let total_bar_length = (total_qty / max_qty) * bar_length;
+    let total_bar_length = ((total_qty / max_qty) * bar_length).min(bar_length);
 
     let buy_proportion = buy_qty / total_qty;
     let sell_proportion = sell_qty / total_qty;

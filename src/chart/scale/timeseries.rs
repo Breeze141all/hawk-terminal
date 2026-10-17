@@ -156,18 +156,20 @@ pub fn generate_time_labels(
             return vec![];
         };
 
-        daily_labels_gen(
-            timezone,
-            &mut labels,
-            axis_bounds,
-            x_min,
-            x_max,
-            start_utc_dt,
-            end_utc_dt,
-            calc_x_pos,
-            is_drawable,
-            palette,
-        );
+        if timeframe != exchange::Timeframe::MN1 {
+            daily_labels_gen(
+                timezone,
+                &mut labels,
+                axis_bounds,
+                x_min,
+                x_max,
+                start_utc_dt,
+                end_utc_dt,
+                calc_x_pos,
+                is_drawable,
+                palette,
+            );
+        }
 
         monthly_labels_gen(
             timezone,

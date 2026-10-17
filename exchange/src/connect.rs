@@ -20,6 +20,12 @@ pub enum State {
     Connected(FragmentCollector<TokioIo<Upgraded>>),
 }
 
+pub use fastwebsockets::{FragmentCollectorRead, WebSocketWrite};
+use tokio::io::{ReadHalf, WriteHalf};
+
+pub type WsReader = FragmentCollectorRead<ReadHalf<TokioIo<Upgraded>>>;
+pub type WsWriter = WebSocketWrite<WriteHalf<TokioIo<Upgraded>>>;
+
 pub async fn connect_ws(
     domain: &str,
     url: &str,
@@ -31,6 +37,38 @@ pub async fn connect_ws(
     let tls_stream = upgrade_to_tls(domain, tcp_stream).await?;
 
     upgrade_to_websocket(domain, tls_stream, url).await
+}
+
+pub async fn connect_ws_split(
+    domain: &str,
+    url: &str,
+) -> Result<(WsReader, WsWriter), AdapterError> {
+    let tcp_stream = setup_tcp(domain).await?;
+    let tls_stream = upgrade_to_tls(domain, tcp_stream).await?;
+
+    let req: Request<Empty<Bytes>> = Request::builder()
+        .method("GET")
+        .uri(url)
+        .header("Host", domain)
+        .header(UPGRADE, "websocket")
+        .header(CONNECTION, "upgrade")
+        .header(
+            "Sec-WebSocket-Key",
+            fastwebsockets::handshake::generate_key(),
+        )
+        .header("Sec-WebSocket-Version", "13")
+        .body(Empty::<Bytes>::new())
+        .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
+
+    let (ws, _) = fastwebsockets::handshake::client(&SpawnExecutor, req, tls_stream)
+        .await
+        .map_err(|e| AdapterError::WebsocketError(e.to_string()))?;
+
+    let (mut ws_reader, writer) = ws.split(tokio::io::split);
+    ws_reader.set_auto_pong(false);
+    ws_reader.set_auto_close(false);
+    let reader = FragmentCollectorRead::new(ws_reader);
+    Ok((reader, writer))
 }
 
 struct SpawnExecutor;

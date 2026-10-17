@@ -55,6 +55,32 @@ impl UserTimezone {
                 return datetime.format("%M:%S.%3f").to_string();
             }
 
+            if interval >= 28 * 86_400_000 {
+                return match self {
+                    UserTimezone::Local => datetime
+                        .with_timezone(&chrono::Local)
+                        .format("%b %Y")
+                        .to_string(),
+                    UserTimezone::Utc => datetime
+                        .with_timezone(&chrono::Utc)
+                        .format("%b %Y")
+                        .to_string(),
+                };
+            }
+
+            if interval >= 86_400_000 {
+                return match self {
+                    UserTimezone::Local => datetime
+                        .with_timezone(&chrono::Local)
+                        .format("%a %b %-d %Y")
+                        .to_string(),
+                    UserTimezone::Utc => datetime
+                        .with_timezone(&chrono::Utc)
+                        .format("%a %b %-d %Y")
+                        .to_string(),
+                };
+            }
+
             match self {
                 UserTimezone::Local => datetime
                     .with_timezone(&chrono::Local)
@@ -108,5 +134,33 @@ impl Serialize for UserTimezone {
             UserTimezone::Utc => serializer.serialize_str("UTC"),
             UserTimezone::Local => serializer.serialize_str("Local"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_crosshair_timestamp_higher_timeframes() {
+        let tz = UserTimezone::Utc;
+        // 2026-10-15 12:30:00 UTC = 1792067400000 ms
+        let ts = 1792067400000i64;
+
+        // Subminute (< 10000 ms)
+        let sub = tz.format_crosshair_timestamp(ts, 1000);
+        assert!(sub.contains("30:00.000"));
+
+        // Intraday (1h = 3_600_000 ms)
+        let intra = tz.format_crosshair_timestamp(ts, 3_600_000);
+        assert_eq!(intra, "Thu Oct 15 12:30");
+
+        // Daily / Weekly (7 days = 604_800_000 ms)
+        let weekly = tz.format_crosshair_timestamp(ts, 604_800_000);
+        assert_eq!(weekly, "Thu Oct 15 2026");
+
+        // Monthly (30 days = 2_592_000_000 ms)
+        let monthly = tz.format_crosshair_timestamp(ts, 2_592_000_000);
+        assert_eq!(monthly, "Oct 2026");
     }
 }

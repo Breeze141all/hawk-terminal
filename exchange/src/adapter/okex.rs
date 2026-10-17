@@ -590,6 +590,8 @@ fn timeframe_to_okx_bar(tf: Timeframe) -> Option<&'static str> {
         Timeframe::H4 => "4H",
         Timeframe::H12 => "12Hutc",
         Timeframe::D1 => "1Dutc",
+        Timeframe::W1 => "1Wutc",
+        Timeframe::MN1 => "1Mutc",
         _ => return None,
     })
 }
@@ -1216,5 +1218,15 @@ mod tests {
             None => 300,
         };
         assert_eq!(limit, 1);
+    }
+
+    #[test]
+    fn test_okx_timeframe_to_bar() {
+        use super::timeframe_to_okx_bar;
+        assert_eq!(timeframe_to_okx_bar(Timeframe::M1), Some("1m"));
+        assert_eq!(timeframe_to_okx_bar(Timeframe::D1), Some("1Dutc"));
+        assert_eq!(timeframe_to_okx_bar(Timeframe::W1), Some("1Wutc"));
+        assert_eq!(timeframe_to_okx_bar(Timeframe::MN1), Some("1Mutc"));
+        assert_eq!(timeframe_to_okx_bar(Timeframe::MS100), None);
     }
 }

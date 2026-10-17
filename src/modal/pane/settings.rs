@@ -1637,7 +1637,8 @@ pub fn kline_cfg_view<'a>(
                 }
             };
 
-            let effective_days = history_lookback_days.unwrap_or(30);
+            let effective_days = history_lookback_days
+                .unwrap_or_else(exchange::fetcher::trade_history_lookback_days);
             let input_widget = text_input("30", history_lookback_input)
                 .on_input(move |val| {
                     Message::PaneEvent(pane, Event::FootprintHistoryLookbackInput(val))

@@ -303,9 +303,50 @@ impl AxisLabelsX<'_> {
 
                 let crosshair_time =
                     chrono::DateTime::from_timestamp_millis(crosshair_millis as i64)?;
-                let rounded_timestamp =
-                    (crosshair_time.timestamp_millis() as f64 / (interval as f64)).round() as u64
-                        * interval;
+                let rounded_timestamp = match timeframe {
+                    exchange::Timeframe::W1 => {
+                        const DAY_MS: u64 = 86_400_000;
+                        let days = (crosshair_time.timestamp_millis() as f64 / DAY_MS as f64)
+                            .round() as i64;
+                        let monday_days = (days - 4).div_euclid(7) * 7 + 4;
+                        (monday_days as u64) * DAY_MS
+                    }
+                    exchange::Timeframe::MN1 => {
+                        use chrono::Datelike;
+                        let year = crosshair_time.year();
+                        let month = crosshair_time.month();
+                        let start_cur = chrono::NaiveDate::from_ymd_opt(year, month, 1)
+                            .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap()
+                            .and_utc()
+                            .timestamp_millis() as u64;
+                        let (next_y, next_m) = if month == 12 {
+                            (year + 1, 1)
+                        } else {
+                            (year, month + 1)
+                        };
+                        let start_next = chrono::NaiveDate::from_ymd_opt(next_y, next_m, 1)
+                            .unwrap_or_else(|| {
+                                chrono::NaiveDate::from_ymd_opt(next_y, next_m, 28).unwrap()
+                            })
+                            .and_hms_opt(0, 0, 0)
+                            .unwrap()
+                            .and_utc()
+                            .timestamp_millis() as u64;
+                        let t = crosshair_time.timestamp_millis() as u64;
+                        if start_next.saturating_sub(t) < t.saturating_sub(start_cur) {
+                            start_next
+                        } else {
+                            start_cur
+                        }
+                    }
+                    _ => {
+                        (crosshair_time.timestamp_millis() as f64 / (interval as f64)).round()
+                            as u64
+                            * interval
+                    }
+                };
 
                 let snap_ratio =
                     (rounded_timestamp as f64 - x_min as f64) / (x_max as f64 - x_min as f64);
