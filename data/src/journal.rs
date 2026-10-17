@@ -27,7 +27,7 @@ impl std::fmt::Display for JournalMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TradeSide {
     Long,
     Short,
@@ -426,6 +426,87 @@ pub fn load_journal() -> Vec<JournalEntry> {
     serde_json::from_str(&contents).unwrap_or_default()
 }
 
+impl From<exchange::ImportTradeSide> for TradeSide {
+    fn from(side: exchange::ImportTradeSide) -> Self {
+        match side {
+            exchange::ImportTradeSide::Long => TradeSide::Long,
+            exchange::ImportTradeSide::Short => TradeSide::Short,
+        }
+    }
+}
+
+impl From<exchange::ImportedTrade> for JournalEntry {
+    fn from(trade: exchange::ImportedTrade) -> Self {
+        let side: TradeSide = trade.side.into();
+        let mut entry = JournalEntry::new(
+            trade.exchange,
+            trade.ticker,
+            side,
+            trade.entry_price,
+            trade.size,
+            trade.fee,
+            Some("API-Import".to_string()),
+            trade.notes,
+        );
+        entry.timestamp_open = trade.timestamp_open;
+        entry.timestamp_close = Some(trade.timestamp_close);
+        entry.exit_price = Some(trade.exit_price);
+        entry.pnl = Some(trade.pnl);
+        entry.pnl_percent = Some(trade.pnl_percent);
+        entry.status = TradeStatus::Closed;
+        entry
+    }
+}
+
+/// Deduplicates imported trades against existing journal entries in O(M + N) time,
+/// merges non-duplicate entries into the journal, sorts by timestamp_open descending,
+/// and returns the count of new entries added.
+pub fn deduplicate_and_merge_imported_trades(
+    existing: &mut Vec<JournalEntry>,
+    imported: Vec<exchange::ImportedTrade>,
+) -> usize {
+    let mut seen = std::collections::HashSet::new();
+
+    for entry in existing.iter() {
+        let key = (
+            entry.exchange.to_lowercase(),
+            entry.ticker.to_uppercase(),
+            entry.side,
+            entry.timestamp_open,
+            entry.timestamp_close.unwrap_or(0),
+            (entry.entry_price * 100.0).round() as i64,
+            (entry.size * 10000.0).round() as i64,
+        );
+        seen.insert(key);
+    }
+
+    let mut added_entries = Vec::new();
+
+    for trade in imported {
+        let entry: JournalEntry = trade.into();
+        let key = (
+            entry.exchange.to_lowercase(),
+            entry.ticker.to_uppercase(),
+            entry.side,
+            entry.timestamp_open,
+            entry.timestamp_close.unwrap_or(0),
+            (entry.entry_price * 100.0).round() as i64,
+            (entry.size * 10000.0).round() as i64,
+        );
+        if seen.insert(key) {
+            added_entries.push(entry);
+        }
+    }
+
+    let added_count = added_entries.len();
+    if !added_entries.is_empty() {
+        existing.splice(0..0, added_entries);
+        existing.sort_by_key(|b| std::cmp::Reverse(b.timestamp_open));
+    }
+
+    added_count
+}
+
 pub const JOURNAL_IMAGES_DIR: &str = "journal_images";
 
 pub fn journal_images_dir() -> std::path::PathBuf {
@@ -684,5 +765,58 @@ mod tests {
         assert!((stats.avg_planned_rr - 2.5).abs() < 1e-4);
         // avg realized: (2.0 + -1.0) / 2 = 0.5
         assert!((stats.avg_realized_rr - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_deduplicate_and_merge_imported_trades() {
+        let mut existing = vec![JournalEntry::new(
+            "Hyperliquid".into(),
+            "SOL".into(),
+            TradeSide::Long,
+            150.0,
+            10.0,
+            1.5,
+            None,
+            "".into(),
+        )];
+        existing[0].timestamp_open = 1000;
+        existing[0].timestamp_close = Some(2000);
+
+        let incoming = vec![
+            exchange::ImportedTrade {
+                exchange: "Hyperliquid".into(),
+                ticker: "SOL".into(),
+                side: exchange::ImportTradeSide::Long,
+                entry_price: 150.0,
+                exit_price: 160.0,
+                size: 10.0,
+                fee: 1.5,
+                pnl: 98.5,
+                pnl_percent: 6.6,
+                timestamp_open: 1000,
+                timestamp_close: 2000,
+                notes: "".into(),
+            },
+            exchange::ImportedTrade {
+                exchange: "Hyperliquid".into(),
+                ticker: "BTC".into(),
+                side: exchange::ImportTradeSide::Short,
+                entry_price: 65000.0,
+                exit_price: 64000.0,
+                size: 0.5,
+                fee: 5.0,
+                pnl: 495.0,
+                pnl_percent: 1.5,
+                timestamp_open: 3000,
+                timestamp_close: 4000,
+                notes: "".into(),
+            },
+        ];
+
+        let added = deduplicate_and_merge_imported_trades(&mut existing, incoming);
+        assert_eq!(added, 1);
+        assert_eq!(existing.len(), 2);
+        assert_eq!(existing[0].ticker, "BTC"); // sorted by timestamp_open descending (3000 > 1000)
+        assert_eq!(existing[1].ticker, "SOL");
     }
 }

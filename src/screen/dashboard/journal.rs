@@ -1,7 +1,8 @@
 use crate::style::{self, Icon, icon_text};
 use data::journal::{JournalEntry, JournalStats, TradeSide, TradeStatus};
+use exchange::adapter::trade_import::{ImportCredentials, ImportExchangeKind, ImportedTrade, fetch_exchange_trades};
 use iced::{
-    Alignment, Element, Length, Size, Theme,
+    Alignment, Element, Length, Size, Task, Theme,
     widget::{button, column, container, row, scrollable, space, text, text_input},
 };
 use uuid::Uuid;
@@ -49,6 +50,18 @@ pub enum Message {
     AttachImageToTrade(Uuid),
     PasteScreenshotToTrade(Uuid),
     DeleteTradeImage { entry_id: Uuid, image_name: String },
+
+    // Exchange API trade history import
+    ToggleImportModal,
+    SelectImportExchange(ImportExchangeKind),
+    InputImportKeyOrAddress(String),
+    InputImportApiSecret(String),
+    InputImportPassphrase(String),
+    InputImportSymbol(String),
+    InputImportLimit(String),
+    SubmitImport,
+    ImportFinished(Result<Vec<ImportedTrade>, String>),
+    CloseImportModal,
 }
 
 pub enum Action {
@@ -82,6 +95,17 @@ pub struct Journal {
     pub closing_id: Option<Uuid>,
     pub closing_exit_price: String,
     pub closing_fee: String,
+
+    // API trade import
+    pub show_import_modal: bool,
+    pub import_exchange: ImportExchangeKind,
+    pub import_key_or_address: String,
+    pub import_api_secret: String,
+    pub import_passphrase: String,
+    pub import_symbol: String,
+    pub import_limit: String,
+    pub is_importing: bool,
+    pub import_status_message: Option<(String, bool)>,
 
     pub viewing_image: Option<ActiveImageViewer>,
     pub error_message: Option<String>,
@@ -117,6 +141,16 @@ impl Journal {
             closing_id: None,
             closing_exit_price: String::new(),
             closing_fee: "0".to_string(),
+
+            show_import_modal: false,
+            import_exchange: ImportExchangeKind::Hyperliquid,
+            import_key_or_address: String::new(),
+            import_api_secret: String::new(),
+            import_passphrase: String::new(),
+            import_symbol: String::new(),
+            import_limit: "100".to_string(),
+            is_importing: false,
+            import_status_message: None,
 
             viewing_image: None,
             error_message: None,
@@ -177,7 +211,7 @@ impl Journal {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Option<Action> {
+    pub fn update(&mut self, message: Message) -> (Task<Message>, Option<Action>) {
         match message {
             Message::ToggleJournal => {
                 self.is_shown = !self.is_shown;
@@ -228,7 +262,7 @@ impl Journal {
                     Ok(p) if p > 0.0 => p,
                     _ => {
                         self.error_message = Some("Invalid entry price".to_string());
-                        return None;
+                        return (Task::none(), None);
                     }
                 };
 
@@ -239,7 +273,7 @@ impl Journal {
                         Ok(p) if p > 0.0 => Some(p),
                         _ => {
                             self.error_message = Some("Invalid stop loss price".to_string());
-                            return None;
+                            return (Task::none(), None);
                         }
                     }
                 };
@@ -251,7 +285,7 @@ impl Journal {
                         Ok(p) if p > 0.0 => Some(p),
                         _ => {
                             self.error_message = Some("Invalid take profit price".to_string());
-                            return None;
+                            return (Task::none(), None);
                         }
                     }
                 };
@@ -260,7 +294,7 @@ impl Journal {
                     Ok(s) if s > 0.0 => s,
                     _ => {
                         self.error_message = Some("Invalid size".to_string());
-                        return None;
+                        return (Task::none(), None);
                     }
                 };
                 self.last_used_size = Some(size);
@@ -269,7 +303,7 @@ impl Journal {
                 let ticker = self.input_ticker.trim().to_uppercase();
                 if ticker.is_empty() {
                     self.error_message = Some("Ticker cannot be empty".to_string());
-                    return None;
+                    return (Task::none(), None);
                 }
 
                 let tag = if self.input_tag.trim().is_empty() {
@@ -357,7 +391,7 @@ impl Journal {
                         Ok(p) if p > 0.0 => p,
                         _ => {
                             self.error_message = Some("Invalid exit price".to_string());
-                            return None;
+                            return (Task::none(), None);
                         }
                     };
                     let fee = self.closing_fee.trim().parse::<f64>().unwrap_or(0.0);
@@ -377,7 +411,7 @@ impl Journal {
                 self.error_message = None;
             }
             Message::SelectTicker(ticker) => {
-                return Some(Action::TickerSelected(ticker));
+                return (Task::none(), Some(Action::TickerSelected(ticker)));
             }
             Message::PasteScreenshot => match crate::journal_media::save_clipboard_image() {
                 Ok(file_name) => {
@@ -480,8 +514,126 @@ impl Journal {
                     self.viewing_image = None;
                 }
             }
+            Message::ToggleImportModal => {
+                self.show_import_modal = !self.show_import_modal;
+                if self.show_import_modal {
+                    self.show_add_form = false;
+                    self.import_status_message = None;
+                }
+            }
+            Message::SelectImportExchange(kind) => {
+                self.import_exchange = kind;
+                self.import_status_message = None;
+            }
+            Message::InputImportKeyOrAddress(val) => {
+                self.import_key_or_address = val;
+            }
+            Message::InputImportApiSecret(val) => {
+                self.import_api_secret = val;
+            }
+            Message::InputImportPassphrase(val) => {
+                self.import_passphrase = val;
+            }
+            Message::InputImportSymbol(val) => {
+                self.import_symbol = val;
+            }
+            Message::InputImportLimit(val) => {
+                self.import_limit = val;
+            }
+            Message::CloseImportModal => {
+                self.show_import_modal = false;
+                self.import_status_message = None;
+            }
+            Message::SubmitImport => {
+                if self.is_importing {
+                    return (Task::none(), None);
+                }
+
+                let key_or_addr = self.import_key_or_address.trim().to_string();
+                if key_or_addr.is_empty() {
+                    let err = if self.import_exchange == ImportExchangeKind::Hyperliquid {
+                        "Public wallet address (0x...) is required"
+                    } else {
+                        "API Key is required"
+                    };
+                    self.import_status_message = Some((err.to_string(), false));
+                    return (Task::none(), None);
+                }
+
+                if self.import_exchange.requires_secret()
+                    && self.import_api_secret.trim().is_empty()
+                {
+                    self.import_status_message =
+                        Some(("API Secret is required".to_string(), false));
+                    return (Task::none(), None);
+                }
+
+                if self.import_exchange.requires_passphrase()
+                    && self.import_passphrase.trim().is_empty()
+                {
+                    self.import_status_message =
+                        Some(("Passphrase is required for OKX".to_string(), false));
+                    return (Task::none(), None);
+                }
+
+                let creds = ImportCredentials {
+                    exchange: self.import_exchange,
+                    key_or_address: key_or_addr,
+                    api_secret: self.import_api_secret.trim().to_string(),
+                    passphrase: self.import_passphrase.trim().to_string(),
+                    symbol: if self.import_symbol.trim().is_empty() {
+                        None
+                    } else {
+                        Some(self.import_symbol.trim().to_uppercase())
+                    },
+                    limit: self.import_limit.trim().parse::<usize>().ok(),
+                };
+
+                self.is_importing = true;
+                self.import_status_message = None;
+
+                return (
+                    Task::perform(
+                        async move {
+                            fetch_exchange_trades(&creds)
+                                .await
+                                .map_err(|e| e.to_string())
+                        },
+                        Message::ImportFinished,
+                    ),
+                    None,
+                );
+            }
+            Message::ImportFinished(res) => {
+                self.is_importing = false;
+                match res {
+                    Ok(trades) => {
+                        let total = trades.len();
+                        let exchange_name = self.import_exchange.exchange_name();
+                        let added = data::journal::deduplicate_and_merge_imported_trades(
+                            &mut self.entries,
+                            trades,
+                        );
+                        let skipped = total.saturating_sub(added);
+                        self.stats = JournalStats::compute(&self.entries);
+                        if let Err(e) = data::save_journal(&self.entries) {
+                            log::error!("Failed to save journal after import: {e}");
+                        }
+                        self.import_status_message = Some((
+                            format!(
+                                "Import complete: {added} new trade(s) from {exchange_name} added ({skipped} duplicate(s) skipped)."
+                            ),
+                            true,
+                        ));
+                    }
+                    Err(err) => {
+                        self.import_status_message =
+                            Some((format!("Import error: {err}"), false));
+                    }
+                }
+            }
         }
-        None
+        (Task::none(), None)
     }
 
     pub fn view_image_modal(&self) -> Element<'_, Message> {
@@ -624,15 +776,31 @@ impl Journal {
             }),
             space::horizontal(),
             button(
+                text(if self.show_import_modal {
+                    "Close"
+                } else {
+                    "Import"
+                })
+                .size(11)
+                .align_x(Alignment::Center)
+            )
+            .padding([3.0, 5.0])
+            .on_press(Message::ToggleImportModal)
+            .style(|theme, status| style::button::bordered_toggle(
+                theme,
+                status,
+                self.show_import_modal
+            )),
+            button(
                 text(if self.show_add_form {
                     "Cancel"
                 } else {
                     "+ New"
                 })
-                .size(12)
+                .size(11)
                 .align_x(Alignment::Center)
             )
-            .padding([3.0, 6.0])
+            .padding([3.0, 5.0])
             .on_press(Message::ToggleAddForm)
             .style(|theme, status| style::button::bordered_toggle(
                 theme,
@@ -644,7 +812,7 @@ impl Journal {
                 .on_press(Message::ToggleJournal)
                 .style(|theme, status| style::button::transparent(theme, status, false)),
         ]
-        .spacing(6)
+        .spacing(4)
         .align_y(Alignment::Center);
 
         let stats_bar = self.view_stats_bar();
@@ -665,6 +833,10 @@ impl Journal {
 
         if self.show_add_form {
             content = content.push(self.view_add_form());
+        }
+
+        if self.show_import_modal {
+            content = content.push(self.view_import_modal(false));
         }
 
         if let Some(closing_id) = self.closing_id {
@@ -795,6 +967,212 @@ impl Journal {
         row![all_btn, open_btn, closed_btn]
             .spacing(4)
             .width(Length::Fill)
+            .into()
+    }
+
+    fn view_import_modal(&self, is_dashboard: bool) -> Element<'_, Message> {
+        let title_row = row![
+            text("IMPORT EXCHANGE TRADES")
+                .size(if is_dashboard { 14 } else { 12 })
+                .font(iced::Font {
+                    weight: iced::font::Weight::Bold,
+                    ..Default::default()
+                }),
+            space::horizontal(),
+            button(icon_text(Icon::Close, 11).align_x(Alignment::Center))
+                .padding([2.0, 5.0])
+                .on_press(Message::CloseImportModal)
+                .style(|theme, status| style::button::transparent(theme, status, false)),
+        ]
+        .align_y(Alignment::Center);
+
+        let ex_row1 = row![
+            self.view_exchange_selector_btn(ImportExchangeKind::Hyperliquid),
+            self.view_exchange_selector_btn(ImportExchangeKind::BinanceFutures),
+            self.view_exchange_selector_btn(ImportExchangeKind::BinanceSpot),
+            self.view_exchange_selector_btn(ImportExchangeKind::BybitLinear),
+        ]
+        .spacing(4);
+
+        let ex_row2 = row![
+            self.view_exchange_selector_btn(ImportExchangeKind::BybitSpot),
+            self.view_exchange_selector_btn(ImportExchangeKind::OkexSwap),
+            self.view_exchange_selector_btn(ImportExchangeKind::OkexSpot),
+        ]
+        .spacing(4);
+
+        let key_or_addr_label = match self.import_exchange {
+            ImportExchangeKind::Hyperliquid => "Wallet Address (0x...):",
+            _ => "API Key:",
+        };
+
+        let key_or_addr_input = text_input(
+            if self.import_exchange == ImportExchangeKind::Hyperliquid {
+                "0x..."
+            } else {
+                "Exchange API Key"
+            },
+            &self.import_key_or_address,
+        )
+        .on_input(Message::InputImportKeyOrAddress)
+        .padding([4.0, 6.0])
+        .size(12);
+
+        let mut form_fields = column![
+            text(key_or_addr_label)
+                .size(10)
+                .color(iced::Color::from_rgb8(156, 163, 175)),
+            key_or_addr_input,
+        ]
+        .spacing(4);
+
+        if self.import_exchange.requires_secret() {
+            let secret_input = text_input("Exchange API Secret", &self.import_api_secret)
+                .secure(true)
+                .on_input(Message::InputImportApiSecret)
+                .padding([4.0, 6.0])
+                .size(12);
+
+            form_fields = form_fields.push(
+                text("API Secret:")
+                    .size(10)
+                    .color(iced::Color::from_rgb8(156, 163, 175)),
+            );
+            form_fields = form_fields.push(secret_input);
+        }
+
+        if self.import_exchange.requires_passphrase() {
+            let pass_input = text_input("OKX Passphrase", &self.import_passphrase)
+                .secure(true)
+                .on_input(Message::InputImportPassphrase)
+                .padding([4.0, 6.0])
+                .size(12);
+
+            form_fields = form_fields.push(
+                text("Passphrase:")
+                    .size(10)
+                    .color(iced::Color::from_rgb8(156, 163, 175)),
+            );
+            form_fields = form_fields.push(pass_input);
+        }
+
+        let symbol_input = text_input(
+            "All symbols if blank (e.g. BTCUSDT)",
+            &self.import_symbol,
+        )
+        .on_input(Message::InputImportSymbol)
+        .padding([4.0, 6.0])
+        .size(12);
+
+        let limit_input = text_input("100", &self.import_limit)
+            .on_input(Message::InputImportLimit)
+            .padding([4.0, 6.0])
+            .size(12);
+
+        let options_row = row![
+            column![
+                text("Symbol filter (optional):")
+                    .size(10)
+                    .color(iced::Color::from_rgb8(156, 163, 175)),
+                symbol_input,
+            ]
+            .width(Length::FillPortion(2))
+            .spacing(4),
+            column![
+                text("Limit:")
+                    .size(10)
+                    .color(iced::Color::from_rgb8(156, 163, 175)),
+                limit_input,
+            ]
+            .width(Length::FillPortion(1))
+            .spacing(4),
+        ]
+        .spacing(8);
+
+        form_fields = form_fields.push(options_row);
+
+        let status_elem: Element<'_, Message> =
+            if let Some((msg, is_success)) = &self.import_status_message {
+                container(text(msg).size(11).color(if *is_success {
+                    iced::Color::from_rgb8(34, 197, 94)
+                } else {
+                    iced::Color::from_rgb8(239, 68, 68)
+                }))
+                .padding([4.0, 6.0])
+                .into()
+            } else if self.is_importing {
+                container(
+                    text("Fetching trade history from exchange...")
+                        .size(11)
+                        .color(iced::Color::from_rgb8(59, 130, 246)),
+                )
+                .padding([4.0, 6.0])
+                .into()
+            } else {
+                column![].into()
+            };
+
+        let mut submit_button = button(
+            text(if self.is_importing {
+                "Importing..."
+            } else {
+                "Fetch & Import Trades"
+            })
+            .size(12)
+            .align_x(Alignment::Center),
+        )
+        .padding([5.0, 12.0]);
+
+        if !self.is_importing {
+            submit_button = submit_button.on_press(Message::SubmitImport);
+        }
+
+        let is_importing = self.is_importing;
+        let submit_button = submit_button.style(move |theme, status| {
+            if is_importing {
+                style::button::bordered_toggle(theme, status, false)
+            } else {
+                style::button::confirm(theme, status, true)
+            }
+        });
+
+        let cancel_button = button(text("Cancel").size(12).align_x(Alignment::Center))
+            .padding([5.0, 10.0])
+            .on_press(Message::CloseImportModal)
+            .style(|theme, status| style::button::bordered_toggle(theme, status, false));
+
+        let actions_row = row![space::horizontal(), cancel_button, submit_button]
+            .spacing(8)
+            .align_y(Alignment::Center);
+
+        container(
+            column![
+                title_row,
+                ex_row1,
+                ex_row2,
+                form_fields,
+                status_elem,
+                actions_row,
+            ]
+            .spacing(10),
+        )
+        .padding(if is_dashboard { 14 } else { 8 })
+        .style(|theme: &Theme| style::journal_card(theme, None))
+        .into()
+    }
+
+    fn view_exchange_selector_btn(&self, kind: ImportExchangeKind) -> Element<'_, Message> {
+        let is_selected = self.import_exchange == kind;
+        button(text(kind.exchange_name()).size(11).align_x(Alignment::Center))
+            .padding([3.0, 6.0])
+            .on_press(Message::SelectImportExchange(kind))
+            .style(move |theme, status| {
+                if is_selected {
+                    style::button::confirm(theme, status, true)
+                } else {
+                    style::button::bordered_toggle(theme, status, false)
+                }
+            })
             .into()
     }
 
@@ -1324,6 +1702,24 @@ impl Journal {
             container(self.view_filter_bar()).width(300),
             space::horizontal(),
             button(
+                text(if self.show_import_modal {
+                    "Cancel Import"
+                } else {
+                    "Import API History"
+                })
+                .size(12)
+                .align_x(Alignment::Center),
+            )
+            .padding([6.0, 14.0])
+            .on_press(Message::ToggleImportModal)
+            .style(move |theme, status| {
+                if self.show_import_modal {
+                    style::button::bordered_toggle(theme, status, true)
+                } else {
+                    style::button::bordered_toggle(theme, status, false)
+                }
+            }),
+            button(
                 text(if self.show_add_form {
                     "Cancel Form"
                 } else {
@@ -1366,6 +1762,10 @@ impl Journal {
 
         if self.show_add_form {
             main_col = main_col.push(self.view_dashboard_add_form());
+        }
+
+        if self.show_import_modal {
+            main_col = main_col.push(self.view_import_modal(true));
         }
 
         if let Some(closing_id) = self.closing_id {
@@ -2463,7 +2863,7 @@ mod tests {
         assert_eq!(journal.form_planned_rr(), Some(3.0));
 
         // Submit the trade
-        journal.update(Message::SubmitTrade);
+        let _ = journal.update(Message::SubmitTrade);
 
         assert_eq!(journal.error_message, None);
         assert!(!journal.show_add_form);
@@ -2509,7 +2909,7 @@ mod tests {
         assert_eq!(journal.input_size, "2.5"); // uses last_used_size
         assert_eq!(journal.form_planned_rr(), Some(3.0));
 
-        journal.update(Message::SubmitTrade);
+        let _ = journal.update(Message::SubmitTrade);
 
         let created = &journal.entries[0];
         assert_eq!(created.status, TradeStatus::Closed);
@@ -2518,5 +2918,77 @@ mod tests {
         assert_eq!(created.target_price, Some(2700.0));
         assert_eq!(created.planned_rr(), Some(3.0));
         assert_eq!(created.realized_rr(), Some(3.0));
+    }
+
+    #[test]
+    fn test_journal_import_modal_state_and_exchange_selection() {
+        let mut journal = Journal::new();
+        assert!(!journal.show_import_modal);
+
+        let _ = journal.update(Message::ToggleImportModal);
+        assert!(journal.show_import_modal);
+
+        let _ = journal.update(Message::SelectImportExchange(ImportExchangeKind::BybitLinear));
+        assert_eq!(journal.import_exchange, ImportExchangeKind::BybitLinear);
+
+        let _ = journal.update(Message::InputImportKeyOrAddress("test_api_key".to_string()));
+        assert_eq!(journal.import_key_or_address, "test_api_key");
+
+        let _ = journal.update(Message::InputImportApiSecret("test_secret".to_string()));
+        assert_eq!(journal.import_api_secret, "test_secret");
+
+        let _ = journal.update(Message::CloseImportModal);
+        assert!(!journal.show_import_modal);
+    }
+
+    #[test]
+    fn test_journal_import_finished_merges_and_recomputes_stats() {
+        let mut journal = Journal::new();
+        journal.entries.clear();
+
+        let imported_trades = vec![
+            ImportedTrade {
+                exchange: "Binance Linear".to_string(),
+                ticker: "BTCUSDT".to_string(),
+                side: exchange::ImportTradeSide::Long,
+                entry_price: 50000.0,
+                exit_price: 55000.0,
+                size: 1.0,
+                fee: 10.0,
+                pnl: 4990.0,
+                pnl_percent: 10.0,
+                timestamp_open: 1000,
+                timestamp_close: 2000,
+                notes: "Import test".to_string(),
+            },
+            ImportedTrade {
+                exchange: "Binance Linear".to_string(),
+                ticker: "ETHUSDT".to_string(),
+                side: exchange::ImportTradeSide::Short,
+                entry_price: 3000.0,
+                exit_price: 3100.0,
+                size: 2.0,
+                fee: 5.0,
+                pnl: -205.0,
+                pnl_percent: -3.33,
+                timestamp_open: 1500,
+                timestamp_close: 2500,
+                notes: "Import test".to_string(),
+            },
+        ];
+
+        let _ = journal.update(Message::ImportFinished(Ok(imported_trades.clone())));
+
+        assert_eq!(journal.entries.len(), 2);
+        assert_eq!(journal.stats.total_trades, 2);
+        assert_eq!(journal.stats.closed_trades, 2);
+        assert_eq!(journal.stats.winning_trades, 1);
+        assert_eq!(journal.stats.losing_trades, 1);
+        assert!((journal.stats.net_pnl - (4990.0 - 205.0)).abs() < 1e-4);
+        assert!(journal.import_status_message.is_some());
+
+        // Re-importing identical trades should result in 0 new trades added (deduplicated)
+        let _ = journal.update(Message::ImportFinished(Ok(imported_trades)));
+        assert_eq!(journal.entries.len(), 2);
     }
 }

@@ -333,9 +333,10 @@ impl HawkTerminal {
                 if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
                 } else if self.sidebar.journal.is_image_modal_open() {
-                    self.sidebar
+                    let (task, _) = self.sidebar
                         .journal
                         .update(screen::dashboard::journal::Message::CloseImageViewer);
+                    return task.map(|m| Message::Sidebar(dashboard::sidebar::Message::Journal(m)));
                 } else if self.sidebar.active_menu().is_some() {
                     self.sidebar.set_menu(None);
                 } else {

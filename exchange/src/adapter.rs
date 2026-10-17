@@ -14,7 +14,13 @@ pub mod bitcoincounterflow;
 pub mod bybit;
 pub mod hyperliquid;
 pub mod okex;
+pub mod trade_import;
 pub mod ws;
+
+pub use trade_import::{
+    ImportCredentials, ImportExchangeKind, ImportTradeSide, ImportedTrade, RawFill,
+    deduplicate_trades, fetch_exchange_trades, reconstruct_trades_fifo,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedStream {

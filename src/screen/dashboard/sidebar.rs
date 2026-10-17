@@ -102,7 +102,7 @@ impl Sidebar {
                     return (Task::none(), Some(Action::ToggleJournalWindow));
                 }
 
-                let action = self.journal.update(msg);
+                let (task, action) = self.journal.update(msg);
                 if self.journal.is_shown {
                     if self.journal_mode == data::JournalMode::Basic {
                         self.tickers_table.is_shown = false;
@@ -126,13 +126,15 @@ impl Sidebar {
                                 });
                         if let Some(ticker_info) = found_ticker {
                             return (
-                                Task::none(),
+                                task.map(Message::Journal),
                                 Some(Action::TickerSelected(ticker_info, None)),
                             );
                         }
                     }
                     None => {}
                 }
+
+                return (task.map(Message::Journal), None);
             }
         }
 

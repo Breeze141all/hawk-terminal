@@ -8,7 +8,11 @@ pub mod trades;
 pub mod util;
 
 pub use crate::util::{ContractSize, MinQtySize, MinTicksize, Price, PriceStep, UnixMs};
-pub use adapter::{Event, Exchange, ExchangeInclusive, Venue};
+pub use adapter::{
+    Event, Exchange, ExchangeInclusive, ImportCredentials, ImportExchangeKind, ImportTradeSide,
+    ImportedTrade, RawFill, Venue, deduplicate_trades, fetch_exchange_trades,
+    reconstruct_trades_fifo,
+};
 use adapter::{MarketKind, StreamKind};
 
 pub mod unit {

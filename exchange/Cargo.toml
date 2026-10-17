@@ -22,6 +22,9 @@ lz4_flex.workspace = true
 
 tokio = { version = "1.43", default-features = false, features = ["rt", "macros", "sync", "time", "io-util"] }
 reqwest = { version = "0.12.9", default-features = false, features = ["json", "brotli", "rustls-tls"] }
+ring = "0.17"
+hex = "0.4"
+base64 = "0.22"
 bytes = "1.8.0"
 sonic-rs = { version = "0.5.0", default-features = false }
 fastwebsockets = { version = "0.9.0", default-features = false, features = ["upgrade", "unstable-split"] }
