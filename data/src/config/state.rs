@@ -48,6 +48,8 @@ pub struct State {
     pub journal_mode: JournalMode,
     #[serde(default)]
     pub default_kline_config: Option<crate::chart::kline::Config>,
+    #[serde(default)]
+    pub cache_market_metadata: bool,
 }
 
 fn default_trade_history_lookback_days() -> u32 {
@@ -67,6 +69,7 @@ impl State {
         volume_size_unit: exchange::SizeUnit,
         journal_mode: JournalMode,
         default_kline_config: Option<crate::chart::kline::Config>,
+        cache_market_metadata: bool,
     ) -> Self {
         State {
             layout_manager,
@@ -82,6 +85,7 @@ impl State {
             size_in_quote_ccy: volume_size_unit,
             journal_mode,
             default_kline_config,
+            cache_market_metadata,
         }
     }
 }

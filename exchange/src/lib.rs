@@ -8,7 +8,7 @@ pub mod trades;
 pub mod util;
 
 use crate::util::{ContractSize, MinQtySize, MinTicksize, Price};
-pub use adapter::{Event, Exchange};
+pub use adapter::{Event, Exchange, ExchangeInclusive, Venue};
 use adapter::{MarketKind, StreamKind};
 
 use serde::{Deserialize, Deserializer, Serialize};

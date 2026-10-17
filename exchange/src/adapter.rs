@@ -450,6 +450,8 @@ pub enum ExchangeInclusive {
     Okex,
 }
 
+pub type Venue = ExchangeInclusive;
+
 impl ExchangeInclusive {
     pub const ALL: [ExchangeInclusive; 4] = [
         ExchangeInclusive::Bybit,
@@ -542,6 +544,10 @@ impl Exchange {
         Exchange::OkexInverse,
         Exchange::OkexSpot,
     ];
+
+    pub fn venue(&self) -> Venue {
+        ExchangeInclusive::of(*self)
+    }
 
     pub fn market_type(&self) -> MarketKind {
         match self {

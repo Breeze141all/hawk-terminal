@@ -5,6 +5,7 @@ pub mod config;
 pub mod journal;
 pub mod layout;
 pub mod log;
+pub mod metadata;
 pub mod panel;
 pub mod tickers_table;
 pub mod util;
@@ -12,6 +13,8 @@ pub mod util;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+
+pub use metadata::{MarketMetadata, MetadataSource};
 
 pub use audio::AudioStream;
 #[cfg(feature = "volume-search")]

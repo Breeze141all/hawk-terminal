@@ -28,6 +28,7 @@ pub struct SavedState {
     pub audio_cfg: data::AudioStream,
     pub volume_size_unit: exchange::SizeUnit,
     pub journal_mode: data::JournalMode,
+    pub cache_market_metadata: bool,
 }
 
 impl SavedState {
@@ -353,6 +354,7 @@ pub fn state_to_saved_state(state: data::State) -> SavedState {
         audio_cfg: state.audio_cfg,
         volume_size_unit: state.size_in_quote_ccy,
         journal_mode: state.journal_mode,
+        cache_market_metadata: state.cache_market_metadata,
     }
 }
 

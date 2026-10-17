@@ -59,6 +59,9 @@ pub fn global_settings_modal_view<'a>(
     custom_theme: Option<&'a iced::Theme>,
     ui_scale_factor: ScaleFactor,
     #[cfg(feature = "volume-search")] show_volume_search: bool,
+    cache_market_metadata: bool,
+    is_metadata_loading: bool,
+    last_metadata_update: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Element<'a, Message> {
     // Left Sidebar: Category navigation
     let mut sidebar_col = column![
@@ -400,12 +403,79 @@ pub fn global_settings_modal_view<'a>(
             ]
             .spacing(6);
 
+            let metadata_cache_section = {
+                let checkbox = tooltip(
+                    checkbox(cache_market_metadata)
+                        .label("Cache market metadata")
+                        .on_toggle(Message::SetMetadataCaching),
+                    Some("Cache market metadata (tick sizes, lot quantities) for instant startup"),
+                    TooltipPosition::Top,
+                );
+
+                if !cache_market_metadata {
+                    column![
+                        text("Startup Metadata Caching").size(13),
+                        text("Persist parsed instrument rules to disk to start without API roundtrips").size(11),
+                        checkbox,
+                    ]
+                    .spacing(6)
+                } else {
+                    let refresh_btn = {
+                        let btn = button(text("Refresh now").size(11))
+                            .style(move |theme, status| {
+                                style::button::modifier(theme, status, is_metadata_loading)
+                            });
+                        let btn = if is_metadata_loading {
+                            btn
+                        } else {
+                            btn.on_press(Message::RefreshMetadata)
+                        };
+
+                        tooltip(
+                            btn,
+                            if is_metadata_loading { None } else { Some("Refresh metadata now") },
+                            TooltipPosition::Top,
+                        )
+                    };
+
+                    let last_updated = {
+                        let label = if is_metadata_loading {
+                            "Refreshing metadata…".to_string()
+                        } else {
+                            match last_metadata_update {
+                                Some(at) => {
+                                    format!(
+                                        "Metadata last update: {}",
+                                        data::util::relative_time_label(at)
+                                    )
+                                }
+                                None => "Metadata not fetched yet".to_string(),
+                            }
+                        };
+
+                        text(label).size(11)
+                    };
+
+                    column![
+                        text("Startup Metadata Caching").size(13),
+                        text("Persist parsed instrument rules to disk to start without API roundtrips").size(11),
+                        row![checkbox, refresh_btn].align_y(Alignment::Center).spacing(8),
+                        last_updated,
+                    ]
+                    .spacing(6)
+                }
+            };
+
             column![
                 container(display_unit_section)
                     .style(style::modal_container)
                     .padding(8)
                     .width(Length::Fill),
                 container(fetch_section)
+                    .style(style::modal_container)
+                    .padding(8)
+                    .width(Length::Fill),
+                container(metadata_cache_section)
                     .style(style::modal_container)
                     .padding(8)
                     .width(Length::Fill),

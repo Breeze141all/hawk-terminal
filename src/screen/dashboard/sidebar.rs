@@ -44,9 +44,9 @@ impl Sidebar {
     pub fn new(state: &SavedState) -> (Self, Task<Message>) {
         let (tickers_table, initial_fetch) =
             if let Some(settings) = state.sidebar.tickers_table.as_ref() {
-                TickersTable::new_with_settings(settings)
+                TickersTable::new_with_settings(settings, state.cache_market_metadata)
             } else {
-                TickersTable::new()
+                TickersTable::new_with_settings(&data::tickers_table::Settings::default(), state.cache_market_metadata)
             };
 
         (
@@ -361,6 +361,30 @@ impl Sidebar {
 
     pub fn tickers_info(&self) -> &FxHashMap<exchange::Ticker, Option<exchange::TickerInfo>> {
         &self.tickers_table.tickers_info
+    }
+
+    pub fn cache_enabled(&self) -> bool {
+        self.tickers_table.cache_enabled()
+    }
+
+    pub fn set_cache_enabled(&mut self, enabled: bool) {
+        self.tickers_table.set_cache_enabled(enabled);
+    }
+
+    pub fn is_metadata_loading(&self) -> bool {
+        self.tickers_table.is_metadata_loading()
+    }
+
+    pub fn last_metadata_update(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.tickers_table.last_metadata_update()
+    }
+
+    pub fn force_refresh_metadata(&mut self) -> Option<Task<super::tickers_table::Message>> {
+        self.tickers_table.force_refresh_metadata()
+    }
+
+    pub fn persist_metadata_cache(&self) {
+        self.tickers_table.persist_metadata_cache();
     }
 }
 

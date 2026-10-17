@@ -57,18 +57,64 @@ const EXCHANGE_FILTERS: [(ExchangeInclusive, Exchange, &str); 4] = [
     (ExchangeInclusive::Okex, Exchange::OkexLinear, "OKX"),
 ];
 
-pub fn fetch_tickers_info() -> Task<Message> {
-    let fetch_tasks = Exchange::ALL
-        .iter()
-        .map(|exchange| {
-            Task::perform(fetch_ticker_info(*exchange), move |result| match result {
-                Ok(ticker_info) => Message::UpdateTickersInfo(*exchange, ticker_info),
-                Err(err) => Message::ErrorOccurred(InternalError::Fetch(err.to_string())),
-            })
-        })
-        .collect::<Vec<Task<Message>>>();
+pub fn fetch_tickers_info_with_cache(metadata: &data::MarketMetadata) -> Task<Message> {
+    let mut tasks = Vec::new();
 
-    Task::batch(fetch_tasks)
+    for exchange in &Exchange::ALL {
+        let venue = exchange.venue();
+        if metadata.cache_enabled() {
+            let cached = metadata.usable_entries_for(venue);
+            if !cached.is_empty() {
+                let refresh_pending = metadata.needs_fetch(venue);
+                let source = data::MetadataSource::Cached {
+                    fetched_at: metadata.last_updated_for(venue).unwrap_or_default(),
+                    refresh_pending,
+                };
+                let ex = *exchange;
+                tasks.push(Task::done(Message::UpdateTickersInfo(
+                    ex,
+                    cached,
+                    source,
+                )));
+                if refresh_pending {
+                    tasks.push(Task::perform(
+                        fetch_ticker_info(ex),
+                        move |result| match result {
+                            Ok(ticker_info) => Message::UpdateTickersInfo(
+                                ex,
+                                ticker_info,
+                                data::MetadataSource::Fresh,
+                            ),
+                            Err(err) => {
+                                Message::ErrorOccurred(InternalError::Fetch(err.to_string()))
+                            }
+                        },
+                    ));
+                }
+                continue;
+            }
+        }
+
+        let ex = *exchange;
+        tasks.push(Task::perform(
+            fetch_ticker_info(ex),
+            move |result| match result {
+                Ok(ticker_info) => Message::UpdateTickersInfo(
+                    ex,
+                    ticker_info,
+                    data::MetadataSource::Fresh,
+                ),
+                Err(err) => Message::ErrorOccurred(InternalError::Fetch(err.to_string())),
+            },
+        ));
+    }
+
+    Task::batch(tasks)
+}
+
+#[allow(dead_code)]
+pub fn fetch_tickers_info() -> Task<Message> {
+    fetch_tickers_info_with_cache(&data::MarketMetadata::default())
 }
 
 pub enum Action {
@@ -92,7 +138,7 @@ pub enum Message {
     ToggleTable,
     ToggleFavorites,
     FetchForTickerStats(Option<Exchange>),
-    UpdateTickersInfo(Exchange, HashMap<Ticker, Option<TickerInfo>>),
+    UpdateTickersInfo(Exchange, HashMap<Ticker, Option<TickerInfo>>, data::MetadataSource),
     UpdateTickerStats(Exchange, HashMap<Ticker, TickerStats>),
     ErrorOccurred(data::InternalError),
 }
@@ -108,6 +154,7 @@ pub struct TickersTable {
     scroll_offset: AbsoluteOffset,
     pub is_shown: bool,
     pub tickers_info: FxHashMap<Ticker, Option<TickerInfo>>,
+    pub metadata: data::MarketMetadata,
     selected_exchanges: FxHashSet<ExchangeInclusive>,
     selected_markets: FxHashSet<MarketKind>,
     show_favorites: bool,
@@ -117,10 +164,13 @@ pub struct TickersTable {
 
 impl TickersTable {
     pub fn new() -> (Self, Task<Message>) {
-        Self::new_with_settings(&Settings::default())
+        Self::new_with_settings(&Settings::default(), false)
     }
 
-    pub fn new_with_settings(settings: &Settings) -> (Self, Task<Message>) {
+    pub fn new_with_settings(settings: &Settings, cache_enabled: bool) -> (Self, Task<Message>) {
+        let metadata = data::MarketMetadata::with_cache_enabled(cache_enabled);
+        let initial_fetch = fetch_tickers_info_with_cache(&metadata);
+
         (
             Self {
                 ticker_rows: Vec::new(),
@@ -132,14 +182,15 @@ impl TickersTable {
                 expand_ticker_card: None,
                 scroll_offset: AbsoluteOffset::default(),
                 is_shown: false,
-                tickers_info: FxHashMap::default(),
+                tickers_info: metadata.tickers().clone(),
+                metadata,
                 selected_exchanges: settings.selected_exchanges.iter().cloned().collect(),
                 selected_markets: settings.selected_markets.iter().cloned().collect(),
                 show_favorites: settings.show_favorites,
                 row_index: FxHashMap::default(),
                 pending_stats_batches: 0,
             },
-            fetch_tickers_info(),
+            initial_fetch,
         )
     }
 
@@ -151,6 +202,47 @@ impl TickersTable {
             selected_exchanges: self.selected_exchanges.iter().cloned().collect(),
             selected_markets: self.selected_markets.iter().cloned().collect(),
         }
+    }
+
+    pub fn is_metadata_loading(&self) -> bool {
+        self.metadata.any_in_flight()
+    }
+
+    pub fn last_metadata_update(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.metadata.latest_update_for(&self.selected_exchanges)
+    }
+
+    pub fn cache_enabled(&self) -> bool {
+        self.metadata.cache_enabled()
+    }
+
+    pub fn set_cache_enabled(&mut self, enabled: bool) {
+        self.metadata.set_cache_enabled(enabled);
+    }
+
+    pub fn persist_metadata_cache(&self) {
+        if self.metadata.cache_enabled() {
+            self.metadata.save_to_file();
+        }
+    }
+
+    pub fn force_refresh_metadata(&mut self) -> Option<Task<Message>> {
+        let mut tasks = Vec::new();
+        for exchange in &Exchange::ALL {
+            let venue = exchange.venue();
+            if self.selected_exchanges.contains(&venue) && self.metadata.begin_fetch(venue) {
+                let ex = *exchange;
+                tasks.push(Task::perform(
+                    fetch_ticker_info(ex),
+                    move |result| match result {
+                        Ok(info) => Message::UpdateTickersInfo(ex, info, data::MetadataSource::Fresh),
+                        Err(err) => Message::ErrorOccurred(InternalError::Fetch(err.to_string())),
+                    },
+                ));
+            }
+        }
+
+        (!tasks.is_empty()).then(|| Task::batch(tasks))
     }
 
     pub fn update(&mut self, message: Message) -> Option<Action> {
@@ -261,7 +353,10 @@ impl TickersTable {
                     self.sort_ticker_rows();
                 }
             }
-            Message::UpdateTickersInfo(exchange, info) => {
+            Message::UpdateTickersInfo(exchange, info, source) => {
+                let venue = exchange.venue();
+                self.metadata.ingest(venue, &info, source);
+                self.metadata.complete_fetch(venue);
                 self.update_ticker_info(exchange, info);
 
                 let task =

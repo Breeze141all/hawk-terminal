@@ -95,6 +95,8 @@ enum Message {
     ThemeSelected(data::Theme),
     ScaleFactorChanged(data::ScaleFactor),
     SetTimezone(data::UserTimezone),
+    SetMetadataCaching(bool),
+    RefreshMetadata,
     SetJournalMode(data::JournalMode),
     ToggleTradeFetch(bool),
     ApplyVolumeSizeUnit(exchange::SizeUnit),
@@ -445,6 +447,16 @@ impl HawkTerminal {
             }
             Message::SetTimezone(tz) => {
                 self.timezone = tz;
+            }
+            Message::SetMetadataCaching(enabled) => {
+                self.sidebar.set_cache_enabled(enabled);
+            }
+            Message::RefreshMetadata => {
+                if let Some(task) = self.sidebar.force_refresh_metadata() {
+                    return task
+                        .map(dashboard::sidebar::Message::TickersTable)
+                        .map(Message::Sidebar);
+                }
             }
             Message::SetJournalMode(mode) => {
                 self.journal_mode = mode;
@@ -1316,6 +1328,9 @@ impl HawkTerminal {
                     self.ui_scale_factor,
                     #[cfg(feature = "volume-search")]
                     self.sidebar.state.show_volume_search,
+                    self.sidebar.cache_enabled(),
+                    self.sidebar.is_metadata_loading(),
+                    self.sidebar.last_metadata_update(),
                 );
 
                 let (align_x, padding) = match sidebar_pos {
@@ -1563,6 +1578,7 @@ impl HawkTerminal {
             self.volume_size_unit,
             self.journal_mode,
             data::chart::kline::user_default_kline_config(),
+            self.sidebar.cache_enabled(),
         );
 
         // Persist alerts to alerts.json
@@ -1570,6 +1586,9 @@ impl HawkTerminal {
 
         // Persist drawings to drawings.json
         data::DrawingStore::save();
+
+        // Persist market metadata cache to metadata-cache.json
+        self.sidebar.persist_metadata_cache();
 
         match serde_json::to_string(&state) {
             Ok(layout_str) => {
