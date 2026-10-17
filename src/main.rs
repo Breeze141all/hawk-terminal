@@ -352,6 +352,12 @@ impl HawkTerminal {
             }
             Message::ThemeSelected(theme) => {
                 self.theme = theme.clone();
+                let iced_theme: iced::Theme = self.theme.clone().into();
+                let main_window = self.main_window.id;
+                self.active_dashboard_mut()
+                    .theme_updated(main_window, &iced_theme);
+                self.active_dashboard_mut()
+                    .invalidate_all_panes(main_window);
             }
             Message::Dashboard {
                 layout_id: id,
@@ -647,7 +653,10 @@ impl HawkTerminal {
                         self.theme = data::Theme(theme);
 
                         let main_window = self.main_window.id;
+                        let iced_theme: iced::Theme = self.theme.clone().into();
 
+                        self.active_dashboard_mut()
+                            .theme_updated(main_window, &iced_theme);
                         self.active_dashboard_mut()
                             .invalidate_all_panes(main_window);
                     }
@@ -1183,6 +1192,7 @@ impl HawkTerminal {
                 }
                 data::Pane::KlineChart { settings, .. }
                 | data::Pane::HeatmapChart { settings, .. }
+                | data::Pane::ShaderHeatmap { settings, .. }
                 | data::Pane::ComparisonChart { settings, .. }
                 | data::Pane::TimeAndSales { settings, .. }
                 | data::Pane::Ladder { settings, .. } => {

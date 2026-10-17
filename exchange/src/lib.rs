@@ -7,9 +7,14 @@ mod limiter;
 pub mod trades;
 pub mod util;
 
-use crate::util::{ContractSize, MinQtySize, MinTicksize, Price};
+pub use crate::util::{ContractSize, MinQtySize, MinTicksize, Price, PriceStep, UnixMs};
 pub use adapter::{Event, Exchange, ExchangeInclusive, Venue};
 use adapter::{MarketKind, StreamKind};
+
+pub mod unit {
+    pub use crate::util::{ContractSize, MinQtySize, MinTicksize, Price, PriceStep, UnixMs};
+    pub use crate::{volume_size_unit, SizeUnit};
+}
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
@@ -803,6 +808,59 @@ impl TickMultiplier {
         let multiplier = 10f32.powi(decimals);
 
         ((scaled_value * multiplier) / f32::from(self.0)).round() / multiplier
+    }
+
+    /// Applies this multiplier to a base step using integer atomic units.
+    pub fn multiply_step(&self, base_step: PriceStep) -> PriceStep {
+        let units = base_step
+            .units
+            .checked_mul(i64::from(self.0.max(1)))
+            .expect("tick multiplier overflowed PriceStep");
+        PriceStep { units }
+    }
+
+    /// Derives unscaled step from a grouped/scaled step. If the value is not exactly divisible,
+    /// rounds to nearest atomic unit.
+    pub fn unscale_step(&self, scaled_step: PriceStep) -> PriceStep {
+        let m = i64::from(self.0.max(1));
+        if m == 1 {
+            return scaled_step;
+        }
+
+        let q = scaled_step.units.div_euclid(m);
+        let r = scaled_step.units.rem_euclid(m);
+        let rounded = if r.saturating_mul(2) >= m { q + 1 } else { q };
+
+        PriceStep {
+            units: rounded.max(1),
+        }
+    }
+
+    /// Derives unscaled step from a grouped/scaled step; if it is not exactly divisible,
+    /// falls back to the ticker's declared minimum tick.
+    pub fn unscale_step_or_min_tick(
+        &self,
+        scaled_step: PriceStep,
+        min_tick: MinTicksize,
+    ) -> PriceStep {
+        let m = i64::from(self.0.max(1));
+        if m == 1 {
+            return scaled_step;
+        }
+
+        if scaled_step.units > 0 && scaled_step.units.rem_euclid(m) == 0 {
+            PriceStep {
+                units: scaled_step.units / m,
+            }
+        } else {
+            min_tick.into()
+        }
+    }
+
+    /// Returns the final tick step after applying the user selected multiplier.
+    pub fn multiply_with_min_tick_step(&self, ticker_info: TickerInfo) -> PriceStep {
+        let min_step: PriceStep = ticker_info.min_ticksize.into();
+        self.multiply_step(min_step)
     }
 
     /// Returns the final tick size after applying the user selected multiplier

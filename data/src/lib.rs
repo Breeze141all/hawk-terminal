@@ -31,7 +31,7 @@ pub use config::state::{
 pub use config::theme::{
     Theme, breez_theme, deeptrades_theme, default_theme, flowsurface_legacy_theme,
 };
-pub use config::timezone::UserTimezone;
+pub use config::timezone::{TimeLabelKind, UserTimezone};
 pub use journal::{
     JOURNAL_IMAGES_DIR, JournalEntry, JournalMode, JournalStats, PositionAutofill, TradeSide,
     TradeStatus, delete_journal_image_files, journal_image_path, journal_images_dir,

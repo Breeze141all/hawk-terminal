@@ -69,10 +69,61 @@ pub struct PriceStep {
 }
 
 impl PriceStep {
+    /// Decimal places needed to represent this step without trailing zeros.
+    pub fn decimal_places(self) -> usize {
+        let mut units = self.units.unsigned_abs();
+        if units == 0 {
+            return 0;
+        }
+
+        let mut trailing_zeros = 0u32;
+        let max = Price::PRICE_SCALE as u32;
+        while trailing_zeros < max && units.is_multiple_of(10) {
+            units /= 10;
+            trailing_zeros += 1;
+        }
+
+        (max - trailing_zeros) as usize
+    }
+
+    /// String form for UI labels, trimming trailing fractional zeros.
+    pub fn to_ui_string(self) -> String {
+        let mut out = String::with_capacity(24);
+
+        if self.units < 0 {
+            out.push('-');
+        }
+
+        let abs_u = self.units.unsigned_abs();
+        let scale = 10u64.pow(Price::PRICE_SCALE as u32);
+        let int_part = abs_u / scale;
+        out.push_str(&int_part.to_string());
+
+        let frac_raw = abs_u % scale;
+        if frac_raw == 0 {
+            return out;
+        }
+
+        let mut frac = format!("{:0width$}", frac_raw, width = Price::PRICE_SCALE as usize);
+        while frac.ends_with('0') {
+            frac.pop();
+        }
+
+        out.push('.');
+        out.push_str(&frac);
+        out
+    }
+
     /// Lossy: f32 step for UI
     pub fn to_f32_lossy(self) -> f32 {
         let scale = 10f32.powi(Price::PRICE_SCALE);
         (self.units as f32) / scale
+    }
+
+    /// f64 step for UI
+    pub fn to_f64_lossy(self) -> f64 {
+        let scale = 10f64.powi(Price::PRICE_SCALE);
+        (self.units as f64) / scale
     }
 
     /// Lossy: from f32 step (rounds to nearest atomic unit)
@@ -86,6 +137,78 @@ impl PriceStep {
 
     pub fn from_f32(step: f32) -> Self {
         Self::from_f32_lossy(step)
+    }
+}
+
+impl<const MIN: i8, const MAX: i8> From<Power10<MIN, MAX>> for PriceStep {
+    fn from(v: Power10<MIN, MAX>) -> Self {
+        let exp = Price::PRICE_SCALE + i32::from(v.power);
+        assert!(exp >= 0, "invalid Power10 to PriceStep exponent");
+
+        Self {
+            units: 10i64
+                .checked_pow(exp as u32)
+                .expect("Power10 to PriceStep overflowed"),
+        }
+    }
+}
+
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize,
+)]
+#[serde(transparent)]
+pub struct UnixMs(pub u64);
+
+impl UnixMs {
+    pub const ZERO: Self = Self(0);
+
+    #[inline]
+    pub const fn new(ms: u64) -> Self {
+        Self(ms)
+    }
+
+    #[inline]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    pub const fn from_millis(ms: u64) -> Self {
+        Self(ms)
+    }
+
+    #[inline]
+    pub fn now() -> Self {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self(ms)
+    }
+}
+
+impl From<u64> for UnixMs {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
+
+impl From<UnixMs> for u64 {
+    fn from(v: UnixMs) -> Self {
+        v.0
+    }
+}
+
+impl std::ops::Deref for UnixMs {
+    type Target = u64;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UnixMs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

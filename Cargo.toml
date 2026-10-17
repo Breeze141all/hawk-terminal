@@ -46,6 +46,8 @@ arrow-schema = { version = "59.1", default-features = false }
 bytes = "1.8.0"
 url = "2.5"
 reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+iced_wgpu = "0.14.0"
 
 
 [dependencies]
@@ -82,6 +84,8 @@ arrow-schema.workspace = true
 reqwest.workspace = true
 bytes.workspace = true
 url.workspace = true
+bytemuck.workspace = true
+iced_wgpu.workspace = true
 
 exchange = { version = "0.1.0", path = "exchange", package = "hawk-exchange" }
 data = { version = "0.1.0", path = "data", package = "hawk-data", default-features = false }

@@ -439,7 +439,7 @@ impl Dashboard {
                                                 pane::Content::Kline { .. }
                                             ) | (
                                                 data::layout::pane::VisualConfig::Heatmap(_),
-                                                pane::Content::Heatmap { .. }
+                                                pane::Content::Heatmap { .. } | pane::Content::ShaderHeatmap { .. }
                                             ) | (
                                                 data::layout::pane::VisualConfig::TimeAndSales(_),
                                                 pane::Content::TimeAndSales(_)
@@ -1636,6 +1636,9 @@ impl Dashboard {
                         pane::Content::Heatmap { chart: Some(c), .. } if exact_match => {
                             c.insert_datapoint(trades_buffer, depth_update_t, Arc::clone(depth));
                         }
+                        pane::Content::ShaderHeatmap { chart: Some(c), .. } if exact_match => {
+                            c.insert_datapoint(trades_buffer, depth_update_t, depth);
+                        }
                         pane::Content::Kline { chart: Some(c), .. }
                             if !trades_buffer.is_empty() =>
                         {
@@ -1732,6 +1735,18 @@ impl Dashboard {
             });
     }
 
+    pub fn theme_updated(&mut self, main_window: window::Id, theme: &iced_core::Theme) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| {
+                state.content.update_theme(theme);
+            });
+    }
+
+    pub fn park_for_inactive_layout(&mut self, main_window: window::Id) {
+        self.iter_all_panes_mut(main_window)
+            .for_each(|(_, _, state)| state.park_for_inactive_layout());
+    }
+
     pub fn tick(&mut self, now: Instant, main_window: window::Id) -> Task<Message> {
         let mut tasks = vec![];
         let layout_id = self.layout_id;
@@ -1751,6 +1766,7 @@ impl Dashboard {
                             reqs.into_iter().map(|r| (r.req_id, r.fetch, r.stream)),
                         ));
                     }
+                    chart::Action::RequestPalette => {}
                 },
                 Some(pane::Action::Panel(_action)) => {}
                 Some(pane::Action::ResolveStreams(streams)) => {

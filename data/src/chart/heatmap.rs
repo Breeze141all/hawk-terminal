@@ -126,7 +126,7 @@ impl DataPoint for HeatmapDataPoint {
 pub struct OrderRun {
     pub start_time: u64,
     pub until_time: u64,
-    qty: f32,
+    pub qty: f32,
     pub is_bid: bool,
 }
 
@@ -156,7 +156,7 @@ impl OrderRun {
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct HistoricalDepth {
     price_levels: BTreeMap<Price, Vec<OrderRun>>,
-    aggr_time: u64,
+    pub aggr_time: u64,
     tick_size: PriceStep,
     min_order_qty: f32,
 }
@@ -175,6 +175,32 @@ impl HistoricalDepth {
             tick_size,
             min_order_qty,
         }
+    }
+
+    #[inline]
+    pub fn aggr_time_ms(&self) -> u64 {
+        self.aggr_time
+    }
+
+    pub fn max_qty_in_range_raw(
+        &self,
+        earliest: u64,
+        latest: u64,
+        highest: Price,
+        lowest: Price,
+    ) -> f32 {
+        let mut max_qty = 0.0f32;
+
+        for (_price, runs) in self.price_levels.range(lowest..=highest) {
+            for run in runs.iter() {
+                if run.until_time < earliest || run.start_time > latest {
+                    continue;
+                }
+                max_qty = max_qty.max(run.qty);
+            }
+        }
+
+        max_qty
     }
 
     pub fn insert_latest_depth(&mut self, depth: &Depth, time: u64) {
@@ -655,9 +681,10 @@ impl std::fmt::Display for HeatmapStudy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub enum ProfileKind {
     FixedWindow(usize),
+    #[default]
     VisibleRange,
 }
 

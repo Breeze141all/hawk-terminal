@@ -1,6 +1,7 @@
 pub mod comparison;
 pub mod drawing_selection_toolbar;
 pub mod drawing_toolbar;
+pub mod heatmap;
 
 use chrono::{TimeZone, Utc};
 use exchange::TickerInfo;

@@ -10,7 +10,51 @@ pub enum UserTimezone {
     Local,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeLabelKind<'a> {
+    Axis { timeframe: exchange::Timeframe },
+    Crosshair { show_millis: bool },
+    Custom(&'a str),
+}
+
 impl UserTimezone {
+    /// Formats a Unix timestamp (milliseconds) according to the kind.
+    pub fn format_with_kind(&self, timestamp_ms: i64, kind: TimeLabelKind<'_>) -> Option<String> {
+        DateTime::from_timestamp_millis(timestamp_ms).map(|datetime| match self {
+            UserTimezone::Local => {
+                let time_with_zone = datetime.with_timezone(&chrono::Local);
+                match kind {
+                    TimeLabelKind::Axis { timeframe } => {
+                        Self::format_by_timeframe(&time_with_zone, timeframe)
+                    }
+                    TimeLabelKind::Crosshair { show_millis } => {
+                        if show_millis {
+                            time_with_zone.format("%H:%M:%S.%3f").to_string()
+                        } else {
+                            time_with_zone.format("%a %b %-d %H:%M").to_string()
+                        }
+                    }
+                    TimeLabelKind::Custom(fmt) => time_with_zone.format(fmt).to_string(),
+                }
+            }
+            UserTimezone::Utc => {
+                let time_with_zone = datetime.with_timezone(&chrono::Utc);
+                match kind {
+                    TimeLabelKind::Axis { timeframe } => {
+                        Self::format_by_timeframe(&time_with_zone, timeframe)
+                    }
+                    TimeLabelKind::Crosshair { show_millis } => {
+                        if show_millis {
+                            time_with_zone.format("%H:%M:%S.%3f").to_string()
+                        } else {
+                            time_with_zone.format("%a %b %-d %H:%M").to_string()
+                        }
+                    }
+                    TimeLabelKind::Custom(fmt) => time_with_zone.format(fmt).to_string(),
+                }
+            }
+        })
+    }
     /// Converts UTC timestamp to the appropriate timezone and formats it according to timeframe
     pub fn format_timestamp(&self, timestamp: i64, timeframe: exchange::Timeframe) -> String {
         if let Some(datetime) = DateTime::from_timestamp(timestamp, 0) {

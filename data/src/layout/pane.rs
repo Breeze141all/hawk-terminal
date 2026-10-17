@@ -44,6 +44,18 @@ pub enum Pane {
         #[serde(deserialize_with = "ok_or_default", default)]
         link_group: Option<LinkGroup>,
     },
+    ShaderHeatmap {
+        #[serde(deserialize_with = "ok_or_default", default)]
+        studies: Vec<HeatmapStudy>,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        stream_type: Vec<PersistStreamKind>,
+        #[serde(deserialize_with = "ok_or_default")]
+        settings: Settings,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        indicators: Vec<HeatmapIndicator>,
+        #[serde(deserialize_with = "ok_or_default", default)]
+        link_group: Option<LinkGroup>,
+    },
     KlineChart {
         layout: ViewConfig,
         kind: KlineChartKind,
@@ -187,6 +199,7 @@ impl VisualConfig {
 pub enum ContentKind {
     Starter,
     HeatmapChart,
+    ShaderHeatmap,
     FootprintChart,
     CandlestickChart,
     ComparisonChart,
@@ -196,9 +209,10 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 8] = [
+    pub const ALL: [ContentKind; 9] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
+        ContentKind::ShaderHeatmap,
         ContentKind::FootprintChart,
         ContentKind::CandlestickChart,
         ContentKind::ComparisonChart,
@@ -212,7 +226,8 @@ impl std::fmt::Display for ContentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             ContentKind::Starter => "Starter Pane",
-            ContentKind::HeatmapChart => "Heatmap Chart",
+            ContentKind::HeatmapChart => "Heatmap Chart (Legacy)",
+            ContentKind::ShaderHeatmap => "Heatmap Chart (WGPU)",
             ContentKind::FootprintChart => "Footprint Chart",
             ContentKind::CandlestickChart => "Candlestick Chart",
             ContentKind::ComparisonChart => "Comparison Chart",
@@ -230,6 +245,7 @@ pub struct PaneSetup {
     pub basis: Option<Basis>,
     pub tick_multiplier: Option<TickMultiplier>,
     pub tick_size: f32,
+    pub price_step: exchange::PriceStep,
     pub depth_aggr: exchange::adapter::StreamTicksize,
     pub push_freq: exchange::PushFrequency,
 }
@@ -250,7 +266,7 @@ impl PaneSetup {
             .unwrap_or(is_client_aggr);
 
         let basis = match content_kind {
-            ContentKind::HeatmapChart => {
+            ContentKind::HeatmapChart | ContentKind::ShaderHeatmap => {
                 let current = current_basis.and_then(|b| match b {
                     Basis::Time(tf) if exchange.supports_heatmap_timeframe(tf) => Some(b),
                     _ => None,
@@ -271,7 +287,7 @@ impl PaneSetup {
         };
 
         let tick_multiplier = match content_kind {
-            ContentKind::HeatmapChart | ContentKind::Ladder => {
+            ContentKind::HeatmapChart | ContentKind::ShaderHeatmap | ContentKind::Ladder => {
                 let tm = if !is_client_aggr && prev_is_client_aggr {
                     TickMultiplier(10)
                 } else if let Some(tm) = current_tick_multiplier {
@@ -298,10 +314,15 @@ impl PaneSetup {
             None => base_ticker.min_ticksize.into(),
         };
 
+        let price_step = match tick_multiplier {
+            Some(tm) => tm.multiply_with_min_tick_step(base_ticker),
+            None => base_ticker.min_ticksize.into(),
+        };
+
         let depth_aggr = exchange.stream_ticksize(tick_multiplier, TickMultiplier(50));
 
         let push_freq = match content_kind {
-            ContentKind::HeatmapChart if exchange.is_custom_push_freq() => match basis {
+            ContentKind::HeatmapChart | ContentKind::ShaderHeatmap if exchange.is_custom_push_freq() => match basis {
                 Some(Basis::Time(tf)) if exchange.supports_heatmap_timeframe(tf) => {
                     exchange::PushFrequency::Custom(tf)
                 }
@@ -315,6 +336,7 @@ impl PaneSetup {
             basis,
             tick_multiplier,
             tick_size,
+            price_step,
             depth_aggr,
             push_freq,
         }

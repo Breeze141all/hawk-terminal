@@ -6,6 +6,7 @@ pub mod indicator;
 pub mod kline;
 pub mod liquidation_heatmap;
 pub mod replay;
+pub mod ticks;
 pub mod tpo;
 #[cfg(feature = "volume-search")]
 pub mod volume_search;
