@@ -44,6 +44,8 @@ use iced::{
 };
 use std::time::Instant;
 
+pub mod content;
+
 #[derive(Debug, Clone)]
 pub enum Effect {
     RefreshStreams,
@@ -120,6 +122,8 @@ pub enum Event {
     ChartInteraction(super::chart::Message),
     PanelInteraction(super::panel::Message),
     ToggleIndicator(UiIndicator),
+    ToggleScriptedIndicator(data::chart::kline::indicators::IndicatorId),
+    IndicatorSearchChanged(String),
     ToggleIndicatorSettings(KlineIndicator),
     DeleteNotification(usize),
     ReorderIndicator(column_drag::DragEvent),
@@ -201,6 +205,7 @@ pub struct State {
     pub selected_drawing_show_settings: bool,
     pub footprint_notice_dismissed: Option<Exchange>,
     pub settings_category: modal::pane::settings::SettingsCategory,
+    pub indicator_search_query: String,
 }
 
 impl State {
@@ -1818,6 +1823,24 @@ impl State {
             },
             Event::ToggleIndicator(ind) => {
                 self.content.toggle_indicator(ind);
+            }
+            Event::ToggleScriptedIndicator(ind) => {
+                if let Content::Kline { chart: Some(c), .. } = &mut self.content {
+                    let existing = c
+                        .indicator_instances
+                        .instances()
+                        .iter()
+                        .find(|i| i.kind == ind)
+                        .map(|i| i.id);
+                    if let Some(instance_id) = existing {
+                        c.remove_scripted_indicator(instance_id);
+                    } else {
+                        c.add_scripted_indicator(ind);
+                    }
+                }
+            }
+            Event::IndicatorSearchChanged(query) => {
+                self.indicator_search_query = query;
             }
             Event::ToggleIndicatorSettings(ind) => {
                 if let Content::Kline { chart: Some(c), .. } = &mut self.content {
@@ -3640,6 +3663,7 @@ impl Default for State {
             selected_drawing_show_settings: false,
             footprint_notice_dismissed: None,
             settings_category: modal::pane::settings::SettingsCategory::default(),
+            indicator_search_query: String::new(),
         }
     }
 }

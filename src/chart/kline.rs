@@ -1,5 +1,5 @@
 use super::{
-    Action, Basis, Chart, Interaction, Message, PlotConstants, PlotData, PriceAxisBadge, TEXT_SIZE,
+    Action, Basis, Caches, Chart, Interaction, Message, PlotConstants, PlotData, PriceAxisBadge, TEXT_SIZE,
     ViewState, indicator, request_fetch, scale::linear::PriceInfoLabel,
 };
 use crate::chart::indicator::kline::KlineIndicatorImpl;
@@ -57,6 +57,9 @@ impl Chart for KlineChart {
             .values_mut()
             .filter_map(Option::as_mut)
             .for_each(|indi| indi.clear_crosshair_caches());
+        for cache in self.script_panel_caches.values() {
+            cache.clear_crosshair();
+        }
     }
 
     fn invalidate_all(&mut self) {
@@ -83,6 +86,7 @@ impl Chart for KlineChart {
         let market = chart_state.ticker_info.market_type();
         let mut elements = vec![];
 
+        // 1. Built-in panel indicators
         for selected_indicator in enabled {
             if !KlineIndicator::for_market(market).contains(selected_indicator) {
                 continue;
@@ -99,6 +103,28 @@ impl Chart for KlineChart {
                 elements.push(indi.element(chart_state, earliest..=latest));
             }
         }
+
+        // 2. Scripted panel indicators
+        for instance in self.indicator_instances.instances() {
+            let def = instance.kind.definition();
+            if def.attachment_mode != data::chart::kline::indicators::IndicatorAttachmentMode::Panel {
+                continue;
+            }
+            if !def.supported_markets.is_empty() && !def.supported_markets.contains(&market) {
+                continue;
+            }
+            if let Some(cache) = self.script_panel_caches.get(&instance.id) {
+                elements.push(crate::chart::indicator::kline::scripted::render_scripted_panel_row(
+                    chart_state,
+                    cache,
+                    instance,
+                    &self.indicator_host,
+                    &self.data_source,
+                    earliest..=latest,
+                ));
+            }
+        }
+
         elements
     }
 
@@ -320,6 +346,11 @@ pub struct KlineChart {
     data_source: PlotData<KlineDataPoint>,
     raw_trades: Vec<Trade>,
     indicators: EnumMap<KlineIndicator, Option<Box<dyn KlineIndicatorImpl>>>,
+    // === Scripted Indicator Engine Subsystem ===
+    pub indicator_instances: data::chart::kline::indicators::IndicatorInstanceStore,
+    pub indicator_host: data::chart::kline::indicators::IndicatorHost,
+    pub script_panel_caches: rustc_hash::FxHashMap<data::chart::kline::indicators::IndicatorInstanceId, Caches>,
+    // ===========================================
     fetching_trades: (bool, Vec<Handle>),
     active_trade_fetches: usize,
     pub(crate) kind: KlineChartKind,
@@ -521,6 +552,9 @@ impl KlineChart {
                     data_source,
                     raw_trades,
                     indicators,
+                    indicator_instances: data::chart::kline::indicators::IndicatorInstanceStore::default(),
+                    indicator_host: data::chart::kline::indicators::IndicatorHost::default(),
+                    script_panel_caches: rustc_hash::FxHashMap::default(),
                     fetching_trades: (false, Vec::new()),
                     active_trade_fetches: 0,
                     request_handler: RequestHandler::new(),
@@ -607,6 +641,9 @@ impl KlineChart {
                     data_source,
                     raw_trades,
                     indicators,
+                    indicator_instances: data::chart::kline::indicators::IndicatorInstanceStore::default(),
+                    indicator_host: data::chart::kline::indicators::IndicatorHost::default(),
+                    script_panel_caches: rustc_hash::FxHashMap::default(),
                     fetching_trades: (false, Vec::new()),
                     active_trade_fetches: 0,
                     request_handler: RequestHandler::new(),
@@ -1774,6 +1811,7 @@ impl KlineChart {
             self.replay = Some(ReplayState::new(cutoff));
         }
         self.tpo_cache.borrow_mut().sessions.clear();
+        self.recalculate_scripted_indicators_replay();
         self.invalidate_all();
     }
 
@@ -1861,6 +1899,7 @@ impl KlineChart {
                 self.auto_scroll_to_replay_cutoff();
             }
         }
+        self.recalculate_scripted_indicators_replay();
         self.invalidate_all();
     }
 
@@ -1879,6 +1918,7 @@ impl KlineChart {
                 self.auto_scroll_to_replay_cutoff();
             }
         }
+        self.recalculate_scripted_indicators_replay();
         self.invalidate_all();
     }
 
@@ -1897,6 +1937,7 @@ impl KlineChart {
         }
         self.auto_scroll_to_replay_cutoff();
         self.tpo_cache.borrow_mut().sessions.clear();
+        self.recalculate_scripted_indicators_replay();
         self.invalidate_all();
     }
 
@@ -1922,6 +1963,7 @@ impl KlineChart {
             self.replay = Some(ReplayState::new(cutoff));
         }
         self.tpo_cache.borrow_mut().sessions.clear();
+        self.recalculate_scripted_indicators_replay();
         self.scroll_to_timestamp(cutoff);
     }
 
@@ -2391,6 +2433,34 @@ impl KlineChart {
                     self.chart.last_price = None;
                 }
 
+                if !self.indicator_instances.instances().is_empty() {
+                    let basis = indicator_engine::TimeOrTick::Tick;
+                    let min_tick = Some(self.chart.tick_size.to_f32_lossy() as f64);
+                    let new_dp_len = tick_aggr.datapoints.len();
+                    if new_dp_len > old_dp_len {
+                        let start_idx = match self.indicator_host.committed_index() {
+                            Some(last) => last.saturating_add(1),
+                            None => 0,
+                        };
+                        let target_close = new_dp_len.saturating_sub(1);
+                        for idx in start_idx..target_close {
+                            if let Some(acc) = tick_aggr.datapoints.get(idx) {
+                                let frame = data::chart::kline::indicators::kline_to_indicator_frame_with_context(
+                                    idx, &acc.kline, Some(&acc.footprint), None, basis, min_tick, true,
+                                );
+                                self.indicator_host.evaluate_closed(&frame);
+                            }
+                        }
+                    }
+                    if let Some(latest_acc) = tick_aggr.datapoints.last() {
+                        let preview_idx = new_dp_len.saturating_sub(1);
+                        let preview_frame = data::chart::kline::indicators::kline_to_indicator_frame_with_context(
+                            preview_idx, &latest_acc.kline, Some(&latest_acc.footprint), None, basis, min_tick, true,
+                        );
+                        self.indicator_host.preview_open(&preview_frame);
+                    }
+                }
+
                 self.indicators
                     .values_mut()
                     .filter_map(Option::as_mut)
@@ -2413,6 +2483,41 @@ impl KlineChart {
                         self.chart.latest_x = kline_time;
                     }
                     self.chart.last_price = Some(PriceInfoLabel::new(last_close, last_open));
+                }
+
+                if !self.indicator_instances.instances().is_empty() {
+                    let basis = indicator_engine::TimeOrTick::Time;
+                    let min_tick = Some(self.chart.tick_size.to_f32_lossy() as f64);
+                    let new_dp_len = timeseries.datapoints.len();
+                    if new_dp_len > old_dp_len {
+                        let start_idx = match self.indicator_host.committed_index() {
+                            Some(last) => last.saturating_add(1),
+                            None => 0,
+                        };
+                        let target_close = new_dp_len.saturating_sub(1);
+                        if start_idx < target_close {
+                            for (offset, dp) in timeseries
+                                .datapoints
+                                .values()
+                                .skip(start_idx)
+                                .take(target_close.saturating_sub(start_idx))
+                                .enumerate()
+                            {
+                                let idx = start_idx + offset;
+                                let frame = data::chart::kline::indicators::datapoint_to_indicator_frame(
+                                    idx, dp, None, basis, min_tick, true,
+                                );
+                                self.indicator_host.evaluate_closed(&frame);
+                            }
+                        }
+                    }
+                    if let Some(latest_dp) = timeseries.datapoints.values().last() {
+                        let preview_idx = new_dp_len.saturating_sub(1);
+                        let preview_frame = data::chart::kline::indicators::datapoint_to_indicator_frame(
+                            preview_idx, latest_dp, None, basis, min_tick, true,
+                        );
+                        self.indicator_host.preview_open(&preview_frame);
+                    }
                 }
 
                 self.indicators
@@ -2596,6 +2701,7 @@ impl KlineChart {
             }
         }
 
+        self.recalculate_scripted_indicators();
         self.invalidate_all();
     }
 
@@ -2708,6 +2814,8 @@ impl KlineChart {
                     .values_mut()
                     .filter_map(Option::as_mut)
                     .for_each(|indi| indi.rebuild_from_source(&self.data_source));
+
+                self.recalculate_scripted_indicators();
 
                 if self.liquidation_heatmap.config.enabled {
                     self.rebuild_liquidation_heatmap();
@@ -2913,6 +3021,7 @@ impl KlineChart {
                 self.auto_scroll_to_replay_cutoff();
             }
             self.tpo_cache.borrow_mut().sessions.clear();
+            self.recalculate_scripted_indicators_replay();
         }
 
         let base_x = self.base_x();
@@ -3004,6 +3113,9 @@ impl KlineChart {
         for indi in self.indicators.values_mut().filter_map(Option::as_mut) {
             indi.clear_all_caches();
         }
+        for cache in self.script_panel_caches.values() {
+            cache.clear_all();
+        }
 
         if now.is_some() {
             self.missing_data_task()
@@ -3014,7 +3126,8 @@ impl KlineChart {
 
     pub fn active_panel_indicators_count(&self) -> usize {
         let market = self.chart.ticker_info.market_type();
-        self.indicators
+        let builtin_count = self
+            .indicators
             .iter()
             .filter(|(kind, val)| {
                 kind.is_panel()
@@ -3022,7 +3135,125 @@ impl KlineChart {
                     && KlineIndicator::for_market(market).contains(kind)
                     && val.is_some()
             })
-            .count()
+            .count();
+        let script_count = self
+            .indicator_instances
+            .instances()
+            .iter()
+            .filter(|inst| {
+                let def = inst.kind.definition();
+                def.attachment_mode == data::chart::kline::indicators::IndicatorAttachmentMode::Panel
+                    && (def.supported_markets.is_empty() || def.supported_markets.contains(&market))
+            })
+            .count();
+        builtin_count + script_count
+    }
+
+    pub fn recalculate_scripted_indicators(&mut self) {
+        let active_ids = self
+            .indicator_instances
+            .instances()
+            .iter()
+            .map(|i| i.id)
+            .collect::<Vec<_>>();
+        if active_ids.is_empty() {
+            return;
+        }
+        for id in &active_ids {
+            self.script_panel_caches.entry(*id).or_default();
+        }
+        let min_tick = Some(self.chart.tick_size.to_f32_lossy() as f64);
+        let frames = data::chart::kline::indicators::plot_data_to_indicator_frames(
+            &self.data_source,
+            None,
+            min_tick,
+            true,
+        );
+        self.indicator_host
+            .recalculate(&active_ids, &self.indicator_instances, &frames);
+    }
+
+    pub fn recalculate_scripted_indicators_replay(&mut self) {
+        let active_ids = self
+            .indicator_instances
+            .instances()
+            .iter()
+            .map(|i| i.id)
+            .collect::<Vec<_>>();
+        if active_ids.is_empty() {
+            return;
+        }
+        let cutoff = self
+            .replay
+            .as_ref()
+            .filter(|r| r.active)
+            .map(|r| r.cutoff_time)
+            .unwrap_or(0);
+        let min_tick = Some(self.chart.tick_size.to_f32_lossy() as f64);
+        let mut frames = data::chart::kline::indicators::plot_data_to_indicator_frames(
+            &self.data_source,
+            None,
+            min_tick,
+            true,
+        );
+        if cutoff > 0 {
+            frames.retain(|f| (f.time as u64) <= cutoff);
+        }
+        self.indicator_host
+            .recalculate(&active_ids, &self.indicator_instances, &frames);
+    }
+
+    fn sync_panel_splits(&mut self, prev_panel_count: usize) {
+        let current_panel_count = self.active_panel_indicators_count();
+        if prev_panel_count != current_panel_count {
+            if current_panel_count == 0 {
+                self.chart.layout.splits.clear();
+            } else {
+                let main_split = self.chart.layout.splits.first().copied().unwrap_or(0.8);
+                self.chart.layout.splits = data::util::calc_panel_splits(
+                    main_split,
+                    current_panel_count,
+                    Some(prev_panel_count),
+                );
+            }
+        }
+    }
+
+    pub fn add_scripted_indicator(
+        &mut self,
+        kind: data::chart::kline::indicators::registry::IndicatorId,
+    ) -> data::chart::kline::indicators::IndicatorInstanceId {
+        let prev_panel_count = self.active_panel_indicators_count();
+        let id = self.indicator_instances.create(kind);
+        self.script_panel_caches.entry(id).or_default();
+        self.recalculate_scripted_indicators();
+        self.sync_panel_splits(prev_panel_count);
+        self.invalidate_all();
+        id
+    }
+
+    pub fn remove_scripted_indicator(
+        &mut self,
+        id: data::chart::kline::indicators::IndicatorInstanceId,
+    ) -> bool {
+        let prev_panel_count = self.active_panel_indicators_count();
+        let instances = self
+            .indicator_instances
+            .instances()
+            .iter()
+            .filter(|i| i.id != id)
+            .cloned()
+            .collect();
+        self.indicator_instances =
+            data::chart::kline::indicators::IndicatorInstanceStore::from_instances(
+                instances,
+                self.chart.basis,
+            );
+        self.script_panel_caches.remove(&id);
+        self.recalculate_scripted_indicators();
+        self.sync_panel_splits(prev_panel_count);
+        self.invalidate_all();
+        true
     }
 
     pub fn toggle_indicator(&mut self, indicator: KlineIndicator) {
@@ -3062,19 +3293,7 @@ impl KlineChart {
 
         self.invalidate(None);
 
-        let current_panel_count = self.active_panel_indicators_count();
-        if prev_panel_count != current_panel_count {
-            if current_panel_count == 0 {
-                self.chart.layout.splits.clear();
-            } else {
-                let main_split = self.chart.layout.splits.first().copied().unwrap_or(0.8);
-                self.chart.layout.splits = data::util::calc_panel_splits(
-                    main_split,
-                    current_panel_count,
-                    Some(prev_panel_count),
-                );
-            }
-        }
+        self.sync_panel_splits(prev_panel_count);
     }
 
     pub fn toggle_indicator_settings(&mut self, indicator: KlineIndicator) {
@@ -4694,6 +4913,19 @@ impl canvas::Program<Message> for KlineChart {
                 );
             }
 
+            // Pass 3.5: Render scripted indicator overlays
+            crate::chart::indicator::kline::scripted::draw_scripted_indicator_overlays(
+                &self.indicator_instances,
+                &self.indicator_host,
+                &self.data_source,
+                frame,
+                price_to_y,
+                interval_to_x,
+                earliest,
+                latest,
+                palette,
+                &region,
+            );
 
             chart.draw_last_price_line(frame, palette, region);
         });
@@ -12842,5 +13074,137 @@ mod tests {
         let left = (ask_area_right - bar_width).max(bid_area_left);
         assert_eq!(left, 75.0);
         assert!(left >= bid_area_left);
+    }
+
+    #[test]
+    fn test_active_panel_indicators_count_builtin_and_scripted() {
+        let _ = data::chart::kline::indicators::initialize_indicator_catalog();
+
+        let klines = vec![Kline {
+            time: 1_700_000_000_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(95.0),
+            close: Price::from_f32(102.0),
+            volume: (10.0, 10.0),
+        }];
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceSpot);
+        let info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M1),
+            1.0,
+            &klines,
+            vec![],
+            &[],
+            info,
+            &KlineChartKind::Candles,
+            None,
+        );
+
+        // Initially zero panel indicators
+        assert_eq!(chart.active_panel_indicators_count(), 0);
+
+        // Add a scripted panel indicator (core.rsi)
+        let rsi_id = chart.add_scripted_indicator(
+            data::chart::kline::indicators::IndicatorId::parse("core.rsi").unwrap(),
+        );
+        assert_eq!(chart.active_panel_indicators_count(), 1);
+        assert!(chart.script_panel_caches.contains_key(&rsi_id));
+
+        // Add a scripted overlay indicator (core.moving-averages) -> panel count remains 1
+        let ma_id = chart.add_scripted_indicator(
+            data::chart::kline::indicators::IndicatorId::parse("core.moving-averages").unwrap(),
+        );
+        assert_eq!(chart.active_panel_indicators_count(), 1);
+
+        // Remove the panel indicator -> panel count returns to 0
+        chart.remove_scripted_indicator(rsi_id);
+        assert_eq!(chart.active_panel_indicators_count(), 0);
+        assert!(!chart.script_panel_caches.contains_key(&rsi_id));
+
+        // Cleanup
+        chart.remove_scripted_indicator(ma_id);
+        assert_eq!(chart.active_panel_indicators_count(), 0);
+    }
+
+    #[test]
+    fn test_kline_chart_coexistence_footprint_and_replay_recalc() {
+        let _ = data::chart::kline::indicators::initialize_indicator_catalog();
+
+        let interval_ms = 60_000u64;
+        let start_time = (1_700_000_000_000u64 / interval_ms) * interval_ms;
+        let klines = vec![
+            Kline {
+                time: start_time,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(105.0),
+                low: Price::from_f32(95.0),
+                close: Price::from_f32(102.0),
+                volume: (10.0, 10.0),
+            },
+            Kline {
+                time: start_time + interval_ms,
+                open: Price::from_f32(102.0),
+                high: Price::from_f32(108.0),
+                low: Price::from_f32(101.0),
+                close: Price::from_f32(106.0),
+                volume: (15.0, 15.0),
+            },
+        ];
+        let trade = Trade {
+            time: start_time + 30_000,
+            price: Price::from_f32(103.0),
+            qty: 5.0,
+            is_sell: false,
+        };
+        let ticker = exchange::Ticker::new("BTCUSDT", exchange::adapter::Exchange::BinanceSpot);
+        let info = exchange::TickerInfo::new(ticker, 0.1, 0.001, None);
+        let mut chart = KlineChart::new(
+            ViewConfig::default(),
+            Basis::Time(exchange::Timeframe::M1),
+            1.0,
+            &klines,
+            vec![],
+            &[],
+            info,
+            &KlineChartKind::Footprint {
+                clusters: data::chart::kline::ClusterKind::VolumeProfile,
+                scaling: data::chart::kline::ClusterScaling::VisibleRange,
+                studies: Vec::new(),
+                show_bottom_volume: false,
+                aggregate: false,
+                aggregate_exchanges: data::chart::kline::default_aggregate_exchanges(),
+                history_lookback_days: None,
+            },
+            None,
+        );
+
+        chart.insert_trades_buffer(&[trade]);
+
+        // Add scripted indicator
+        let rsi_id = chart.add_scripted_indicator(
+            data::chart::kline::indicators::IndicatorId::parse("core.rsi").unwrap(),
+        );
+
+        // Recalculate indicators
+        chart.recalculate_scripted_indicators();
+
+        // Verify footprint integrity
+        if let PlotData::TimeBased(ref ts) = chart.data_source {
+            let dp = ts.datapoints.get(&start_time).unwrap();
+            let vol: f32 = dp.footprint.trades.values().map(|b| b.buy_qty + b.sell_qty).sum();
+            assert_eq!(vol, 5.0, "Footprint trades volume must be preserved");
+        }
+
+        // Test replay cutoff synchronization
+        chart.replay = Some(data::chart::replay::ReplayState::new(start_time));
+
+        // Recalculate under replay
+        chart.recalculate_scripted_indicators_replay();
+
+        // Output should not exist past cutoff
+        let val_1 = chart.indicator_host.output_value_for(rsi_id, "value", 1);
+        assert_eq!(val_1, None, "Frame past replay cutoff must not have evaluated output");
     }
 }

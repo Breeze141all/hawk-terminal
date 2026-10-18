@@ -9,6 +9,40 @@ use std::path::{Path, PathBuf};
 use super::tpo::{SessionCluster, SessionPeriod};
 use crate::aggr::time::DataPoint;
 
+pub mod indicators;
+
+pub use indicators::adapter::{
+    datapoint_to_indicator_frame, kline_to_indicator_frame, kline_to_indicator_frame_with_context,
+    plot_data_to_indicator_frames,
+};
+pub use indicators::composition;
+pub use indicators::core::{
+    IndicatorHost, IndicatorInputRequirement, IndicatorInputSource, IndicatorOutputRef,
+    OpenInterestSeries, OutputChannelSpec, OutputValue, OutputValueType,
+};
+pub use indicators::feed_capabilities;
+pub use indicators::instance::{
+    IndicatorInstance, IndicatorInstanceId, IndicatorInstanceStore, IndicatorStyleOverrides,
+    LineStrokeStyle, SourceBindingProblem,
+};
+pub use indicators::scripting::ScriptIndicatorRuntime;
+pub use indicators::{
+    all_indicators, availability, catalog, declared_input_requirements, display_name,
+    indicator_definition, initialize_indicator_catalog, initialize_indicator_catalog_with_paths,
+    is_supported_for_market, panel_recipe, requires_trade_data, table_columns, unsupported_reason,
+    AvailabilityContext, BaseSeriesSource, CatalogInstallError, IndicatorAuthor,
+    IndicatorAvailability, IndicatorCatalog, IndicatorCatalogPaths, IndicatorColorSpec,
+    IndicatorConfig, IndicatorConfigError, IndicatorDefinition, IndicatorDefinitionError,
+    IndicatorFillGeometry, IndicatorFillSpec, IndicatorHistoryRequirement, IndicatorId,
+    IndicatorIdError, IndicatorInputAvailability, IndicatorInputCoverage,
+    IndicatorInputCoverageState, IndicatorMarkSpec, IndicatorOutputLayerSpec,
+    IndicatorOverlayChannelSpec, IndicatorOverlaySource, IndicatorPanelRecipe,
+    IndicatorReadoutScope, IndicatorReadoutSpec, IndicatorRegistration, IndicatorSegmentSpec,
+    IndicatorSetting, IndicatorSettingChoice, IndicatorSettingControl, IndicatorSettingValue,
+    IndicatorSettingsContext, IndicatorSourceInput, IndicatorUnsupportedReason,
+    TableColumnColor, TableColumnFormat, TableColumnSpec, TableColumnValue,
+};
+
 #[derive(Debug, Clone)]
 pub struct KlineDataPoint {
     pub kline: Kline,
@@ -244,6 +278,31 @@ impl KlineTrades {
 
     pub fn last_trade_t(&self) -> Option<u64> {
         self.cached_last_time
+    }
+
+    pub fn trade_summary(&self) -> Option<indicator_engine::TradeAggregate> {
+        if self.trades.is_empty() {
+            return None;
+        }
+
+        let mut buy_count = 0u64;
+        let mut sell_count = 0u64;
+        let mut buy_qty = 0.0f64;
+        let mut sell_qty = 0.0f64;
+
+        for group in self.trades.values() {
+            buy_count = buy_count.saturating_add(group.buy_count as u64);
+            sell_count = sell_count.saturating_add(group.sell_count as u64);
+            buy_qty += group.buy_qty as f64;
+            sell_qty += group.sell_qty as f64;
+        }
+
+        Some(indicator_engine::TradeAggregate {
+            buy_qty,
+            sell_qty,
+            buy_count,
+            sell_count,
+        })
     }
 
     pub fn min_price(&self) -> Option<Price> {

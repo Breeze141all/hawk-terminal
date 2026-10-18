@@ -694,21 +694,21 @@ pub trait PlotConstants {
 
 #[derive(Default)]
 pub struct Caches {
-    main: Cache,
-    x_labels: Cache,
-    y_labels: Cache,
-    crosshair: Cache,
+    pub(crate) main: Cache,
+    pub(crate) x_labels: Cache,
+    pub(crate) y_labels: Cache,
+    pub(crate) crosshair: Cache,
 }
 
 impl Caches {
-    fn clear_all(&self) {
+    pub(crate) fn clear_all(&self) {
         self.main.clear();
         self.x_labels.clear();
         self.y_labels.clear();
         self.crosshair.clear();
     }
 
-    fn clear_crosshair(&self) {
+    pub(crate) fn clear_crosshair(&self) {
         self.crosshair.clear();
         self.y_labels.clear();
         self.x_labels.clear();

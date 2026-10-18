@@ -1,0 +1,18 @@
+[package]
+name = "indicator-engine"
+description = "Aggr-level live scripting engine for Hawk Terminal indicator sources"
+version = "0.1.0"
+license = "Apache-2.0"
+edition.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "indicator_engine"
+path = "src/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+thiserror.workspace = true
+url.workspace = true

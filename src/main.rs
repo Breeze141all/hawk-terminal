@@ -40,6 +40,7 @@ enum AppScreen {
 
 fn main() {
     logger::setup(cfg!(debug_assertions)).expect("Failed to initialize logger");
+    let _ = data::chart::kline::indicators::loader::initialize_indicator_catalog();
 
     let _ = iced::daemon(HawkTerminal::new, HawkTerminal::update, HawkTerminal::view)
         .settings(iced::Settings {

@@ -15,6 +15,7 @@ pub mod net_oi;
 pub mod open_interest;
 pub mod position_flow;
 pub mod rolling_vwap;
+pub mod scripted;
 pub mod tpo;
 pub mod volume;
 pub mod vpin;

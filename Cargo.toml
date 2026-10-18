@@ -23,7 +23,7 @@ repository = "https://github.com/Breeze141all/hawk-terminal"
 homepage = "https://breeze141all.github.io/hawk-site/"
 
 [workspace]
-members = [ "data", "exchange"]
+members = [ "data", "exchange", "indicator-engine"]
 
 [workspace.dependencies]
 iced_futures = { version = "0.14.0" }
@@ -48,6 +48,7 @@ url = "2.5"
 reqwest = { version = "0.12.9", default-features = false, features = ["json", "rustls-tls"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 iced_wgpu = "0.14.0"
+indicator_engine = { version = "0.1.0", path = "indicator-engine", package = "indicator-engine" }
 
 
 [dependencies]
@@ -89,6 +90,7 @@ iced_wgpu.workspace = true
 
 exchange = { version = "0.1.0", path = "exchange", package = "hawk-exchange" }
 data = { version = "0.1.0", path = "data", package = "hawk-data", default-features = false }
+indicator_engine.workspace = true
 arboard = "3.6.1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 rfd = "0.15"

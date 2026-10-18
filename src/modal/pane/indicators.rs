@@ -17,6 +17,21 @@ pub fn view<'a, I>(
 where
     I: Indicator + Copy + Into<UiIndicator>,
 {
+    if let pane::Content::Kline {
+        chart: Some(chart),
+        indicators,
+        ..
+    } = &state.content
+    {
+        return crate::screen::dashboard::pane::content::kline::indicator_browser::view(
+            pane,
+            chart,
+            indicators,
+            &state.indicator_search_query,
+            market_type,
+        );
+    }
+
     let content_allows_dragging = matches!(state.content, pane::Content::Kline { .. });
     let content_row = if let Some(market) = market_type {
         content_row(pane, selected, market, content_allows_dragging)

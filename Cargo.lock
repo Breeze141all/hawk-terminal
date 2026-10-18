@@ -2100,6 +2100,7 @@ dependencies = [
  "enum-map",
  "hawk-exchange",
  "iced_core",
+ "indicator-engine",
  "log",
  "lz4_flex",
  "open",
@@ -2110,6 +2111,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "thiserror 2.0.17",
+ "url",
  "uuid",
 ]
 
@@ -2166,6 +2168,7 @@ dependencies = [
  "iced_futures",
  "iced_wgpu",
  "image",
+ "indicator-engine",
  "log",
  "notify-rust",
  "num-traits",
@@ -2720,6 +2723,16 @@ checksum = "0ad4bb2b565bca0645f4d68c5c9af97fba094e9791da685bf83cb5f3ce74acf2"
 dependencies = [
  "equivalent",
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "indicator-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "thiserror 2.0.17",
+ "url",
 ]
 
 [[package]]
