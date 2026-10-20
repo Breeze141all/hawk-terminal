@@ -2150,7 +2150,7 @@ dependencies = [
 
 [[package]]
 name = "hawk-terminal"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "arboard",
  "arrow-array",
