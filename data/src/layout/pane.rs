@@ -168,7 +168,7 @@ impl VisualConfig {
 
     pub fn time_and_sales(&self) -> Option<timeandsales::Config> {
         match self {
-            Self::TimeAndSales(cfg) => Some(*cfg),
+            Self::TimeAndSales(cfg) => Some(cfg.clone()),
             _ => None,
         }
     }
@@ -265,26 +265,51 @@ impl PaneSetup {
             .map(|ti| ti.ticker.exchange.is_depth_client_aggr())
             .unwrap_or(is_client_aggr);
 
-        let basis = match content_kind {
-            ContentKind::HeatmapChart | ContentKind::ShaderHeatmap => {
-                let current = current_basis.and_then(|b| match b {
-                    Basis::Time(tf) if exchange.supports_heatmap_timeframe(tf) => Some(b),
-                    _ => None,
-                });
-                Some(current.unwrap_or_else(|| Basis::default_heatmap_time(Some(base_ticker))))
-            }
-            ContentKind::Ladder => Some(
-                current_basis.unwrap_or_else(|| Basis::default_heatmap_time(Some(base_ticker))),
-            ),
-            ContentKind::FootprintChart => {
-                Some(current_basis.unwrap_or(Basis::Time(Timeframe::M5)))
-            }
-            ContentKind::TpoChart => Some(current_basis.unwrap_or(Basis::Time(Timeframe::M30))),
-            ContentKind::CandlestickChart | ContentKind::ComparisonChart => {
-                Some(current_basis.unwrap_or(Basis::Time(Timeframe::M15)))
-            }
-            ContentKind::Starter | ContentKind::TimeAndSales => None,
-        };
+        let basis =
+            match content_kind {
+                ContentKind::HeatmapChart | ContentKind::ShaderHeatmap => {
+                    let current = current_basis.and_then(|b| match b {
+                        Basis::Time(tf) if exchange.supports_heatmap_timeframe(tf) => Some(b),
+                        _ => None,
+                    });
+                    Some(current.unwrap_or_else(|| Basis::default_heatmap_time(Some(base_ticker))))
+                }
+                ContentKind::Ladder => Some(
+                    current_basis.unwrap_or_else(|| Basis::default_heatmap_time(Some(base_ticker))),
+                ),
+                ContentKind::FootprintChart => {
+                    let current = current_basis.and_then(|b| match b {
+                        Basis::Time(tf) if exchange.supports_kline_timeframe(tf) => Some(b),
+                        Basis::Tick(_) => Some(b),
+                        _ => None,
+                    });
+
+                    Some(current.unwrap_or_else(|| {
+                        Basis::default_kline_time(Some(base_ticker), Timeframe::M5)
+                    }))
+                }
+                ContentKind::TpoChart => {
+                    let current = current_basis.and_then(|b| match b {
+                        Basis::Time(tf) if exchange.supports_kline_timeframe(tf) => Some(b),
+                        _ => None,
+                    });
+
+                    Some(current.unwrap_or_else(|| {
+                        Basis::default_kline_time(Some(base_ticker), Timeframe::M30)
+                    }))
+                }
+                ContentKind::CandlestickChart | ContentKind::ComparisonChart => {
+                    let current = current_basis.and_then(|b| match b {
+                        Basis::Time(tf) if exchange.supports_kline_timeframe(tf) => Some(b),
+                        _ => None,
+                    });
+
+                    Some(current.unwrap_or_else(|| {
+                        Basis::default_kline_time(Some(base_ticker), Timeframe::M15)
+                    }))
+                }
+                ContentKind::Starter | ContentKind::TimeAndSales => None,
+            };
 
         let tick_multiplier = match content_kind {
             ContentKind::HeatmapChart | ContentKind::ShaderHeatmap | ContentKind::Ladder => {
@@ -322,12 +347,16 @@ impl PaneSetup {
         let depth_aggr = exchange.stream_ticksize(tick_multiplier, TickMultiplier(50));
 
         let push_freq = match content_kind {
-            ContentKind::HeatmapChart | ContentKind::ShaderHeatmap if exchange.is_custom_push_freq() => match basis {
-                Some(Basis::Time(tf)) if exchange.supports_heatmap_timeframe(tf) => {
-                    exchange::PushFrequency::Custom(tf)
+            ContentKind::HeatmapChart | ContentKind::ShaderHeatmap
+                if exchange.is_custom_push_freq() =>
+            {
+                match basis {
+                    Some(Basis::Time(tf)) if exchange.supports_heatmap_timeframe(tf) => {
+                        exchange::PushFrequency::Custom(tf)
+                    }
+                    _ => exchange::PushFrequency::ServerDefault,
                 }
-                _ => exchange::PushFrequency::ServerDefault,
-            },
+            }
             _ => exchange::PushFrequency::ServerDefault,
         };
 

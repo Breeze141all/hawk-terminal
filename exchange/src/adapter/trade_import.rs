@@ -162,10 +162,7 @@ struct OpenLot {
 /// Reconstructs closed trades from raw exchange fills using FIFO matching.
 /// Fills are automatically sorted chronologically (oldest to newest) before processing.
 /// Asymptotic complexity: O(N log N) sorting + O(N) single-pass FIFO matching = O(N log N) time, O(N) space.
-pub fn reconstruct_trades_fifo(
-    exchange_name: &str,
-    mut fills: Vec<RawFill>,
-) -> Vec<ImportedTrade> {
+pub fn reconstruct_trades_fifo(exchange_name: &str, mut fills: Vec<RawFill>) -> Vec<ImportedTrade> {
     fills.sort_by_key(|f| f.timestamp);
 
     let mut closed_trades = Vec::new();
@@ -396,7 +393,9 @@ pub async fn fetch_exchange_trades(
             let fills_json: serde_json::Value =
                 resp.json().await.map_err(AdapterError::FetchError)?;
             let fills_array = fills_json.as_array().ok_or_else(|| {
-                AdapterError::ParseError("Expected JSON array of userFills from Hyperliquid".to_string())
+                AdapterError::ParseError(
+                    "Expected JSON array of userFills from Hyperliquid".to_string(),
+                )
             })?;
 
             let mut raw_fills = Vec::new();
@@ -409,12 +408,21 @@ pub async fn fetch_exchange_trades(
                     continue;
                 }
 
-                let px = item["px"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let sz = item["sz"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let px = item["px"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let sz = item["sz"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let side_str = item["side"].as_str().unwrap_or("B");
                 let is_buy = side_str == "B";
                 let time = item["time"].as_u64().unwrap_or(0);
-                let fee = item["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let fee = item["fee"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let tid = item["tid"].as_u64().map(|id| id.to_string());
 
                 if px > 0.0 && sz > 0.0 {
@@ -431,7 +439,10 @@ pub async fn fetch_exchange_trades(
                 }
             }
 
-            Ok(reconstruct_trades_fifo(creds.exchange.exchange_name(), raw_fills))
+            Ok(reconstruct_trades_fifo(
+                creds.exchange.exchange_name(),
+                raw_fills,
+            ))
         }
 
         ImportExchangeKind::BinanceFutures | ImportExchangeKind::BinanceSpot => {
@@ -460,9 +471,7 @@ pub async fn fetch_exchange_trades(
                 ("https://api.binance.com", "/api/v3/myTrades")
             };
 
-            let query = format!(
-                "symbol={symbol}&limit={limit}&timestamp={now_ms}&recvWindow=5000"
-            );
+            let query = format!("symbol={symbol}&limit={limit}&timestamp={now_ms}&recvWindow=5000");
             let signature = sign_hmac_sha256_hex(secret, &query);
             let full_url = format!("{url_base}{endpoint}?{query}&signature={signature}");
 
@@ -490,10 +499,19 @@ pub async fn fetch_exchange_trades(
             let mut raw_fills = Vec::new();
             for item in fills_array {
                 let sym = item["symbol"].as_str().unwrap_or(&symbol).to_string();
-                let px = item["price"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let qty = item["qty"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let px = item["price"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let qty = item["qty"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let is_buy = if is_futures {
-                    item["side"].as_str().map(|s| s.eq_ignore_ascii_case("BUY")).unwrap_or(true)
+                    item["side"]
+                        .as_str()
+                        .map(|s| s.eq_ignore_ascii_case("BUY"))
+                        .unwrap_or(true)
                 } else {
                     item["isBuyer"].as_bool().unwrap_or(true)
                 };
@@ -518,7 +536,10 @@ pub async fn fetch_exchange_trades(
                 }
             }
 
-            Ok(reconstruct_trades_fifo(creds.exchange.exchange_name(), raw_fills))
+            Ok(reconstruct_trades_fifo(
+                creds.exchange.exchange_name(),
+                raw_fills,
+            ))
         }
 
         ImportExchangeKind::BybitLinear | ImportExchangeKind::BybitSpot => {
@@ -576,12 +597,24 @@ pub async fn fetch_exchange_trades(
             let mut raw_fills = Vec::new();
             for item in list {
                 let sym = item["symbol"].as_str().unwrap_or("UNKNOWN").to_string();
-                let px = item["execPrice"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let sz = item["execQty"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let px = item["execPrice"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let sz = item["execQty"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let side_str = item["side"].as_str().unwrap_or("Buy");
                 let is_buy = side_str.eq_ignore_ascii_case("Buy");
-                let time = item["execTime"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                let fee = item["execFee"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let time = item["execTime"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let fee = item["execFee"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let tid = item["execId"].as_str().map(|s| s.to_string());
 
                 if px > 0.0 && sz > 0.0 {
@@ -598,7 +631,10 @@ pub async fn fetch_exchange_trades(
                 }
             }
 
-            Ok(reconstruct_trades_fifo(creds.exchange.exchange_name(), raw_fills))
+            Ok(reconstruct_trades_fifo(
+                creds.exchange.exchange_name(),
+                raw_fills,
+            ))
         }
 
         ImportExchangeKind::OkexSwap | ImportExchangeKind::OkexSpot => {
@@ -616,7 +652,10 @@ pub async fn fetch_exchange_trades(
             } else {
                 "SPOT"
             };
-            let mut query = format!("instType={inst_type}&limit={}", creds.limit.unwrap_or(100).min(100));
+            let mut query = format!(
+                "instType={inst_type}&limit={}",
+                creds.limit.unwrap_or(100).min(100)
+            );
             if let Some(ref sym) = creds.symbol
                 && !sym.trim().is_empty()
             {
@@ -657,12 +696,25 @@ pub async fn fetch_exchange_trades(
             let mut raw_fills = Vec::new();
             for item in list {
                 let sym = item["instId"].as_str().unwrap_or("UNKNOWN").to_string();
-                let px = item["fillPx"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
-                let sz = item["fillSz"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let px = item["fillPx"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let sz = item["fillSz"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let side_str = item["side"].as_str().unwrap_or("buy");
                 let is_buy = side_str.eq_ignore_ascii_case("buy");
-                let time = item["ts"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                let fee = item["fee"].as_str().and_then(|s| s.parse::<f64>().ok()).map(|f| f.abs()).unwrap_or(0.0);
+                let time = item["ts"]
+                    .as_str()
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let fee = item["fee"]
+                    .as_str()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .map(|f| f.abs())
+                    .unwrap_or(0.0);
                 let tid = item["fillId"].as_str().map(|s| s.to_string());
 
                 if px > 0.0 && sz > 0.0 {
@@ -679,7 +731,10 @@ pub async fn fetch_exchange_trades(
                 }
             }
 
-            Ok(reconstruct_trades_fifo(creds.exchange.exchange_name(), raw_fills))
+            Ok(reconstruct_trades_fifo(
+                creds.exchange.exchange_name(),
+                raw_fills,
+            ))
         }
     }
 }

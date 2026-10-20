@@ -8,6 +8,7 @@ mod layout;
 mod logger;
 mod modal;
 pub mod notification;
+mod notify;
 pub mod profile;
 mod screen;
 mod style;
@@ -18,6 +19,7 @@ use data::{layout::WindowSpec, sidebar};
 use layout::{LayoutId, configuration};
 use modal::{LayoutManager, ThemeEditor, audio::AudioStream};
 use modal::{dashboard_modal, main_dialog_modal};
+use notify::Notifications;
 use screen::dashboard::{self, Dashboard};
 use widget::{
     confirm_dialog_container,
@@ -71,7 +73,7 @@ struct HawkTerminal {
     ui_scale_factor: data::ScaleFactor,
     timezone: data::UserTimezone,
     theme: data::Theme,
-    notifications: Vec<Toast>,
+    notifications: Notifications,
     journal_window: Option<window::Id>,
     journal_mode: data::JournalMode,
     global_settings_category: modal::GlobalSettingsCategory,
@@ -162,7 +164,7 @@ impl HawkTerminal {
             ui_scale_factor: saved_state.scale_factor,
             volume_size_unit: saved_state.volume_size_unit,
             theme: saved_state.theme,
-            notifications: vec![],
+            notifications: Notifications::new(),
             journal_window: None,
             journal_mode: saved_state.journal_mode,
             global_settings_category: modal::GlobalSettingsCategory::default(),
@@ -334,7 +336,8 @@ impl HawkTerminal {
                 if self.confirm_dialog.is_some() {
                     self.confirm_dialog = None;
                 } else if self.sidebar.journal.is_image_modal_open() {
-                    let (task, _) = self.sidebar
+                    let (task, _) = self
+                        .sidebar
                         .journal
                         .update(screen::dashboard::journal::Message::CloseImageViewer);
                     return task.map(|m| Message::Sidebar(dashboard::sidebar::Message::Journal(m)));
@@ -447,9 +450,7 @@ impl HawkTerminal {
                 }
             }
             Message::RemoveNotification(index) => {
-                if index < self.notifications.len() {
-                    self.notifications.remove(index);
-                }
+                self.notifications.remove(index);
             }
             Message::SelectGlobalSettingsCategory(cat) => {
                 self.global_settings_category = cat;
@@ -1014,7 +1015,7 @@ impl HawkTerminal {
 
         toast::Manager::new(
             content,
-            &self.notifications,
+            self.notifications.toasts(),
             match sidebar_pos {
                 sidebar::Position::Left => Alignment::Start,
                 sidebar::Position::Right => Alignment::End,

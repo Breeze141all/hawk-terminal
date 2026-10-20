@@ -178,7 +178,9 @@ pub enum PanelValuePrecision {
 impl PanelValuePrecision {
     pub fn quantization_step(self, base_ticker: Option<exchange::TickerInfo>) -> Option<f64> {
         let step = match self {
-            Self::BaseTickerMinTick => base_ticker.map(|ticker| ticker.min_ticksize.as_f32() as f64),
+            Self::BaseTickerMinTick => {
+                base_ticker.map(|ticker| ticker.min_ticksize.as_f32() as f64)
+            }
             Self::BaseTickerMinQty => base_ticker.map(|ticker| ticker.min_qty.as_f32() as f64),
             Self::FixedPower10(step) => Some(step.as_f32() as f64),
             Self::FixedStep(step) => Some(step),

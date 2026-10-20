@@ -42,7 +42,7 @@ const SORT_AND_FILTER_HEIGHT: f32 = 200.0;
 
 const COMPACT_ROW_HEIGHT: f32 = 28.0;
 
-const EXCHANGE_FILTERS: [(ExchangeInclusive, Exchange, &str); 4] = [
+const EXCHANGE_FILTERS: [(ExchangeInclusive, Exchange, &str); 5] = [
     (ExchangeInclusive::Bybit, Exchange::BybitLinear, "Bybit"),
     (
         ExchangeInclusive::Binance,
@@ -55,6 +55,7 @@ const EXCHANGE_FILTERS: [(ExchangeInclusive, Exchange, &str); 4] = [
         "Hyperliquid",
     ),
     (ExchangeInclusive::Okex, Exchange::OkexLinear, "OKX"),
+    (ExchangeInclusive::Mexc, Exchange::MexcLinear, "MEXC"),
 ];
 
 pub fn fetch_tickers_info_with_cache(metadata: &data::MarketMetadata) -> Task<Message> {
@@ -71,11 +72,7 @@ pub fn fetch_tickers_info_with_cache(metadata: &data::MarketMetadata) -> Task<Me
                     refresh_pending,
                 };
                 let ex = *exchange;
-                tasks.push(Task::done(Message::UpdateTickersInfo(
-                    ex,
-                    cached,
-                    source,
-                )));
+                tasks.push(Task::done(Message::UpdateTickersInfo(ex, cached, source)));
                 if refresh_pending {
                     tasks.push(Task::perform(
                         fetch_ticker_info(ex),
@@ -99,11 +96,9 @@ pub fn fetch_tickers_info_with_cache(metadata: &data::MarketMetadata) -> Task<Me
         tasks.push(Task::perform(
             fetch_ticker_info(ex),
             move |result| match result {
-                Ok(ticker_info) => Message::UpdateTickersInfo(
-                    ex,
-                    ticker_info,
-                    data::MetadataSource::Fresh,
-                ),
+                Ok(ticker_info) => {
+                    Message::UpdateTickersInfo(ex, ticker_info, data::MetadataSource::Fresh)
+                }
                 Err(err) => Message::ErrorOccurred(InternalError::Fetch(err.to_string())),
             },
         ));
@@ -138,7 +133,11 @@ pub enum Message {
     ToggleTable,
     ToggleFavorites,
     FetchForTickerStats(Option<Exchange>),
-    UpdateTickersInfo(Exchange, HashMap<Ticker, Option<TickerInfo>>, data::MetadataSource),
+    UpdateTickersInfo(
+        Exchange,
+        HashMap<Ticker, Option<TickerInfo>>,
+        data::MetadataSource,
+    ),
     UpdateTickerStats(Exchange, HashMap<Ticker, TickerStats>),
     ErrorOccurred(data::InternalError),
 }
@@ -235,7 +234,9 @@ impl TickersTable {
                 tasks.push(Task::perform(
                     fetch_ticker_info(ex),
                     move |result| match result {
-                        Ok(info) => Message::UpdateTickersInfo(ex, info, data::MetadataSource::Fresh),
+                        Ok(info) => {
+                            Message::UpdateTickersInfo(ex, info, data::MetadataSource::Fresh)
+                        }
                         Err(err) => Message::ErrorOccurred(InternalError::Fetch(err.to_string())),
                     },
                 ));
@@ -369,6 +370,12 @@ impl TickersTable {
             }
             Message::ErrorOccurred(err) => {
                 log::error!("Error occurred: {err}");
+                if self.pending_stats_batches > 0 {
+                    self.pending_stats_batches -= 1;
+                    if self.pending_stats_batches == 0 {
+                        self.sort_ticker_rows();
+                    }
+                }
                 return Some(Action::ErrorOccurred(err));
             }
         }
@@ -1669,5 +1676,39 @@ impl VirtualListConfig {
             top_space,
             bottom_space,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ter08_tickers_table_sort_recovery_on_fetch_error() {
+        let (mut table, _) = TickersTable::new();
+
+        assert_eq!(table.pending_stats_batches, 0);
+
+        // Simulate initiating fetch for stats
+        table.pending_stats_batches = 2;
+
+        // First batch fails with network error
+        let action = table.update(Message::ErrorOccurred(InternalError::Fetch(
+            "Connection timeout to Binance".to_string(),
+        )));
+        assert!(matches!(action, Some(Action::ErrorOccurred(_))));
+        assert_eq!(table.pending_stats_batches, 1);
+
+        // Second batch fails as well
+        let action2 = table.update(Message::ErrorOccurred(InternalError::Fetch(
+            "HTTP 502 from Bybit".to_string(),
+        )));
+        assert!(matches!(action2, Some(Action::ErrorOccurred(_))));
+        // Counter must recover to 0 without remaining stuck
+        assert_eq!(table.pending_stats_batches, 0);
+
+        // When pending_stats_batches reaches 0, sorting is unlocked and active
+        table.change_sort_option(SortOptions::VolumeAsc);
+        assert_eq!(table.selected_sort_option, SortOptions::VolumeAsc);
     }
 }

@@ -1,20 +1,20 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use exchange::util::{Price, PriceStep};
 use exchange::Kline;
+use exchange::util::{Price, PriceStep};
 use hawk_data::chart::kline::indicators::adapter::{
     datapoint_to_indicator_frame, kline_to_indicator_frame,
 };
 use hawk_data::chart::kline::indicators::core::runtime::IndicatorHost;
 use hawk_data::chart::kline::indicators::instance::IndicatorInstanceStore;
 use hawk_data::chart::kline::indicators::loader::initialize_indicator_catalog;
-use hawk_data::chart::kline::indicators::registry::{catalog, IndicatorConfig, IndicatorId};
+use hawk_data::chart::kline::indicators::registry::{IndicatorConfig, IndicatorId, catalog};
 use hawk_data::chart::kline::indicators::scripting::ScriptIndicatorRuntime;
 use hawk_data::chart::kline::{IndicatorOutputRef, KlineDataPoint, KlineTrades, OutputValue};
 use indicator_engine::{
-    compile, ChartFrame, ExprId, IndicatorFrame, InstrumentContext, LocalSlot, StatementBlockId,
-    StatementKind, TimeOrTick,
+    ChartFrame, ExprId, IndicatorFrame, InstrumentContext, LocalSlot, StatementBlockId,
+    StatementKind, TimeOrTick, compile,
 };
 
 fn ensure_catalog() {
@@ -49,11 +49,17 @@ fn rsi_runtime() -> ScriptIndicatorRuntime {
 }
 
 fn bb_runtime() -> ScriptIndicatorRuntime {
-    runtime_from_source(include_str!("../indicators/sources/bollinger-bands.ind"), "bollinger-bands.ind")
+    runtime_from_source(
+        include_str!("../indicators/sources/bollinger-bands.ind"),
+        "bollinger-bands.ind",
+    )
 }
 
 fn avwap_runtime() -> ScriptIndicatorRuntime {
-    runtime_from_source(include_str!("../indicators/sources/anchored-vwap.ind"), "anchored-vwap.ind")
+    runtime_from_source(
+        include_str!("../indicators/sources/anchored-vwap.ind"),
+        "anchored-vwap.ind",
+    )
 }
 
 // ============================================================================
@@ -73,7 +79,10 @@ fn test_adv_hf_tick_burst_50k_preview_open() {
     }
 
     let val_99_baseline = runtime.output_value("value", 99);
-    assert!(val_99_baseline.is_some(), "Committed bar 99 must have RSI output");
+    assert!(
+        val_99_baseline.is_some(),
+        "Committed bar 99 must have RSI output"
+    );
 
     // 2. Blast 50,000 rapid ticks on active forming candle at bar 100
     let start = Instant::now();
@@ -150,11 +159,25 @@ fn test_adv_hf_preview_open_interleaved_closure() {
         let base_price = 100.0 + ((bar_idx as f64 * 0.1).sin() * 10.0);
         for tick in 0..50 {
             let tick_price = base_price + ((tick as f64 - 25.0) * 0.05);
-            let kline = create_kline(bar_idx, base_price, tick_price + 1.0, tick_price - 1.0, tick_price, (5.0, 5.0));
+            let kline = create_kline(
+                bar_idx,
+                base_price,
+                tick_price + 1.0,
+                tick_price - 1.0,
+                tick_price,
+                (5.0, 5.0),
+            );
             let frame = kline_to_indicator_frame(bar_idx, &kline, None, None);
             runtime.preview_open(&frame);
         }
-        let final_kline = create_kline(bar_idx, base_price, base_price + 1.5, base_price - 1.5, base_price + 0.2, (10.0, 10.0));
+        let final_kline = create_kline(
+            bar_idx,
+            base_price,
+            base_price + 1.5,
+            base_price - 1.5,
+            base_price + 0.2,
+            (10.0, 10.0),
+        );
         let final_frame = kline_to_indicator_frame(bar_idx, &final_kline, None, None);
         runtime.evaluate_closed(&final_frame);
     }
@@ -186,7 +209,10 @@ fn test_adv_out_of_order_candle_quarantine_resilience() {
     runtime.evaluate_closed(&frame_ooo);
 
     // Verify it cleanly quarantines without panic
-    assert!(runtime.is_quarantined(), "Runtime must quarantine on out-of-order frame");
+    assert!(
+        runtime.is_quarantined(),
+        "Runtime must quarantine on out-of-order frame"
+    );
     let diag = runtime.diagnostic().expect("Diagnostic must be set");
     assert!(diag.contains("closed bar 5 failed") || diag.contains("closed frame order"));
 
@@ -290,7 +316,10 @@ fn test_adv_100k_synthetic_bars_linear_time_and_bounded_memory() {
 
     // Asymptotic verification: ratio of first 10k to last 10k must not explode (O(1) per-bar)
     let ratio = batch_final_elapsed.as_secs_f64() / batch_1_elapsed.as_secs_f64().max(0.001);
-    println!("Asymptotic execution ratio (batch 90-100k / batch 0-10k): {:.2}", ratio);
+    println!(
+        "Asymptotic execution ratio (batch 90-100k / batch 0-10k): {:.2}",
+        ratio
+    );
     assert!(
         ratio < 3.5,
         "Asymptotic blowup detected: ratio is {:.2} (first 10k: {:?}, last 10k: {:?})",
@@ -315,8 +344,12 @@ fn test_adv_100k_synthetic_bars_linear_time_and_bounded_memory() {
 fn test_adv_100k_bars_indicator_host_dag_recalculate() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_bb = instances.create(reg_bb.id.clone());
@@ -334,8 +367,15 @@ fn test_adv_100k_bars_indicator_host_dag_recalculate() {
     let start = Instant::now();
     host.recalculate(&active, &instances, &frames);
     let elapsed = start.elapsed();
-    println!("IndicatorHost recalculate 100,000 frames took {:?}", elapsed);
-    assert!(elapsed.as_millis() < 20_000, "Host 100k frames took {:?}", elapsed);
+    println!(
+        "IndicatorHost recalculate 100,000 frames took {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed.as_millis() < 20_000,
+        "Host 100k frames took {:?}",
+        elapsed
+    );
 
     assert!(host.output_value_for(id_rsi, "value", 99_999).is_some());
     assert!(host.output_value_for(id_bb, "value", 99_999).is_some());
@@ -393,7 +433,13 @@ fn test_adv_extreme_nan_and_infinity_in_datapoints() {
 
     let non_finite_cases = [
         (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN),
-        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY),
+        (
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::INFINITY,
+        ),
         (f64::NEG_INFINITY, 100.0, f64::NEG_INFINITY, 100.0, 10.0),
     ];
 
@@ -422,7 +468,9 @@ fn test_adv_extreme_nan_and_infinity_in_datapoints() {
         // Non-finite numbers must be sanitized and NEVER leaked as OutputValue::Number(NaN/Inf)
         if let Some(val) = runtime.output_value("value", i) {
             match val {
-                OutputValue::Number(n) => assert!(n.is_finite(), "OutputValue leaked non-finite: {n}"),
+                OutputValue::Number(n) => {
+                    assert!(n.is_finite(), "OutputValue leaked non-finite: {n}")
+                }
                 OutputValue::Boolean(_) => {}
             }
         }
@@ -485,7 +533,12 @@ fn test_adv_infinite_loop_work_budget_quarantine() {
     let mut runtime =
         ScriptIndicatorRuntime::new(Arc::new(compiled), IndicatorConfig::default()).unwrap();
 
-    let frame = kline_to_indicator_frame(0, &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)), None, None);
+    let frame = kline_to_indicator_frame(
+        0,
+        &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)),
+        None,
+        None,
+    );
     runtime.evaluate_closed(&frame);
 
     assert!(runtime.is_quarantined());
@@ -501,7 +554,9 @@ fn test_adv_infinite_loop_work_budget_quarantine() {
 fn test_adv_host_dag_cycle_prevention() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
 
     let id_a = instances.create(reg_rsi.id.clone());
     let id_b = instances.create(reg_rsi.id.clone());
@@ -517,7 +572,10 @@ fn test_adv_host_dag_cycle_prevention() {
     // Bind B -> A (causing a cycle A -> B -> A)
     instances.update_source_binding(id_b, "source", Some(IndicatorOutputRef::new(id_a, "value")));
     let res_ba = host.validate_source_binding(&active, &instances, id_b, "source");
-    assert!(res_ba.is_err(), "Host must detect dependency cycle between A and B");
+    assert!(
+        res_ba.is_err(),
+        "Host must detect dependency cycle between A and B"
+    );
     assert!(res_ba.unwrap_err().contains("cycle"));
 
     // validate_bindings must also reject this configuration
@@ -541,7 +599,12 @@ fn test_adv_corrupt_bytecode_quarantine() {
 
     let mut runtime =
         ScriptIndicatorRuntime::new(Arc::new(compiled), IndicatorConfig::default()).unwrap();
-    let frame = kline_to_indicator_frame(0, &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)), None, None);
+    let frame = kline_to_indicator_frame(
+        0,
+        &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)),
+        None,
+        None,
+    );
 
     // Evaluating frame with invalid block must not crash the process; it gracefully completes or quarantines
     runtime.evaluate_closed(&frame);
@@ -565,10 +628,14 @@ fn test_adv_corrupt_statement_out_of_bounds() {
     }
     let mut runtime =
         ScriptIndicatorRuntime::new(Arc::new(compiled), IndicatorConfig::default()).unwrap();
-    let frame = kline_to_indicator_frame(0, &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)), None, None);
+    let frame = kline_to_indicator_frame(
+        0,
+        &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)),
+        None,
+        None,
+    );
     runtime.evaluate_closed(&frame);
 }
-
 
 #[test]
 fn test_adv_corrupt_bytecode_invalid_expr_id() {
@@ -589,7 +656,12 @@ fn test_adv_corrupt_bytecode_invalid_expr_id() {
     }
     let mut runtime =
         ScriptIndicatorRuntime::new(Arc::new(compiled), IndicatorConfig::default()).unwrap();
-    let frame = kline_to_indicator_frame(0, &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)), None, None);
+    let frame = kline_to_indicator_frame(
+        0,
+        &create_kline(0, 100.0, 101.0, 99.0, 100.0, (1.0, 1.0)),
+        None,
+        None,
+    );
     runtime.evaluate_closed(&frame);
     assert!(runtime.is_quarantined());
     assert!(runtime.diagnostic().is_some());
@@ -599,9 +671,15 @@ fn test_adv_corrupt_bytecode_invalid_expr_id() {
 fn test_adv_hf_preview_on_host_multi_indicator() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_bb = instances.create(reg_bb.id.clone());
@@ -637,15 +715,24 @@ fn test_adv_hf_preview_on_host_multi_indicator() {
         }
     }
     let elapsed = start.elapsed();
-    println!("Host 10,000 multi-indicator preview ticks took {:?}", elapsed);
-    assert!(elapsed.as_millis() < 3000, "Multi-indicator preview exceeded 3s: {:?}", elapsed);
+    println!(
+        "Host 10,000 multi-indicator preview ticks took {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed.as_millis() < 3000,
+        "Multi-indicator preview exceeded 3s: {:?}",
+        elapsed
+    );
 }
 
 #[test]
 fn test_adv_prefix_remapping_large_history() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
     let id_rsi = instances.create(reg_rsi.id.clone());
     let active = vec![id_rsi];
 
@@ -698,7 +785,8 @@ fn test_adv_zero_tick_step_footprint() {
 
 #[test]
 fn test_adv_vwap_huge_volume_spike_overflow_safety() {
-    let mut runtime = runtime_from_source(include_str!("../indicators/sources/vwap.ind"), "vwap.ind");
+    let mut runtime =
+        runtime_from_source(include_str!("../indicators/sources/vwap.ind"), "vwap.ind");
 
     let k0 = create_kline(0, 100.0, 101.0, 99.0, 100.0, (f32::MAX, f32::MAX));
     let mut frame0 = kline_to_indicator_frame(0, &k0, None, None);

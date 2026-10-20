@@ -46,7 +46,10 @@ impl Sidebar {
             if let Some(settings) = state.sidebar.tickers_table.as_ref() {
                 TickersTable::new_with_settings(settings, state.cache_market_metadata)
             } else {
-                TickersTable::new_with_settings(&data::tickers_table::Settings::default(), state.cache_market_metadata)
+                TickersTable::new_with_settings(
+                    &data::tickers_table::Settings::default(),
+                    state.cache_market_metadata,
+                )
             };
 
         (

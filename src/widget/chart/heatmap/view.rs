@@ -875,15 +875,14 @@ impl DepthNormCache {
                 order_size_filter,
             )
         } else {
-            hist.max_qty_in_range_raw(
-                w.earliest,
-                latest_incl,
-                w.highest,
-                w.lowest,
-            )
+            hist.max_qty_in_range_raw(w.earliest, latest_incl, w.highest, w.lowest)
         };
 
-        let max_qty = if max_qty <= f32::EPSILON { 1.0 } else { max_qty };
+        let max_qty = if max_qty <= f32::EPSILON {
+            1.0
+        } else {
+            max_qty
+        };
 
         self.key = Some(key);
         self.value = max_qty;

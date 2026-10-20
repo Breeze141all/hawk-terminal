@@ -4,7 +4,7 @@ use hawk_data::chart::kline::indicators::adapter::kline_to_indicator_frame;
 use hawk_data::chart::kline::indicators::core::IndicatorHost;
 use hawk_data::chart::kline::indicators::instance::IndicatorInstanceStore;
 use hawk_data::chart::kline::indicators::loader::initialize_indicator_catalog;
-use hawk_data::chart::kline::indicators::registry::{catalog, IndicatorId};
+use hawk_data::chart::kline::indicators::registry::{IndicatorId, catalog};
 use hawk_data::chart::kline::indicators::scripting::ScriptIndicatorRuntime;
 use hawk_data::chart::kline::indicators::{IndicatorOutputRef, OutputValue};
 use indicator_engine::IndicatorFrame;
@@ -14,7 +14,14 @@ fn ensure_catalog() {
     let _ = initialize_indicator_catalog();
 }
 
-fn create_kline(index: usize, open: f64, high: f64, low: f64, close: f64, vol: (f32, f32)) -> Kline {
+fn create_kline(
+    index: usize,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    vol: (f32, f32),
+) -> Kline {
     Kline {
         time: 1_700_000_000_000 + (index as u64 * 60_000),
         open: Price::from_f64(open),
@@ -49,9 +56,15 @@ fn generate_frames(count: usize) -> Vec<IndicatorFrame> {
 fn test_dag_deep_linear_dependency_chain() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
 
     // Pipeline: Kline -> MA1 -> MA2 -> RSI -> BB
     let id_ma1 = instances.create(reg_ma.id.clone());
@@ -108,12 +121,24 @@ fn test_dag_deep_linear_dependency_chain() {
     assert_eq!(deps_bb.len(), 4, "BB calculation must require all 4 nodes");
 
     // Output checks: At bar 149, all indicators in the chain must produce valid values
-    let val_ma1 = host.output_value_for(id_ma1, "value", 149).and_then(|v| v.as_number());
-    let val_ma2 = host.output_value_for(id_ma2, "value", 149).and_then(|v| v.as_number());
-    let val_rsi = host.output_value_for(id_rsi, "value", 149).and_then(|v| v.as_number());
-    let val_bb = host.output_value_for(id_bb, "value", 149).and_then(|v| v.as_number());
-    let val_upper = host.output_value_for(id_bb, "bollinger.upper", 149).and_then(|v| v.as_number());
-    let val_lower = host.output_value_for(id_bb, "bollinger.lower", 149).and_then(|v| v.as_number());
+    let val_ma1 = host
+        .output_value_for(id_ma1, "value", 149)
+        .and_then(|v| v.as_number());
+    let val_ma2 = host
+        .output_value_for(id_ma2, "value", 149)
+        .and_then(|v| v.as_number());
+    let val_rsi = host
+        .output_value_for(id_rsi, "value", 149)
+        .and_then(|v| v.as_number());
+    let val_bb = host
+        .output_value_for(id_bb, "value", 149)
+        .and_then(|v| v.as_number());
+    let val_upper = host
+        .output_value_for(id_bb, "bollinger.upper", 149)
+        .and_then(|v| v.as_number());
+    let val_lower = host
+        .output_value_for(id_bb, "bollinger.lower", 149)
+        .and_then(|v| v.as_number());
 
     assert!(val_ma1.is_some(), "MA1 must have value");
     assert!(val_ma2.is_some(), "MA2 must have value");
@@ -125,7 +150,10 @@ fn test_dag_deep_linear_dependency_chain() {
     let upper = val_upper.unwrap();
     let basis = val_bb.unwrap();
     let lower = val_lower.unwrap();
-    assert!(upper >= basis && basis >= lower, "BB geometric invariants must hold");
+    assert!(
+        upper >= basis && basis >= lower,
+        "BB geometric invariants must hold"
+    );
 
     // Active tick preview on active bar 150
     let preview_kline = create_kline(150, 110.0, 112.0, 109.0, 111.5, (10.0, 10.0));
@@ -139,9 +167,15 @@ fn test_dag_deep_linear_dependency_chain() {
 fn test_dag_diamond_dependency_resolution() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
 
     // Diamond:
     //      Root: MA_root
@@ -166,18 +200,30 @@ fn test_dag_diamond_dependency_resolution() {
     cfg_sink.set("period", 5i64);
     instances.update_config(id_sink, cfg_sink);
 
-    instances.update_source_binding(id_left, "source", Some(IndicatorOutputRef {
-        instance_id: id_root,
-        channel_id: "value".to_owned(),
-    }));
-    instances.update_source_binding(id_right, "source", Some(IndicatorOutputRef {
-        instance_id: id_root,
-        channel_id: "value".to_owned(),
-    }));
-    instances.update_source_binding(id_sink, "source", Some(IndicatorOutputRef {
-        instance_id: id_left,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_left,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_root,
+            channel_id: "value".to_owned(),
+        }),
+    );
+    instances.update_source_binding(
+        id_right,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_root,
+            channel_id: "value".to_owned(),
+        }),
+    );
+    instances.update_source_binding(
+        id_sink,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_left,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_sink, id_right, id_left, id_root];
     let frames = generate_frames(100);
@@ -189,7 +235,6 @@ fn test_dag_diamond_dependency_resolution() {
     assert!(dependent_on_root.contains(&id_left));
     assert!(dependent_on_root.contains(&id_right));
     assert!(dependent_on_root.contains(&id_sink));
-
 
     assert!(host.output_value_for(id_root, "value", 99).is_some());
     assert!(host.output_value_for(id_left, "value", 99).is_some());
@@ -205,30 +250,46 @@ fn test_dag_diamond_dependency_resolution() {
 fn test_dag_cycle_rejection_and_healthy_branch_isolation() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
 
     // Cycle pair: MA_A <-> MA_B
     let id_cycle_a = instances.create(reg_ma.id.clone());
     let id_cycle_b = instances.create(reg_ma.id.clone());
 
-    instances.update_source_binding(id_cycle_a, "source", Some(IndicatorOutputRef {
-        instance_id: id_cycle_b,
-        channel_id: "value".to_owned(),
-    }));
-    instances.update_source_binding(id_cycle_b, "source", Some(IndicatorOutputRef {
-        instance_id: id_cycle_a,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_cycle_a,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_cycle_b,
+            channel_id: "value".to_owned(),
+        }),
+    );
+    instances.update_source_binding(
+        id_cycle_b,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_cycle_a,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     // Healthy independent pair: RSI_C -> MA_D
     let id_healthy_c = instances.create(reg_rsi.id.clone());
     let id_healthy_d = instances.create(reg_ma.id.clone());
 
-    instances.update_source_binding(id_healthy_d, "source", Some(IndicatorOutputRef {
-        instance_id: id_healthy_c,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_healthy_d,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_healthy_c,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_cycle_a, id_healthy_c, id_cycle_b, id_healthy_d];
 
@@ -272,21 +333,32 @@ fn test_dag_cycle_rejection_and_healthy_branch_isolation() {
 fn test_dag_self_reference_rejection() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
 
     let id_self = instances.create(reg_ma.id.clone());
     let id_healthy = instances.create(reg_rsi.id.clone());
 
-    instances.update_source_binding(id_self, "source", Some(IndicatorOutputRef {
-        instance_id: id_self,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_self,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_self,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_self, id_healthy];
     let host = IndicatorHost::default();
     let val_result = host.validate_bindings(&active, &instances);
-    assert!(val_result.is_err(), "Self-reference binding must fail validation");
+    assert!(
+        val_result.is_err(),
+        "Self-reference binding must fail validation"
+    );
 
     let mut host = IndicatorHost::default();
     let frames = generate_frames(60);
@@ -311,26 +383,31 @@ plot(1.0)
 while true {
 }
 "#;
-    let compiled_timeout = indicator_engine::compile(timeout_script, std::path::Path::new("timeout.ind")).unwrap();
+    let compiled_timeout =
+        indicator_engine::compile(timeout_script, std::path::Path::new("timeout.ind")).unwrap();
     let mut failing_runtime = ScriptIndicatorRuntime::new(
         Arc::new(compiled_timeout),
         hawk_data::chart::kline::indicators::registry::IndicatorConfig::default(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Compile healthy RSI and Bollinger Bands from bundled sources
     let rsi_script = include_str!("../indicators/sources/rsi.ind");
-    let compiled_rsi = indicator_engine::compile(rsi_script, std::path::Path::new("rsi.ind")).unwrap();
+    let compiled_rsi =
+        indicator_engine::compile(rsi_script, std::path::Path::new("rsi.ind")).unwrap();
     let mut healthy_rsi = ScriptIndicatorRuntime::new(
         Arc::new(compiled_rsi),
         hawk_data::chart::kline::indicators::registry::IndicatorConfig::default(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let bb_script = include_str!("../indicators/sources/bollinger-bands.ind");
     let compiled_bb = indicator_engine::compile(bb_script, std::path::Path::new("bb.ind")).unwrap();
     let mut healthy_bb = ScriptIndicatorRuntime::new(
         Arc::new(compiled_bb),
         hawk_data::chart::kline::indicators::registry::IndicatorConfig::default(),
-    ).unwrap();
+    )
+    .unwrap();
 
     let frames = generate_frames(50);
 
@@ -343,7 +420,10 @@ while true {
     }
 
     // Failing runtime must be quarantined
-    assert!(failing_runtime.is_quarantined(), "Faulty indicator must be quarantined");
+    assert!(
+        failing_runtime.is_quarantined(),
+        "Faulty indicator must be quarantined"
+    );
     assert!(failing_runtime.diagnostic().is_some());
     let diag = failing_runtime.diagnostic().unwrap();
     assert!(
@@ -377,8 +457,12 @@ while true {
 fn test_fault_injection_reconfiguration_error_resilience() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_ma = instances.create(reg_ma.id.clone());
@@ -403,8 +487,14 @@ fn test_fault_injection_reconfiguration_error_resilience() {
     host.reconfigure(&bad_instance, &instances);
 
     // Host must record diagnostic and drop/quarantine the bad instance without corrupting MA
-    assert!(host.diagnostic_for(id_rsi).is_some(), "RSI must have reconfiguration diagnostic");
-    assert!(host.output_value_for(id_rsi, "value", 49).is_none(), "RSI outputs purged on failure");
+    assert!(
+        host.diagnostic_for(id_rsi).is_some(),
+        "RSI must have reconfiguration diagnostic"
+    );
+    assert!(
+        host.output_value_for(id_rsi, "value", 49).is_none(),
+        "RSI outputs purged on failure"
+    );
 
     // MA must remain intact and evaluate further bars
     let kline_50 = create_kline(50, 120.0, 121.0, 119.0, 120.5, (10.0, 10.0));
@@ -422,9 +512,15 @@ fn test_fault_injection_reconfiguration_error_resilience() {
 fn test_dynamic_add_and_remove_indicator_runtime_isolation() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_ma = instances.create(reg_ma.id.clone());
@@ -437,10 +533,16 @@ fn test_dynamic_add_and_remove_indicator_runtime_isolation() {
 
     // Capture outputs of RSI and MA before adding BB
     let rsi_vals_before: Vec<Option<f64>> = (0..100)
-        .map(|i| host.output_value_for(id_rsi, "value", i).and_then(|v| v.as_number()))
+        .map(|i| {
+            host.output_value_for(id_rsi, "value", i)
+                .and_then(|v| v.as_number())
+        })
         .collect();
     let ma_vals_before: Vec<Option<f64>> = (0..100)
-        .map(|i| host.output_value_for(id_ma, "value", i).and_then(|v| v.as_number()))
+        .map(|i| {
+            host.output_value_for(id_ma, "value", i)
+                .and_then(|v| v.as_number())
+        })
         .collect();
 
     // Dynamically register BB at bar 100
@@ -448,7 +550,11 @@ fn test_dynamic_add_and_remove_indicator_runtime_isolation() {
     active.push(id_bb);
 
     let changed = host.set_active(&active, &instances);
-    assert_eq!(changed, vec![id_bb], "Only newly added BB should be marked changed");
+    assert_eq!(
+        changed,
+        vec![id_bb],
+        "Only newly added BB should be marked changed"
+    );
 
     // Recalculate only the newly added BB over historical frames
     host.recalculate_selected(&changed, &instances, &frames_100);
@@ -458,11 +564,21 @@ fn test_dynamic_add_and_remove_indicator_runtime_isolation() {
 
     // CRITICAL INVARIANT: RSI and MA outputs must remain 100% BIT-FOR-BIT IDENTICAL!
     for i in 0..100 {
-        let rsi_after = host.output_value_for(id_rsi, "value", i).and_then(|v| v.as_number());
-        let ma_after = host.output_value_for(id_ma, "value", i).and_then(|v| v.as_number());
+        let rsi_after = host
+            .output_value_for(id_rsi, "value", i)
+            .and_then(|v| v.as_number());
+        let ma_after = host
+            .output_value_for(id_ma, "value", i)
+            .and_then(|v| v.as_number());
 
-        assert_eq!(rsi_vals_before[i], rsi_after, "Bar {i}: RSI output altered by adding BB!");
-        assert_eq!(ma_vals_before[i], ma_after, "Bar {i}: MA output altered by adding BB!");
+        assert_eq!(
+            rsi_vals_before[i], rsi_after,
+            "Bar {i}: RSI output altered by adding BB!"
+        );
+        assert_eq!(
+            ma_vals_before[i], ma_after,
+            "Bar {i}: MA output altered by adding BB!"
+        );
     }
 
     // Now dynamically REMOVE MA
@@ -490,8 +606,12 @@ fn test_dynamic_add_and_remove_indicator_runtime_isolation() {
 fn test_warmup_lookback_dependency_accumulation() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_ma = instances.create(reg_ma.id.clone());
@@ -502,10 +622,14 @@ fn test_warmup_lookback_dependency_accumulation() {
     instances.update_config(id_ma, ma_cfg);
 
     // Bind MA to RSI
-    instances.update_source_binding(id_ma, "source", Some(IndicatorOutputRef {
-        instance_id: id_rsi,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_ma,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_rsi,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_rsi, id_ma];
 
@@ -526,7 +650,9 @@ fn test_warmup_lookback_dependency_accumulation() {
 fn test_warmup_slice_lookback_equivalence() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_ma = instances.create(reg_ma.id.clone());
     let mut ma_cfg = reg_ma.default_config();
@@ -539,13 +665,19 @@ fn test_warmup_slice_lookback_equivalence() {
     // Host 1: evaluates all 300 frames
     let mut host_full = IndicatorHost::default();
     host_full.recalculate(&active, &instances, &all_frames);
-    let full_val_299 = host_full.output_value_for(id_ma, "value", 299).and_then(|v| v.as_number()).unwrap();
+    let full_val_299 = host_full
+        .output_value_for(id_ma, "value", 299)
+        .and_then(|v| v.as_number())
+        .unwrap();
 
     // Host 2: evaluates only the required warmup lookback slice (bars 240..300, 60 bars > 50-bar period)
     let slice_frames = &all_frames[240..300];
     let mut host_slice = IndicatorHost::default();
     host_slice.recalculate(&active, &instances, slice_frames);
-    let slice_val_299 = host_slice.output_value_for(id_ma, "value", 299).and_then(|v| v.as_number()).unwrap();
+    let slice_val_299 = host_slice
+        .output_value_for(id_ma, "value", 299)
+        .and_then(|v| v.as_number())
+        .unwrap();
 
     // MA on exact same data over warmup lookback must match within machine precision!
     assert!(
@@ -562,19 +694,29 @@ fn test_warmup_slice_lookback_equivalence() {
 fn test_numerical_determinism_across_multiple_host_instances() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_ma = instances.create(reg_ma.id.clone());
     let id_bb = instances.create(reg_bb.id.clone());
 
     // Chain MA onto RSI
-    instances.update_source_binding(id_ma, "source", Some(IndicatorOutputRef {
-        instance_id: id_rsi,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_ma,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_rsi,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_rsi, id_ma, id_bb];
     let frames = generate_frames(250);
@@ -611,8 +753,12 @@ fn test_numerical_determinism_across_multiple_host_instances() {
 fn test_transactional_preview_open_zero_leakage_to_closed_commitment() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_ma = instances.create(reg_ma.id.clone());
@@ -643,16 +789,28 @@ fn test_transactional_preview_open_zero_leakage_to_closed_commitment() {
     host_storm.evaluate_closed(&frame_101_final);
 
     // Committed outputs must be 100% bit-for-bit identical between Host Clean and Host Storm
-    let rsi_clean = host_clean.output_value_for(id_rsi, "value", 100).and_then(|v| v.as_number()).unwrap();
-    let rsi_storm = host_storm.output_value_for(id_rsi, "value", 100).and_then(|v| v.as_number()).unwrap();
+    let rsi_clean = host_clean
+        .output_value_for(id_rsi, "value", 100)
+        .and_then(|v| v.as_number())
+        .unwrap();
+    let rsi_storm = host_storm
+        .output_value_for(id_rsi, "value", 100)
+        .and_then(|v| v.as_number())
+        .unwrap();
     assert_eq!(
         rsi_clean.to_bits(),
         rsi_storm.to_bits(),
         "RSI: Preview storm leaked into closed commitment! clean={rsi_clean}, storm={rsi_storm}"
     );
 
-    let ma_clean = host_clean.output_value_for(id_ma, "value", 100).and_then(|v| v.as_number()).unwrap();
-    let ma_storm = host_storm.output_value_for(id_ma, "value", 100).and_then(|v| v.as_number()).unwrap();
+    let ma_clean = host_clean
+        .output_value_for(id_ma, "value", 100)
+        .and_then(|v| v.as_number())
+        .unwrap();
+    let ma_storm = host_storm
+        .output_value_for(id_ma, "value", 100)
+        .and_then(|v| v.as_number())
+        .unwrap();
     assert_eq!(
         ma_clean.to_bits(),
         ma_storm.to_bits(),
@@ -664,7 +822,9 @@ fn test_transactional_preview_open_zero_leakage_to_closed_commitment() {
 fn test_dag_deep_linear_10_node_stress() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     const DEPTH: usize = 10;
     let mut ids = Vec::with_capacity(DEPTH);
@@ -676,10 +836,14 @@ fn test_dag_deep_linear_10_node_stress() {
         instances.update_config(id, cfg);
 
         if i > 0 {
-            instances.update_source_binding(id, "source", Some(IndicatorOutputRef {
-                instance_id: ids[i - 1],
-                channel_id: "value".to_owned(),
-            }));
+            instances.update_source_binding(
+                id,
+                "source",
+                Some(IndicatorOutputRef {
+                    instance_id: ids[i - 1],
+                    channel_id: "value".to_owned(),
+                }),
+            );
         }
         ids.push(id);
     }
@@ -707,8 +871,12 @@ fn test_dag_deep_linear_10_node_stress() {
 fn test_fault_cascading_isolation_downstream_resilience() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     // Node A: RSI (will be broken)
     let id_a = instances.create(reg_rsi.id.clone());
@@ -727,14 +895,22 @@ fn test_fault_cascading_isolation_downstream_resilience() {
     cfg_c.set("fast_period", 5i64);
     instances.update_config(id_c, cfg_c);
 
-    instances.update_source_binding(id_b, "source", Some(IndicatorOutputRef {
-        instance_id: id_a,
-        channel_id: "value".to_owned(),
-    }));
-    instances.update_source_binding(id_c, "source", Some(IndicatorOutputRef {
-        instance_id: id_b,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_b,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_a,
+            channel_id: "value".to_owned(),
+        }),
+    );
+    instances.update_source_binding(
+        id_c,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_b,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_a, id_b, id_c, id_d];
     let frames = generate_frames(60);
@@ -776,7 +952,9 @@ fn test_fault_cascading_isolation_downstream_resilience() {
 fn test_dynamic_cycle_injection_and_unblocking_recovery() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_a = instances.create(reg_ma.id.clone());
     let id_b = instances.create(reg_ma.id.clone());
@@ -789,14 +967,22 @@ fn test_dynamic_cycle_injection_and_unblocking_recovery() {
     instances.update_config(id_c, cfg);
 
     // Linear chain: A -> B -> C
-    instances.update_source_binding(id_b, "source", Some(IndicatorOutputRef {
-        instance_id: id_a,
-        channel_id: "value".to_owned(),
-    }));
-    instances.update_source_binding(id_c, "source", Some(IndicatorOutputRef {
-        instance_id: id_b,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_b,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_a,
+            channel_id: "value".to_owned(),
+        }),
+    );
+    instances.update_source_binding(
+        id_c,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_b,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     let active = vec![id_a, id_b, id_c];
     let frames = generate_frames(50);
@@ -808,10 +994,14 @@ fn test_dynamic_cycle_injection_and_unblocking_recovery() {
     assert!(host.diagnostic_for(id_a).is_none());
 
     // INJECT CYCLE: Set A source to C (A -> B -> C -> A)
-    instances.update_source_binding(id_a, "source", Some(IndicatorOutputRef {
-        instance_id: id_c,
-        channel_id: "value".to_owned(),
-    }));
+    instances.update_source_binding(
+        id_a,
+        "source",
+        Some(IndicatorOutputRef {
+            instance_id: id_c,
+            channel_id: "value".to_owned(),
+        }),
+    );
 
     host.set_active(&active, &instances);
 
@@ -839,7 +1029,9 @@ fn test_dynamic_cycle_injection_and_unblocking_recovery() {
 fn test_boundary_conditions_zero_and_single_frame() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
     let id_rsi = instances.create(reg_rsi.id.clone());
     let active = vec![id_rsi];
 
@@ -868,7 +1060,9 @@ fn test_boundary_conditions_zero_and_single_frame() {
 fn test_numerical_determinism_under_synthetic_gap_and_spikes() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
     let id_bb = instances.create(reg_bb.id.clone());
     let active = vec![id_bb];
 
@@ -880,7 +1074,11 @@ fn test_numerical_determinism_under_synthetic_gap_and_spikes() {
             5 => 1e7,
             _ => 100.0 + (i as f64 * 2.5),
         };
-        let vol = if i % 3 == 0 { (0.0, 0.0) } else { (100.0, 50.0) };
+        let vol = if i % 3 == 0 {
+            (0.0, 0.0)
+        } else {
+            (100.0, 50.0)
+        };
         let kline = create_kline(i, price, price * 1.05, price * 0.95, price, vol);
         extreme_frames.push(kline_to_indicator_frame(i, &kline, None, None));
     }
@@ -897,4 +1095,3 @@ fn test_numerical_determinism_under_synthetic_gap_and_spikes() {
         assert_eq!(v1, v2, "Extreme bar {i}: value determinism mismatch");
     }
 }
-

@@ -55,7 +55,11 @@ impl RectInstance {
         w: &ViewWindow,
         palette: &HeatmapPalette,
     ) -> Self {
-        let max_q = if max_qty <= f32::EPSILON { 1.0 } else { max_qty as f64 };
+        let max_q = if max_qty <= f32::EPSILON {
+            1.0
+        } else {
+            max_qty as f64
+        };
         let t = (qty as f64 / max_q).clamp(0.0, 1.0) as f32;
         let raw_w_world = t * w.depth_profile_max_width;
         let (w_world, subpx_alpha) = Self::extent_and_subpx_alpha(raw_w_world, w.cam_scale);
@@ -89,7 +93,11 @@ impl RectInstance {
         w: &ViewWindow,
         palette: &HeatmapPalette,
     ) -> Self {
-        let denom = if max_qty <= f32::EPSILON { 1.0 } else { max_qty as f64 };
+        let denom = if max_qty <= f32::EPSILON {
+            1.0
+        } else {
+            max_qty as f64
+        };
 
         let (base_rgb, _is_tie) = if buy_qty > sell_qty {
             (palette.buy_rgb, false)
@@ -129,7 +137,11 @@ impl RectInstance {
         x1_bin_excl: i32,
         w: &ViewWindow,
     ) -> Self {
-        let denom = if max_qty <= f32::EPSILON { 1.0 } else { max_qty as f64 };
+        let denom = if max_qty <= f32::EPSILON {
+            1.0
+        } else {
+            max_qty as f64
+        };
         let raw_overlay_h = (((diff_qty as f64) / denom) * w.volume_area_max_height as f64)
             .min(total_h.max(0.0_f32) as f64) as f32;
         let (overlay_h, subpx_alpha) = Self::extent_and_subpx_alpha(raw_overlay_h, w.cam_scale);

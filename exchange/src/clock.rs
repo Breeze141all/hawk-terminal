@@ -118,6 +118,14 @@ pub fn parse_server_time_from_response(
                     return Some(ts);
                 }
             }
+            Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => {
+                if let Some(ts) = val.get("serverTime").and_then(Value::as_u64) {
+                    return Some(ts);
+                }
+                if let Some(ts) = val.get("data").and_then(Value::as_u64) {
+                    return Some(ts);
+                }
+            }
         }
     }
 
@@ -148,6 +156,12 @@ pub async fn ping_server_time(exchange: Exchange) -> Result<i64, AdapterError> {
             "https://api.hyperliquid.xyz/info",
             true,
             Some("{\"type\":\"meta\"}"),
+        ),
+        Exchange::MexcSpot => ("https://api.mexc.com/api/v3/time", false, None),
+        Exchange::MexcLinear | Exchange::MexcInverse => (
+            "https://contract.mexc.com/api/v1/contract/ping",
+            false,
+            None,
         ),
     };
 

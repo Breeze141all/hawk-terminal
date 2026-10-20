@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::kline::KlineDataPoint;
-use exchange::Kline;
+use exchange::{Kline, Trade};
 
 /// Trait abstracting candle data for TPO Profile calculation.
 pub trait TpoCandle {
@@ -188,6 +188,139 @@ pub fn get_tpo_bracket_continuous(candle_time: i64, session_start: i64) -> Optio
         Some((b'A' + cycle_idx) as char)
     } else {
         Some((b'a' + (cycle_idx - 26)) as char)
+    }
+}
+
+/// Calendar anchor period determining session boundary resets for TPO calculation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TpoAnchor {
+    #[default]
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+impl TpoAnchor {
+    pub const ALL: [TpoAnchor; 3] = [TpoAnchor::Daily, TpoAnchor::Weekly, TpoAnchor::Monthly];
+
+    #[inline]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Daily => "Daily",
+            Self::Weekly => "Weekly",
+            Self::Monthly => "Monthly",
+        }
+    }
+
+    #[inline]
+    pub fn period_bounds(self, ts: i64) -> (i64, i64) {
+        match self {
+            Self::Daily => period_bounds_utc(ts, SessionPeriod::Daily),
+            Self::Weekly => period_bounds_utc(ts, SessionPeriod::Weekly),
+            Self::Monthly => period_bounds_utc(ts, SessionPeriod::Monthly),
+        }
+    }
+}
+
+impl std::fmt::Display for TpoAnchor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+impl From<TpoAnchor> for SessionPeriod {
+    fn from(anchor: TpoAnchor) -> Self {
+        match anchor {
+            TpoAnchor::Daily => SessionPeriod::Daily,
+            TpoAnchor::Weekly => SessionPeriod::Weekly,
+            TpoAnchor::Monthly => SessionPeriod::Monthly,
+        }
+    }
+}
+
+impl TryFrom<SessionPeriod> for TpoAnchor {
+    type Error = ();
+    fn try_from(period: SessionPeriod) -> Result<Self, Self::Error> {
+        match period {
+            SessionPeriod::Daily => Ok(TpoAnchor::Daily),
+            SessionPeriod::Weekly => Ok(TpoAnchor::Weekly),
+            SessionPeriod::Monthly => Ok(TpoAnchor::Monthly),
+            _ => Err(()),
+        }
+    }
+}
+
+/// 1-minute candle aggregation synthesized from raw trades.
+/// Provides a consistent sub-period basis for TPO brackets even under low liquidity or candle gaps.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct OneMinBar {
+    pub open_time_ms: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: f64,
+    pub trade_count: usize,
+}
+
+impl OneMinBar {
+    pub fn new(ts: i64, price: f64, qty: f64) -> Self {
+        let open_time_ms = ts.div_euclid(60_000) * 60_000;
+        Self {
+            open_time_ms,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: qty.max(0.0),
+            trade_count: 1,
+        }
+    }
+
+    pub fn update(&mut self, price: f64, qty: f64) {
+        if price > self.high {
+            self.high = price;
+        }
+        if price < self.low {
+            self.low = price;
+        }
+        self.close = price;
+        self.volume += qty.max(0.0);
+        self.trade_count += 1;
+    }
+}
+
+impl TpoCandle for OneMinBar {
+    #[inline]
+    fn open_time_ms(&self) -> i64 {
+        self.open_time_ms
+    }
+
+    #[inline]
+    fn high_price(&self) -> f64 {
+        self.high
+    }
+
+    #[inline]
+    fn low_price(&self) -> f64 {
+        self.low
+    }
+}
+
+impl TpoCandle for &OneMinBar {
+    #[inline]
+    fn open_time_ms(&self) -> i64 {
+        self.open_time_ms
+    }
+
+    #[inline]
+    fn high_price(&self) -> f64 {
+        self.high
+    }
+
+    #[inline]
+    fn low_price(&self) -> f64 {
+        self.low
     }
 }
 
@@ -966,9 +1099,360 @@ pub fn group_candles_by_session<C: TpoCandle + Clone>(
         .collect()
 }
 
+/// Sub-second TPO calculation engine operating directly on raw trade streams (`Trade`).
+/// Synthesizes 1-minute bars to guarantee accurate bracket placement across low-liquidity gaps,
+/// and maintains incremental TPO profile state per session according to calendar `TpoAnchor`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradeTpoCache {
+    anchor: TpoAnchor,
+    tick_size: f64,
+    sessions: BTreeMap<i64, TpoProfile>,
+    one_min_bars: BTreeMap<i64, OneMinBar>,
+    active_session_start: Option<i64>,
+    metrics_dirty: bool,
+    max_bars: usize,
+}
+
+impl Default for TradeTpoCache {
+    fn default() -> Self {
+        Self::new(TpoAnchor::Daily, 1.0)
+    }
+}
+
+impl TradeTpoCache {
+    /// Maximum 1-minute bars retained in RAM (approx. 70 days).
+    pub const DEFAULT_MAX_BARS: usize = 100_000;
+
+    /// Creates a new `TradeTpoCache` with the specified calendar anchor and tick step size.
+    pub fn new(anchor: TpoAnchor, tick_size: f64) -> Self {
+        let tick = if tick_size.is_finite() && tick_size > 0.0 {
+            tick_size
+        } else {
+            1.0
+        };
+        Self {
+            anchor,
+            tick_size: tick,
+            sessions: BTreeMap::new(),
+            one_min_bars: BTreeMap::new(),
+            active_session_start: None,
+            metrics_dirty: false,
+            max_bars: Self::DEFAULT_MAX_BARS,
+        }
+    }
+
+    #[inline]
+    pub fn anchor(&self) -> TpoAnchor {
+        self.anchor
+    }
+
+    /// Sets a new calendar anchor (Daily, Weekly, Monthly) and rebuilds session profiles from 1-minute bars.
+    pub fn set_anchor(&mut self, anchor: TpoAnchor) {
+        if self.anchor != anchor {
+            self.anchor = anchor;
+            self.rebuild();
+        }
+    }
+
+    #[inline]
+    pub fn tick_size(&self) -> f64 {
+        self.tick_size
+    }
+
+    /// Sets a new tick step size and rebuilds session profiles from 1-minute bars.
+    pub fn set_tick_size(&mut self, tick_size: f64) {
+        let valid_tick = if tick_size.is_finite() && tick_size > 0.0 {
+            tick_size
+        } else {
+            self.tick_size
+        };
+        if (self.tick_size - valid_tick).abs() > 1e-9 {
+            self.tick_size = valid_tick;
+            self.rebuild();
+        }
+    }
+
+    #[inline]
+    pub fn one_min_bars(&self) -> &BTreeMap<i64, OneMinBar> {
+        &self.one_min_bars
+    }
+
+    #[inline]
+    pub fn sessions(&self) -> &BTreeMap<i64, TpoProfile> {
+        &self.sessions
+    }
+
+    #[inline]
+    pub fn has_session(&self, session_start: i64) -> bool {
+        self.sessions.contains_key(&session_start)
+    }
+
+    #[inline]
+    pub fn active_session_start(&self) -> Option<i64> {
+        self.active_session_start
+    }
+
+    #[inline]
+    pub fn max_bars(&self) -> usize {
+        self.max_bars
+    }
+
+    pub fn set_max_bars(&mut self, max_bars: usize) {
+        self.max_bars = max_bars.max(100);
+        if self.one_min_bars.len() > self.max_bars {
+            let excess = self.one_min_bars.len() - self.max_bars;
+            let keys_to_remove: Vec<i64> = self.one_min_bars.keys().take(excess).copied().collect();
+            for k in keys_to_remove {
+                self.one_min_bars.remove(&k);
+            }
+        }
+    }
+
+    /// Returns a mutable reference to the active session profile, ensuring metrics are up-to-date.
+    pub fn active_profile(&mut self) -> Option<&TpoProfile> {
+        self.recompute_active_metrics();
+        self.active_session_start
+            .and_then(|s| self.sessions.get(&s))
+    }
+
+    /// Returns a reference to the profile of a specific session, recomputing metrics if active.
+    pub fn session_profile(&mut self, session_start: i64) -> Option<&TpoProfile> {
+        if self.active_session_start == Some(session_start) && self.metrics_dirty {
+            self.recompute_active_metrics();
+        }
+        self.sessions.get(&session_start)
+    }
+
+    /// Ingests a single raw trade, updating the 1-minute bar and the active session TPO matrix.
+    pub fn on_trade(&mut self, trade: &Trade) {
+        let ts = trade.time as i64;
+        let price = trade.price.to_f64();
+        if !price.is_finite() || price <= 0.0 {
+            return;
+        }
+        let qty = trade.qty as f64;
+        let bar_start = ts.div_euclid(60_000) * 60_000;
+
+        let (is_new_bar, prev_low, prev_high) = match self.one_min_bars.get_mut(&bar_start) {
+            Some(existing) => {
+                let pl = existing.low;
+                let ph = existing.high;
+                existing.update(price, qty);
+                (false, pl, ph)
+            }
+            None => {
+                self.one_min_bars
+                    .insert(bar_start, OneMinBar::new(ts, price, qty));
+                (true, price, price)
+            }
+        };
+
+        if self.one_min_bars.len() > self.max_bars {
+            let excess = self.one_min_bars.len() - self.max_bars;
+            let keys_to_remove: Vec<i64> = self.one_min_bars.keys().take(excess).copied().collect();
+            for k in keys_to_remove {
+                self.one_min_bars.remove(&k);
+            }
+        }
+
+        let (session_start, session_end) = self.anchor.period_bounds(ts);
+        if let Some(active_start) = self.active_session_start
+            && active_start != session_start
+            && self.metrics_dirty
+            && let Some(prev_prof) = self.sessions.get_mut(&active_start)
+        {
+            let (poc, va, sp, poor_h, poor_l) =
+                recalculate_metrics(&prev_prof.matrix, self.tick_size);
+            prev_prof.poc = poc;
+            prev_prof.value_area = va;
+            prev_prof.single_prints = sp;
+            prev_prof.is_poor_high = poor_h;
+            prev_prof.is_poor_low = poor_l;
+        }
+        self.active_session_start = Some(session_start);
+
+        let session = self.sessions.entry(session_start).or_insert_with(|| {
+            let date_str = chrono::DateTime::from_timestamp_millis(session_start)
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| session_start.to_string());
+            TpoProfile {
+                session_date: date_str,
+                session_start,
+                session_end,
+                tick_size: self.tick_size,
+                matrix: BTreeMap::new(),
+                bracket_indices: BTreeMap::new(),
+                ib: None,
+                poc: None,
+                value_area: None,
+                single_prints: Vec::new(),
+                is_poor_high: false,
+                is_poor_low: false,
+                is_split: false,
+            }
+        });
+
+        let delta_ms = ts.saturating_sub(session_start);
+        let bracket_idx = (delta_ms / (30 * 60_000)).max(0);
+        let is_extended = (session_end - session_start) > 52 * 30 * 60_000;
+        let bracket_opt = if is_extended {
+            get_tpo_bracket_continuous(ts, session_start)
+        } else {
+            get_tpo_bracket(ts, session_start)
+        };
+
+        if let Some(bracket) = bracket_opt {
+            let tick = self.tick_size;
+            let (low_t, high_t) = if is_new_bar {
+                let t = (price / tick).round() as i64;
+                (t, t)
+            } else if price > prev_high {
+                let low = (prev_high / tick).round() as i64;
+                let high = (price / tick).round() as i64;
+                (low, high)
+            } else if price < prev_low {
+                let low = (price / tick).round() as i64;
+                let high = (prev_low / tick).round() as i64;
+                (low, high)
+            } else {
+                let t = (price / tick).round() as i64;
+                (t, t)
+            };
+
+            const MAX_TICK_BINS_PER_TRADE: i64 = 5_000;
+            let bounded_high_t = if high_t.saturating_sub(low_t) > MAX_TICK_BINS_PER_TRADE {
+                low_t.saturating_add(MAX_TICK_BINS_PER_TRADE)
+            } else {
+                high_t
+            };
+
+            for t in low_t..=bounded_high_t {
+                let row = session.matrix.entry(t).or_default();
+                if !row.contains(&bracket) {
+                    row.push(bracket);
+                    session
+                        .bracket_indices
+                        .entry(t)
+                        .or_default()
+                        .push(bracket_idx as u32);
+                }
+            }
+
+            if bracket_idx == 0 || bracket_idx == 1 {
+                let (new_high, new_low) = if let Some(ref ib) = session.ib {
+                    (ib.high.max(price), ib.low.min(price))
+                } else {
+                    (price, price)
+                };
+                let span = new_high - new_low;
+                session.ib = Some(InitialBalance {
+                    high: new_high,
+                    low: new_low,
+                    extension_high_1_5: new_high + span * 0.5,
+                    extension_high_2_0: new_high + span * 1.0,
+                    extension_low_1_5: new_low - span * 0.5,
+                    extension_low_2_0: new_low - span * 1.0,
+                    extension_1_5: new_high + span * 0.5,
+                    extension_2_0: new_high + span * 1.0,
+                });
+            }
+
+            self.metrics_dirty = true;
+        }
+    }
+
+    /// Batch ingests raw trades with sub-second execution, updating the active profile metrics.
+    pub fn on_trades(&mut self, trades: &[Trade], tick_size: f64) {
+        if trades.is_empty() {
+            return;
+        }
+        let valid_tick = if tick_size.is_finite() && tick_size > 0.0 {
+            tick_size
+        } else {
+            self.tick_size
+        };
+        if (self.tick_size - valid_tick).abs() > 1e-9 {
+            self.set_tick_size(valid_tick);
+        }
+        for trade in trades {
+            self.on_trade(trade);
+        }
+        self.recompute_active_metrics();
+    }
+
+    /// Recalculates metrics (POC, Value Area, IB, Single Prints) for the active session.
+    pub fn recompute_active_metrics(&mut self) {
+        if !self.metrics_dirty {
+            return;
+        }
+        if let Some(active_start) = self.active_session_start
+            && let Some(profile) = self.sessions.get_mut(&active_start)
+        {
+            let (poc, va, sp, poor_h, poor_l) =
+                recalculate_metrics(&profile.matrix, self.tick_size);
+            profile.poc = poc;
+            profile.value_area = va;
+            profile.single_prints = sp;
+            profile.is_poor_high = poor_h;
+            profile.is_poor_low = poor_l;
+        }
+        self.metrics_dirty = false;
+    }
+
+    /// Rebuilds all session profiles from stored 1-minute bars.
+    pub fn rebuild(&mut self) {
+        self.sessions.clear();
+        self.active_session_start = None;
+        self.metrics_dirty = false;
+
+        if self.one_min_bars.is_empty() {
+            return;
+        }
+
+        let mut session_groups: BTreeMap<i64, (i64, Vec<OneMinBar>)> = BTreeMap::new();
+        for bar in self.one_min_bars.values() {
+            let (start, end) = self.anchor.period_bounds(bar.open_time_ms);
+            let entry = session_groups
+                .entry(start)
+                .or_insert_with(|| (end, Vec::new()));
+            entry.1.push(*bar);
+        }
+
+        for (session_start, (session_end, bars)) in session_groups {
+            let date_str = chrono::DateTime::from_timestamp_millis(session_start)
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| session_start.to_string());
+            let profile =
+                build_tpo_profile(&bars, session_start, session_end, &date_str, self.tick_size);
+            self.sessions.insert(session_start, profile);
+            self.active_session_start = Some(session_start);
+        }
+    }
+
+    /// Resolves profiles with optional session clusters.
+    pub fn effective_profiles(&mut self, clusters: &[SessionCluster]) -> Vec<TpoProfile> {
+        self.recompute_active_metrics();
+        let raw: Vec<TpoProfile> = self.sessions.values().cloned().collect();
+        if clusters.is_empty() {
+            raw
+        } else {
+            apply_session_clusters(&raw, clusters)
+        }
+    }
+
+    /// Clears all stored bars, sessions, and active session state.
+    pub fn clear(&mut self) {
+        self.sessions.clear();
+        self.one_min_bars.clear();
+        self.active_session_start = None;
+        self.metrics_dirty = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use exchange::Price;
 
     #[test]
     fn test_bracket_mapping_boundaries() {
@@ -1088,5 +1572,276 @@ mod tests {
         // Manual multiplier 10x
         let manual_btc = calculate_tpo_tick_size(60_000.0, 0.1, 10);
         assert_eq!(manual_btc, 1.0);
+    }
+
+    #[test]
+    fn test_tpo_anchor_bounds_and_conversions() {
+        let ts_wednesday = 1_700_050_000_000i64; // Nov 15, 2023 12:06:40 UTC
+        let (d_start, d_end) = TpoAnchor::Daily.period_bounds(ts_wednesday);
+        assert_eq!(d_end - d_start, 86_400_000);
+        assert!(ts_wednesday >= d_start && ts_wednesday < d_end);
+
+        let (w_start, w_end) = TpoAnchor::Weekly.period_bounds(ts_wednesday);
+        assert_eq!(w_end - w_start, 7 * 86_400_000);
+        assert!(ts_wednesday >= w_start && ts_wednesday < w_end);
+
+        let (m_start, m_end) = TpoAnchor::Monthly.period_bounds(ts_wednesday);
+        assert!(ts_wednesday >= m_start && ts_wednesday < m_end);
+
+        assert_eq!(SessionPeriod::from(TpoAnchor::Daily), SessionPeriod::Daily);
+        assert_eq!(
+            SessionPeriod::from(TpoAnchor::Weekly),
+            SessionPeriod::Weekly
+        );
+        assert_eq!(
+            SessionPeriod::from(TpoAnchor::Monthly),
+            SessionPeriod::Monthly
+        );
+
+        assert_eq!(
+            TpoAnchor::try_from(SessionPeriod::Daily),
+            Ok(TpoAnchor::Daily)
+        );
+        assert_eq!(
+            TpoAnchor::try_from(SessionPeriod::Weekly),
+            Ok(TpoAnchor::Weekly)
+        );
+        assert_eq!(
+            TpoAnchor::try_from(SessionPeriod::Monthly),
+            Ok(TpoAnchor::Monthly)
+        );
+        assert!(TpoAnchor::try_from(SessionPeriod::FourHours).is_err());
+    }
+
+    #[test]
+    fn test_one_min_bar_aggregation() {
+        let ts_base = 1_700_000_000_000i64; // Exactly aligned to 60s
+        let mut bar = OneMinBar::new(ts_base + 5_000, 100.0, 1.5);
+        assert_eq!(bar.open_time_ms, ts_base.div_euclid(60_000) * 60_000);
+        assert_eq!(bar.open, 100.0);
+        assert_eq!(bar.high, 100.0);
+        assert_eq!(bar.low, 100.0);
+        assert_eq!(bar.close, 100.0);
+        assert_eq!(bar.volume, 1.5);
+        assert_eq!(bar.trade_count, 1);
+
+        bar.update(105.0, 2.0);
+        assert_eq!(bar.high, 105.0);
+        assert_eq!(bar.low, 100.0);
+        assert_eq!(bar.close, 105.0);
+        assert_eq!(bar.volume, 3.5);
+        assert_eq!(bar.trade_count, 2);
+
+        bar.update(98.0, 0.5);
+        assert_eq!(bar.high, 105.0);
+        assert_eq!(bar.low, 98.0);
+        assert_eq!(bar.close, 98.0);
+        assert_eq!(bar.volume, 4.0);
+        assert_eq!(bar.trade_count, 3);
+    }
+
+    #[test]
+    fn test_trade_tpo_cache_incremental_matches_rebuild() {
+        let start = 1_700_000_000_000i64; // Assume session start aligned
+        let (s_start, _) = TpoAnchor::Daily.period_bounds(start);
+        let mut cache = TradeTpoCache::new(TpoAnchor::Daily, 1.0);
+
+        let trades = vec![
+            Trade {
+                time: (s_start + 5 * 60_000) as u64, // Bracket A
+                is_sell: false,
+                price: Price::from_f64(100.0),
+                qty: 1.0,
+            },
+            Trade {
+                time: (s_start + 10 * 60_000) as u64, // Bracket A
+                is_sell: false,
+                price: Price::from_f64(102.0),
+                qty: 2.0,
+            },
+            Trade {
+                time: (s_start + 15 * 60_000) as u64, // Bracket A
+                is_sell: true,
+                price: Price::from_f64(98.0),
+                qty: 1.5,
+            },
+            Trade {
+                time: (s_start + 35 * 60_000) as u64, // Bracket B
+                is_sell: false,
+                price: Price::from_f64(100.0),
+                qty: 2.5,
+            },
+            Trade {
+                time: (s_start + 35 * 60_000 + 10_000) as u64, // Bracket B (sweeps to 103)
+                is_sell: false,
+                price: Price::from_f64(103.0),
+                qty: 1.0,
+            },
+        ];
+
+        cache.on_trades(&trades, 1.0);
+        let active = cache
+            .active_profile()
+            .expect("Active profile should exist")
+            .clone();
+        assert!(active.matrix.contains_key(&100));
+        assert!(active.matrix.contains_key(&102));
+        assert!(active.matrix.contains_key(&98));
+        assert!(active.matrix.contains_key(&103));
+        assert_eq!(active.matrix[&100], vec!['A', 'B']); // Both brackets touched 100
+
+        // IB should span 98.0 to 103.0 (brackets A and B)
+        let ib = active.ib.expect("IB should be present");
+        assert_eq!(ib.high, 103.0);
+        assert_eq!(ib.low, 98.0);
+
+        // Rebuild from 1-min bars must match incremental matrix exactly
+        let pre_rebuild_matrix = active.matrix.clone();
+        cache.rebuild();
+        let post_rebuild = cache.active_profile().expect("Profile after rebuild");
+        assert_eq!(post_rebuild.matrix, pre_rebuild_matrix);
+        assert_eq!(post_rebuild.poc, active.poc);
+        assert_eq!(post_rebuild.value_area, active.value_area);
+    }
+
+    #[test]
+    fn test_trade_tpo_cache_low_liquidity_gaps() {
+        let (s_start, _) = TpoAnchor::Daily.period_bounds(1_700_000_000_000);
+        let mut cache = TradeTpoCache::new(TpoAnchor::Daily, 1.0);
+
+        let t1 = Trade {
+            time: (s_start + 10 * 60_000) as u64, // Bracket A (0..30m)
+            is_sell: false,
+            price: Price::from_f64(50.0),
+            qty: 1.0,
+        };
+        // 2-hour gap: B (30..60), C (60..90), D (90..120), E (120..150) are empty
+        let t2 = Trade {
+            time: (s_start + 155 * 60_000) as u64, // Bracket F (150..180m)
+            is_sell: true,
+            price: Price::from_f64(55.0),
+            qty: 2.0,
+        };
+
+        cache.on_trades(&[t1, t2], 1.0);
+        let prof = cache.active_profile().expect("Profile exists");
+
+        // 50.0 has 'A'
+        assert_eq!(prof.matrix[&50], vec!['A']);
+        // 55.0 has 'F'
+        assert_eq!(prof.matrix[&55], vec!['F']);
+        // Brackets B, C, D, E must not appear anywhere
+        for row in prof.matrix.values() {
+            assert!(!row.contains(&'B'));
+            assert!(!row.contains(&'C'));
+            assert!(!row.contains(&'D'));
+            assert!(!row.contains(&'E'));
+        }
+    }
+
+    #[test]
+    fn test_trade_tpo_cache_anchor_switching() {
+        // Wednesday, Thursday, Friday within the same week
+        let t_wed = 1_700_050_000_000u64; // Wednesday
+        let t_thu = t_wed + 86_400_000;
+        let t_fri = t_thu + 86_400_000;
+
+        let mut cache = TradeTpoCache::new(TpoAnchor::Daily, 1.0);
+        cache.on_trade(&Trade {
+            time: t_wed,
+            is_sell: false,
+            price: Price::from_f64(100.0),
+            qty: 1.0,
+        });
+        cache.on_trade(&Trade {
+            time: t_thu,
+            is_sell: false,
+            price: Price::from_f64(110.0),
+            qty: 1.0,
+        });
+        cache.on_trade(&Trade {
+            time: t_fri,
+            is_sell: false,
+            price: Price::from_f64(120.0),
+            qty: 1.0,
+        });
+
+        // Under Daily anchor, 3 distinct session profiles exist
+        assert_eq!(cache.sessions().len(), 3);
+
+        // Switch to Weekly anchor: all 3 days merge into 1 unified weekly profile
+        cache.set_anchor(TpoAnchor::Weekly);
+        assert_eq!(cache.sessions().len(), 1);
+        let weekly = cache.active_profile().expect("Weekly profile");
+        assert!(weekly.matrix.contains_key(&100));
+        assert!(weekly.matrix.contains_key(&110));
+        assert!(weekly.matrix.contains_key(&120));
+    }
+
+    #[test]
+    fn test_trade_tpo_cache_tick_size_scaling() {
+        let (s_start, _) = TpoAnchor::Daily.period_bounds(1_700_000_000_000);
+        let mut cache = TradeTpoCache::new(TpoAnchor::Daily, 1.0);
+
+        cache.on_trade(&Trade {
+            time: (s_start + 60_000) as u64,
+            is_sell: false,
+            price: Price::from_f64(101.0),
+            qty: 1.0,
+        });
+        cache.on_trade(&Trade {
+            time: (s_start + 120_000) as u64,
+            is_sell: false,
+            price: Price::from_f64(104.0),
+            qty: 1.0,
+        });
+
+        assert_eq!(cache.tick_size(), 1.0);
+        assert!(cache.active_profile().unwrap().matrix.contains_key(&101));
+        assert!(cache.active_profile().unwrap().matrix.contains_key(&104));
+
+        // Re-scale tick size to 5.0
+        cache.set_tick_size(5.0);
+        assert_eq!(cache.tick_size(), 5.0);
+        let prof = cache.active_profile().unwrap();
+        // 101 / 5 = 20.2 => bin 20; 104 / 5 = 20.8 => bin 21
+        assert!(prof.matrix.contains_key(&20));
+        assert!(prof.matrix.contains_key(&21));
+    }
+
+    #[test]
+    fn test_trade_tpo_cache_sub_second_benchmark() {
+        let (s_start, _) = TpoAnchor::Daily.period_bounds(1_700_000_000_000);
+        let mut cache = TradeTpoCache::new(TpoAnchor::Daily, 0.5);
+
+        // Generate 25,000 synthetic trades across a 12-hour intraday window
+        let mut trades = Vec::with_capacity(25_000);
+        let mut current_price = 30_000.0f64;
+        for i in 0..25_000 {
+            let offset_ms = (i as i64 * 12 * 3600 * 1000) / 25_000;
+            let step = if i % 2 == 0 { 0.5 } else { -0.5 };
+            current_price += step;
+            trades.push(Trade {
+                time: (s_start + offset_ms) as u64,
+                is_sell: i % 2 == 1,
+                price: Price::from_f64(current_price),
+                qty: 0.1,
+            });
+        }
+
+        let start_time = std::time::Instant::now();
+        cache.on_trades(&trades, 0.5);
+        let elapsed = start_time.elapsed();
+
+        assert!(
+            elapsed.as_millis() < 500,
+            "TradeTpoCache must ingest 25,000 trades in sub-second time (took {}ms)",
+            elapsed.as_millis()
+        );
+
+        let active = cache.active_profile().expect("Active profile must exist");
+        assert!(active.poc.is_some(), "POC must be calculated");
+        assert!(active.value_area.is_some(), "Value Area must be calculated");
+        assert!(active.ib.is_some(), "IB must be calculated");
     }
 }

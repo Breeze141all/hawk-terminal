@@ -1,6 +1,7 @@
 use super::language::PackageOrigin;
 use super::region_intersects_source_range;
 use super::registry::{IndicatorConfig, IndicatorId, IndicatorRegistration};
+use super::theme::{ThemeColorRole, ThemeColorShade};
 use super::{
     AvailabilityContext, IndicatorAttachmentMode, IndicatorAuthor, IndicatorColorSpec,
     IndicatorConfigError, IndicatorDefinition, IndicatorFillGeometry, IndicatorFillSpec,
@@ -17,7 +18,6 @@ use crate::chart::kline::composition::{
     AxisBinding, BarMode, HistogramMode, LayerDataKind, MarkKind, PanelScaleMode,
     PanelValueLabelMode, PanelValueLabelPolicy, PanelValuePrecision,
 };
-use super::theme::{ThemeColorRole, ThemeColorShade};
 use exchange::UnixMs;
 use indicator_engine::{
     Color, CompiledIndicator, FrameOutput, HorizontalLevelOutput,
@@ -1183,10 +1183,7 @@ impl ScriptIndicatorRuntime {
 }
 
 impl ScriptIndicatorRuntime {
-    pub fn set_config(
-        &mut self,
-        config: &IndicatorConfig,
-    ) -> Result<bool, IndicatorConfigError> {
+    pub fn set_config(&mut self, config: &IndicatorConfig) -> Result<bool, IndicatorConfigError> {
         if self.config == *config {
             return Ok(false);
         }
@@ -1243,11 +1240,7 @@ impl ScriptIndicatorRuntime {
             })
     }
 
-    pub fn output_color(
-        &self,
-        channel_id: &str,
-        index: usize,
-    ) -> Option<indicator_engine::Color> {
+    pub fn output_color(&self, channel_id: &str, index: usize) -> Option<indicator_engine::Color> {
         self.outputs.series_color(channel_id, index)
     }
 
@@ -1271,10 +1264,7 @@ impl ScriptIndicatorRuntime {
         self.outputs.range_value(channel_id, index)
     }
 
-    pub fn region_outputs_in_range(
-        &self,
-        source_range: Option<Range<usize>>,
-    ) -> Vec<RegionOutput> {
+    pub fn region_outputs_in_range(&self, source_range: Option<Range<usize>>) -> Vec<RegionOutput> {
         self.outputs.region_values_in_range(source_range.as_ref())
     }
 
@@ -1288,7 +1278,9 @@ impl ScriptIndicatorRuntime {
 
     #[inline]
     pub fn committed_index(&self) -> Option<usize> {
-        self.instance.as_ref().and_then(|inst| inst.committed_index())
+        self.instance
+            .as_ref()
+            .and_then(|inst| inst.committed_index())
     }
 }
 

@@ -17,7 +17,7 @@ use adapter::{MarketKind, StreamKind};
 
 pub mod unit {
     pub use crate::util::{ContractSize, MinQtySize, MinTicksize, Price, PriceStep, UnixMs};
-    pub use crate::{volume_size_unit, SizeUnit};
+    pub use crate::{SizeUnit, volume_size_unit};
 }
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -257,6 +257,9 @@ impl SerTicker {
             Exchange::OkexLinear => "OkexLinear",
             Exchange::OkexInverse => "OkexInverse",
             Exchange::OkexSpot => "OkexSpot",
+            Exchange::MexcLinear => "MexcLinear",
+            Exchange::MexcInverse => "MexcInverse",
+            Exchange::MexcSpot => "MexcSpot",
         }
     }
 
@@ -273,6 +276,9 @@ impl SerTicker {
             "OkexLinear" => Ok(Exchange::OkexLinear),
             "OkexInverse" => Ok(Exchange::OkexInverse),
             "OkexSpot" => Ok(Exchange::OkexSpot),
+            "MexcLinear" => Ok(Exchange::MexcLinear),
+            "MexcInverse" => Ok(Exchange::MexcInverse),
+            "MexcSpot" => Ok(Exchange::MexcSpot),
             _ => Err(format!("Unknown exchange: {}", s)),
         }
     }
@@ -296,19 +302,11 @@ impl<'de> Deserialize<'de> for SerTicker {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let parts: Vec<&str> = s.split(':').collect();
+        let (exchange_str, ticker_str) = s
+            .split_once(':')
+            .ok_or_else(|| serde::de::Error::custom("expected 'Exchange:Ticker'"))?;
 
-        if parts.len() != 2 {
-            return Err(serde::de::Error::custom(format!(
-                "Invalid ExchangeTicker format: expected 'Exchange:Ticker', got '{}'",
-                s
-            )));
-        }
-
-        let exchange_str = parts[0];
         let exchange = Self::string_to_exchange(exchange_str).map_err(serde::de::Error::custom)?;
-
-        let ticker_str = parts[1];
         let ticker = Ticker::new(ticker_str, exchange);
 
         Ok(SerTicker { exchange, ticker })
@@ -416,19 +414,10 @@ impl Ticker {
         let market_kind = self.market_type();
 
         let result = if self.has_display_symbol {
-            // Use the custom display symbol (e.g., "HYPEUSDC" for Hyperliquid spot)
+            // Use the custom display symbol (e.g., "HYPEUSDC" for Hyperliquid spot or "BTCUSDC" for perps)
             self.display_as_str().to_owned()
         } else {
-            let mut result = self.as_str().to_owned();
-            // Transform Hyperliquid symbols to standardized display format
-            if matches!(self.exchange, Exchange::HyperliquidLinear)
-                && market_kind == MarketKind::LinearPerps
-            {
-                // For Hyperliquid Linear Perps, append USDT to match other exchanges' format
-                // The "P" suffix will be added later in compute_display_data for all perpetual contracts
-                result.push_str("USDT");
-            }
-            result
+            self.as_str().to_owned()
         };
 
         (result, market_kind)
@@ -636,7 +625,7 @@ impl TickerInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct Trade {
     pub time: u64,
     #[serde(deserialize_with = "bool_from_int")]
@@ -1400,5 +1389,50 @@ mod tests {
             serde_json::from_str::<Timeframe>("\"1mo\"").unwrap(),
             Timeframe::MN1
         );
+    }
+
+    #[test]
+    fn test_hyperliquid_hip3_dex_ticker_serde() {
+        // HIP-3 DEX symbol with colon
+        let ticker = Ticker::new_with_display(
+            "xyz:AAPL",
+            Exchange::HyperliquidLinear,
+            Some("xyz:AAPLUSDC"),
+        );
+        let ser_ticker = SerTicker::from_parts(ticker);
+
+        let json = serde_json::to_string(&ser_ticker).unwrap();
+        assert_eq!(json, "\"HyperliquidLinear:xyz:AAPL\"");
+
+        let deserialized: SerTicker = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.exchange, Exchange::HyperliquidLinear);
+        assert_eq!(deserialized.ticker.as_str(), "xyz:AAPL");
+
+        // Ticker roundtrip with display symbol
+        let ticker_json = serde_json::to_string(&ticker).unwrap();
+        assert_eq!(ticker_json, "\"HyperliquidLinear:xyz:AAPL|xyz:AAPLUSDC\"");
+        let deserialized_ticker: Ticker = serde_json::from_str(&ticker_json).unwrap();
+        assert_eq!(deserialized_ticker.as_str(), "xyz:AAPL");
+        assert_eq!(deserialized_ticker.display_symbol(), Some("xyz:AAPLUSDC"));
+        assert_eq!(
+            deserialized_ticker.display_symbol_and_type(),
+            ("xyz:AAPLUSDC".to_string(), MarketKind::LinearPerps)
+        );
+    }
+
+    #[test]
+    fn test_hyperliquid_ticker_display_no_forced_usdt() {
+        // Raw BTC perp without display symbol should display as BTC, not BTCUSDT
+        let raw_btc = Ticker::new("BTC", Exchange::HyperliquidLinear);
+        let (disp, kind) = raw_btc.display_symbol_and_type();
+        assert_eq!(disp, "BTC");
+        assert_eq!(kind, MarketKind::LinearPerps);
+
+        // BTC perp with USDC display symbol
+        let btc_usdc =
+            Ticker::new_with_display("BTC", Exchange::HyperliquidLinear, Some("BTCUSDC"));
+        let (disp_usdc, kind_usdc) = btc_usdc.display_symbol_and_type();
+        assert_eq!(disp_usdc, "BTCUSDC");
+        assert_eq!(kind_usdc, MarketKind::LinearPerps);
     }
 }

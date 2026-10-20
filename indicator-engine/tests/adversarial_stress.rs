@@ -1,6 +1,6 @@
 use indicator_engine::{
-    compile, compile_with_limits, ChartFrame, CompileLimits, IndicatorConfig, IndicatorFrame,
-    InstrumentContext, RuntimeError, RuntimeLimits, TimeOrTick, Value,
+    ChartFrame, CompileLimits, IndicatorConfig, IndicatorFrame, InstrumentContext, RuntimeError,
+    RuntimeLimits, TimeOrTick, Value, compile, compile_with_limits,
 };
 
 fn make_frame(index: usize, time: i64, close: Option<f64>) -> IndicatorFrame {
@@ -61,7 +61,13 @@ plot(int_mul_overflow, id = "p7")
         .expect("runtime should not panic or fail on div/mod by zero or overflow");
 
     for plot in out.plots.iter() {
-        assert_eq!(plot.value, Value::Na, "Plot {} should be Na, got {:?}", plot.id, plot.value);
+        assert_eq!(
+            plot.value,
+            Value::Na,
+            "Plot {} should be Na, got {:?}",
+            plot.id,
+            plot.value
+        );
     }
 }
 
@@ -89,7 +95,10 @@ plot(i, id = "res")
     assert!(result.is_err(), "infinite loop must fail execution");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, RuntimeError::ExecutionLimitExceeded | RuntimeError::ResourceLimitExceeded(_)),
+        matches!(
+            err,
+            RuntimeError::ExecutionLimitExceeded | RuntimeError::ResourceLimitExceeded(_)
+        ),
         "error should be limit exceeded, got: {:?}",
         err
     );
@@ -116,7 +125,10 @@ plot(total, id = "res")
         .expect("instantiation should succeed");
 
     let result = instance.evaluate_closed(make_frame(0, 1000, Some(100.0)));
-    assert!(result.is_err(), "huge range loop must be terminated by work budget");
+    assert!(
+        result.is_err(),
+        "huge range loop must be terminated by work budget"
+    );
     assert!(matches!(
         result.unwrap_err(),
         RuntimeError::ExecutionLimitExceeded | RuntimeError::ResourceLimitExceeded(_)
@@ -212,25 +224,33 @@ plot(count, id = "count")
         .expect("instantiate ok");
 
     // Commit bar 0
-    let out0 = instance.evaluate_closed(make_frame(0, 1000, Some(100.0))).expect("bar 0 ok");
+    let out0 = instance
+        .evaluate_closed(make_frame(0, 1000, Some(100.0)))
+        .expect("bar 0 ok");
     let p0 = out0.plots.iter().find(|p| p.id == "count").unwrap();
     assert_eq!(p0.value, Value::Int(1));
 
     // Preview bar 1 multiple times with different values
     for _ in 0..100 {
-        let out_prev = instance.preview_open(make_frame(1, 1060, Some(105.0))).expect("preview ok");
+        let out_prev = instance
+            .preview_open(make_frame(1, 1060, Some(105.0)))
+            .expect("preview ok");
         let p_prev = out_prev.plots.iter().find(|p| p.id == "count").unwrap();
         // In preview, count should be 2, but NOT mutate the base state for subsequent previews
         assert_eq!(p_prev.value, Value::Int(2));
     }
 
     // Now commit bar 1
-    let out1 = instance.evaluate_closed(make_frame(1, 1060, Some(105.0))).expect("bar 1 ok");
+    let out1 = instance
+        .evaluate_closed(make_frame(1, 1060, Some(105.0)))
+        .expect("bar 1 ok");
     let p1 = out1.plots.iter().find(|p| p.id == "count").unwrap();
     assert_eq!(p1.value, Value::Int(2));
 
     // And bar 2
-    let out2 = instance.evaluate_closed(make_frame(2, 1120, Some(110.0))).expect("bar 2 ok");
+    let out2 = instance
+        .evaluate_closed(make_frame(2, 1120, Some(110.0)))
+        .expect("bar 2 ok");
     let p2 = out2.plots.iter().find(|p| p.id == "count").unwrap();
     assert_eq!(p2.value, Value::Int(3));
 }
@@ -258,8 +278,10 @@ plot(barstate.isconfirmed, id = "isconfirmed")
         .expect("instantiate ok");
 
     // Preview open bar 0 before any evaluate_closed!
-    let out = instance.preview_open(make_frame(0, 1000, Some(100.0))).expect("preview on fresh instance ok");
-    
+    let out = instance
+        .preview_open(make_frame(0, 1000, Some(100.0)))
+        .expect("preview on fresh instance ok");
+
     let is_first = out.plots.iter().find(|p| p.id == "isfirst").unwrap();
     let is_realtime = out.plots.iter().find(|p| p.id == "isrealtime").unwrap();
     let is_last = out.plots.iter().find(|p| p.id == "islast").unwrap();
@@ -314,7 +336,9 @@ plot(cum, id = "cum")
             series_inputs: Vec::new().into(),
         };
 
-        let out = instance.evaluate_closed(frame).expect("should handle None frames without panic");
+        let out = instance
+            .evaluate_closed(frame)
+            .expect("should handle None frames without panic");
         for p in out.plots.iter() {
             assert_eq!(p.value, Value::Na, "output for None frames must be Na");
         }
@@ -329,7 +353,10 @@ fn test_adv_source_limits_exceeded() {
         ..Default::default()
     };
     let result = compile_with_limits(&huge_source, "huge.ind", limits);
-    assert!(result.is_err(), "must reject source exceeding max_source_bytes");
+    assert!(
+        result.is_err(),
+        "must reject source exceeding max_source_bytes"
+    );
 }
 
 #[test]
@@ -340,9 +367,14 @@ fn test_adv_ta_window_bounds_validation() {
         );
         let res = compile(&script, "badwindow.ind");
         if let Ok(compiled) = res {
-            let inst_res = compiled.instantiate_with_limits(IndicatorConfig::default(), RuntimeLimits::untrusted());
+            let inst_res = compiled
+                .instantiate_with_limits(IndicatorConfig::default(), RuntimeLimits::untrusted());
             assert!(
-                inst_res.is_err() || inst_res.unwrap().evaluate_closed(make_frame(0, 1000, Some(100.0))).is_err(),
+                inst_res.is_err()
+                    || inst_res
+                        .unwrap()
+                        .evaluate_closed(make_frame(0, 1000, Some(100.0)))
+                        .is_err(),
                 "Window length {} should have failed",
                 bad_len
             );
@@ -350,15 +382,29 @@ fn test_adv_ta_window_bounds_validation() {
     }
 }
 
-
 #[test]
 fn test_adv_malformed_syntax_diagnostics() {
     let bad_scripts = [
-        ("unterminated_string", "language(1)\nindicator(\"Unterm\nformat(precision = \"base_ticker_min_tick\")\nplot(chart.close)"),
-        ("invalid_tokens", "language(1)\nindicator(\"Bad\"))\nformat(precision = \"base_ticker_min_tick\")\nplot(chart.close)"),
-        ("missing_format", "language(1)\nindicator(\"NoFormat\", id = \"test.noformat\")\nplot(chart.close)"),
-        ("duplicate_indicator", "language(1)\nindicator(\"A\", id = \"test.a\")\nindicator(\"B\", id = \"test.b\")\nplot(chart.close)"),
-        ("type_error_add_string_num", "language(1)\nindicator(\"TypeError\", id = \"test.te\")\nformat(precision = \"base_ticker_min_tick\")\nx = \"hello\" + 10\nplot(x)"),
+        (
+            "unterminated_string",
+            "language(1)\nindicator(\"Unterm\nformat(precision = \"base_ticker_min_tick\")\nplot(chart.close)",
+        ),
+        (
+            "invalid_tokens",
+            "language(1)\nindicator(\"Bad\"))\nformat(precision = \"base_ticker_min_tick\")\nplot(chart.close)",
+        ),
+        (
+            "missing_format",
+            "language(1)\nindicator(\"NoFormat\", id = \"test.noformat\")\nplot(chart.close)",
+        ),
+        (
+            "duplicate_indicator",
+            "language(1)\nindicator(\"A\", id = \"test.a\")\nindicator(\"B\", id = \"test.b\")\nplot(chart.close)",
+        ),
+        (
+            "type_error_add_string_num",
+            "language(1)\nindicator(\"TypeError\", id = \"test.te\")\nformat(precision = \"base_ticker_min_tick\")\nx = \"hello\" + 10\nplot(x)",
+        ),
     ];
 
     for (name, script) in bad_scripts {
@@ -383,22 +429,26 @@ plot(ta.sma(chart.close, period), id = "sma")
     let compiled = compile(script, "inputbound.ind").expect("compile ok");
 
     // Test 1: Int above max (51 > 50)
-    let bad_config_high = IndicatorConfig::default().with("period", indicator_engine::InputValue::Int(51));
+    let bad_config_high =
+        IndicatorConfig::default().with("period", indicator_engine::InputValue::Int(51));
     let inst_res = compiled.instantiate(bad_config_high);
     assert!(inst_res.is_err(), "Int above max must be rejected");
 
     // Test 2: Int below min (1 < 2)
-    let bad_config_low = IndicatorConfig::default().with("period", indicator_engine::InputValue::Int(1));
+    let bad_config_low =
+        IndicatorConfig::default().with("period", indicator_engine::InputValue::Int(1));
     let inst_res = compiled.instantiate(bad_config_low);
     assert!(inst_res.is_err(), "Int below min must be rejected");
 
     // Test 3: String instead of Int
-    let bad_config_type = IndicatorConfig::default().with("period", indicator_engine::InputValue::String("14".into()));
+    let bad_config_type = IndicatorConfig::default()
+        .with("period", indicator_engine::InputValue::String("14".into()));
     let inst_res = compiled.instantiate(bad_config_type);
     assert!(inst_res.is_err(), "Type mismatch must be rejected");
 
     // Test 4: Valid within bounds (20)
-    let good_config = IndicatorConfig::default().with("period", indicator_engine::InputValue::Int(20));
+    let good_config =
+        IndicatorConfig::default().with("period", indicator_engine::InputValue::Int(20));
     let inst_res = compiled.instantiate(good_config);
     assert!(inst_res.is_ok(), "Valid config must be accepted");
 }
@@ -424,20 +474,30 @@ plot(c, id = "cum")
 "#;
 
     let compiled = compile(script, "multita.ind").expect("compile ok");
-    let mut instance = compiled.instantiate(IndicatorConfig::default()).expect("instantiate ok");
+    let mut instance = compiled
+        .instantiate(IndicatorConfig::default())
+        .expect("instantiate ok");
 
     let total_bars = 20_000;
     for i in 0..total_bars {
         let price = 50_000.0 + (i as f64 * 0.1).sin() * 5_000.0;
         let frame = make_frame(i, 1_700_000_000 + (i as i64 * 60), Some(price));
 
-        let closed_out = instance.evaluate_closed(frame.clone()).expect("20k closed bars should evaluate without error");
+        let closed_out = instance
+            .evaluate_closed(frame.clone())
+            .expect("20k closed bars should evaluate without error");
         assert_eq!(closed_out.plots.len(), 5);
 
         // Every 50 bars, do a preview tick
         if i % 50 == 0 {
-            let preview_frame = make_frame(i + 1, 1_700_000_000 + ((i as i64 + 1) * 60), Some(price + 10.0));
-            let prev_out = instance.preview_open(preview_frame).expect("preview should evaluate");
+            let preview_frame = make_frame(
+                i + 1,
+                1_700_000_000 + ((i as i64 + 1) * 60),
+                Some(price + 10.0),
+            );
+            let prev_out = instance
+                .preview_open(preview_frame)
+                .expect("preview should evaluate");
             assert_eq!(prev_out.plots.len(), 5);
         }
     }

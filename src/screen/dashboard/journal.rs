@@ -1,10 +1,13 @@
 use crate::style::{self, Icon, icon_text};
 use data::journal::{JournalEntry, JournalStats, TradeSide, TradeStatus};
-use exchange::adapter::trade_import::{ImportCredentials, ImportExchangeKind, ImportedTrade, fetch_exchange_trades};
+use exchange::adapter::trade_import::{
+    ImportCredentials, ImportExchangeKind, ImportedTrade, fetch_exchange_trades,
+};
 use iced::{
     Alignment, Element, Length, Size, Task, Theme,
     widget::{button, column, container, row, scrollable, space, text, text_input},
 };
+use std::path::PathBuf;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -44,10 +47,12 @@ pub enum Message {
     PasteScreenshot,
     PasteScreenshotFromHotkey,
     PickImageFile,
+    ImageFilePickedForForm(Option<PathBuf>),
     RemoveFormImage(usize),
     ViewImage(ActiveImageViewer),
     CloseImageViewer,
     AttachImageToTrade(Uuid),
+    ImageFilePickedForTrade(Uuid, Option<PathBuf>),
     PasteScreenshotToTrade(Uuid),
     DeleteTradeImage { entry_id: Uuid, image_name: String },
 
@@ -445,18 +450,24 @@ impl Journal {
                 }
             }
             Message::PickImageFile => {
-                if let Some(path) = crate::journal_media::pick_image_file() {
-                    match crate::journal_media::import_local_image_file(&path) {
-                        Ok(file_name) => {
-                            self.input_images.push(file_name);
-                            self.error_message = None;
-                        }
-                        Err(err) => {
-                            self.error_message = Some(err);
-                        }
+                let task = Task::perform(
+                    crate::journal_media::pick_image_file_async(),
+                    Message::ImageFilePickedForForm,
+                );
+                return (task, None);
+            }
+            Message::ImageFilePickedForForm(Some(path)) => {
+                match crate::journal_media::import_local_image_file(&path) {
+                    Ok(file_name) => {
+                        self.input_images.push(file_name);
+                        self.error_message = None;
+                    }
+                    Err(err) => {
+                        self.error_message = Some(err);
                     }
                 }
             }
+            Message::ImageFilePickedForForm(None) => {}
             Message::RemoveFormImage(idx) => {
                 if idx < self.input_images.len() {
                     let file_name = self.input_images.remove(idx);
@@ -470,21 +481,27 @@ impl Journal {
                 self.viewing_image = None;
             }
             Message::AttachImageToTrade(id) => {
-                if let Some(path) = crate::journal_media::pick_image_file() {
-                    match crate::journal_media::import_local_image_file(&path) {
-                        Ok(file_name) => {
-                            if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
-                                entry.images.push(file_name);
-                                let _ = data::save_journal(&self.entries);
-                            }
-                            self.error_message = None;
+                let task = Task::perform(
+                    crate::journal_media::pick_image_file_async(),
+                    move |res| Message::ImageFilePickedForTrade(id, res),
+                );
+                return (task, None);
+            }
+            Message::ImageFilePickedForTrade(id, Some(path)) => {
+                match crate::journal_media::import_local_image_file(&path) {
+                    Ok(file_name) => {
+                        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+                            entry.images.push(file_name);
+                            let _ = data::save_journal(&self.entries);
                         }
-                        Err(err) => {
-                            self.error_message = Some(err);
-                        }
+                        self.error_message = None;
+                    }
+                    Err(err) => {
+                        self.error_message = Some(err);
                     }
                 }
             }
+            Message::ImageFilePickedForTrade(_id, None) => {}
             Message::PasteScreenshotToTrade(id) => {
                 match crate::journal_media::save_clipboard_image() {
                     Ok(file_name) => {
@@ -627,8 +644,7 @@ impl Journal {
                         ));
                     }
                     Err(err) => {
-                        self.import_status_message =
-                            Some((format!("Import error: {err}"), false));
+                        self.import_status_message = Some((format!("Import error: {err}"), false));
                     }
                 }
             }
@@ -1056,13 +1072,10 @@ impl Journal {
             form_fields = form_fields.push(pass_input);
         }
 
-        let symbol_input = text_input(
-            "All symbols if blank (e.g. BTCUSDT)",
-            &self.import_symbol,
-        )
-        .on_input(Message::InputImportSymbol)
-        .padding([4.0, 6.0])
-        .size(12);
+        let symbol_input = text_input("All symbols if blank (e.g. BTCUSDT)", &self.import_symbol)
+            .on_input(Message::InputImportSymbol)
+            .padding([4.0, 6.0])
+            .size(12);
 
         let limit_input = text_input("100", &self.import_limit)
             .on_input(Message::InputImportLimit)
@@ -1163,17 +1176,21 @@ impl Journal {
 
     fn view_exchange_selector_btn(&self, kind: ImportExchangeKind) -> Element<'_, Message> {
         let is_selected = self.import_exchange == kind;
-        button(text(kind.exchange_name()).size(11).align_x(Alignment::Center))
-            .padding([3.0, 6.0])
-            .on_press(Message::SelectImportExchange(kind))
-            .style(move |theme, status| {
-                if is_selected {
-                    style::button::confirm(theme, status, true)
-                } else {
-                    style::button::bordered_toggle(theme, status, false)
-                }
-            })
-            .into()
+        button(
+            text(kind.exchange_name())
+                .size(11)
+                .align_x(Alignment::Center),
+        )
+        .padding([3.0, 6.0])
+        .on_press(Message::SelectImportExchange(kind))
+        .style(move |theme, status| {
+            if is_selected {
+                style::button::confirm(theme, status, true)
+            } else {
+                style::button::bordered_toggle(theme, status, false)
+            }
+        })
+        .into()
     }
 
     fn view_add_form(&self) -> Element<'_, Message> {
@@ -2928,7 +2945,9 @@ mod tests {
         let _ = journal.update(Message::ToggleImportModal);
         assert!(journal.show_import_modal);
 
-        let _ = journal.update(Message::SelectImportExchange(ImportExchangeKind::BybitLinear));
+        let _ = journal.update(Message::SelectImportExchange(
+            ImportExchangeKind::BybitLinear,
+        ));
         assert_eq!(journal.import_exchange, ImportExchangeKind::BybitLinear);
 
         let _ = journal.update(Message::InputImportKeyOrAddress("test_api_key".to_string()));

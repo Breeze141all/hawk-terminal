@@ -16,12 +16,19 @@ fn collect_sources(
     }
     println!("cargo:rerun-if-changed={}", dir.display());
 
-    let entries = fs::read_dir(dir)
-        .map_err(|error| format!("{}: could not read indicator directory: {error}", dir.display()))?;
+    let entries = fs::read_dir(dir).map_err(|error| {
+        format!(
+            "{}: could not read indicator directory: {error}",
+            dir.display()
+        )
+    })?;
 
     for entry in entries {
         let entry = entry.map_err(|error| {
-            format!("{}: could not inspect indicator entry: {error}", dir.display())
+            format!(
+                "{}: could not inspect indicator entry: {error}",
+                dir.display()
+            )
         })?;
         let path = entry.path();
         if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("ind") {

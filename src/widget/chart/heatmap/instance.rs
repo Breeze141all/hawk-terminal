@@ -321,10 +321,7 @@ impl InstanceBuilder {
         let trade_size_filter = config.trade_size_filter.max(0.0);
         let fallback_radius_px = (0.5 * w.row_h * w.cam_scale).max(CircleInstance::R_MIN_PX);
 
-        for (bucket_time, dp) in trades
-            .datapoints
-            .range(w.earliest..=w.latest_vis)
-        {
+        for (bucket_time, dp) in trades.datapoints.range(w.earliest..=w.latest_vis) {
             let bucket = (*bucket_time / w.aggr_time) as i64;
 
             for trade in dp.grouped_trades.iter() {
@@ -479,15 +476,10 @@ impl InstanceBuilder {
         // Accumulate buy/sell volumes into bins
         let bins_len = (max_x_bin - min_x_bin + 1) as usize;
         self.volume_acc.resize(bins_len, (0.0, 0.0));
-        self.volume_acc
-            .iter_mut()
-            .for_each(|e| *e = (0.0, 0.0));
+        self.volume_acc.iter_mut().for_each(|e| *e = (0.0, 0.0));
         self.volume_touched.clear();
 
-        for (time, dp) in trades
-            .datapoints
-            .range(w.earliest..=w.latest_vis)
-        {
+        for (time, dp) in trades.datapoints.range(w.earliest..=w.latest_vis) {
             let bucket = (*time / w.aggr_time) as i64;
             let x_bin = bucket.div_euclid(cols_per_x_bin);
             let idx = (x_bin - min_x_bin) as usize;

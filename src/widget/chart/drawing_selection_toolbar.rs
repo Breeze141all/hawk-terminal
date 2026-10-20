@@ -20,6 +20,7 @@ pub enum SelectionToolbarAction {
     SetPositionEntryColor([f32; 4]),
     TogglePositionPricePath,
     AutofillJournal,
+    ApplyTemplate(data::chart::drawing::DrawingTemplate),
 }
 
 pub fn view<'a, Message: 'a + Clone>(
@@ -231,7 +232,7 @@ pub fn view<'a, Message: 'a + Clone>(
 
     if show_settings {
         main_container =
-            main_container.width(Length::Fixed(if is_position { 284.0 } else { 252.0 }));
+            main_container.width(Length::Fixed(if is_position { 292.0 } else { 268.0 }));
     }
 
     main_container.into()
@@ -243,6 +244,53 @@ fn view_settings<'a, Message: 'a + Clone>(
 ) -> Element<'a, Message> {
     let current_alpha = drawing.color[3];
     let current_width = drawing.width;
+
+    // Presets row
+    let presets = data::chart::drawing::DrawingTemplateStore::all();
+    let mut preset_chips = row![].spacing(3).align_y(Alignment::Center);
+    for t in presets.into_iter().take(5) {
+        let chip_color = Color::from_rgba(t.color[0], t.color[1], t.color[2], t.color[3]);
+        let t_clone = t.clone();
+        let (short_name, tip_label): (&'static str, &'static str) = match t.name.as_str() {
+            "Cyan Accent" => ("Cyan", "Cyan Accent Preset"),
+            "Key Level" => ("Key", "Key Level Preset"),
+            "Major Alert" => ("Alert", "Major Alert Preset"),
+            "Faint Guide" => ("Guide", "Faint Guide Preset"),
+            "Accent Zone" => ("Zone", "Accent Zone Preset"),
+            _ => ("Preset", "Drawing Preset"),
+        };
+        let btn = button(
+            row![
+                container("")
+                    .width(7)
+                    .height(7)
+                    .style(move |_| container::Style {
+                        background: Some(chip_color.into()),
+                        border: border::rounded(2),
+                        ..Default::default()
+                    }),
+                text(short_name).size(9).font(style::AZERET_MONO),
+            ]
+            .spacing(3)
+            .align_y(Alignment::Center),
+        )
+        .padding(padding::top(1).bottom(1).left(3).right(3))
+        .style(move |theme: &Theme, status| toolbar_button_style(theme, status, false))
+        .on_press(on_action(SelectionToolbarAction::ApplyTemplate(t_clone)));
+
+        preset_chips = preset_chips.push(tooltip(
+            btn,
+            Some(tip_label),
+            iced::widget::tooltip::Position::Top,
+        ));
+    }
+
+    let preset_row = row![
+        container(text("Preset:").size(10).font(style::AZERET_MONO)).width(52),
+        preset_chips,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
 
     // Palette swatches
     let preset_colors: [([f32; 3], &'static str); 8] = [
@@ -370,7 +418,7 @@ fn view_settings<'a, Message: 'a + Clone>(
             }
         });
 
-    column![separator, color_row, width_row, opacity_row,]
+    column![separator, preset_row, color_row, width_row, opacity_row,]
         .spacing(6)
         .padding(padding::top(4).bottom(2).left(2).right(2))
         .into()
@@ -406,6 +454,53 @@ fn view_position_settings<'a, Message: 'a + Clone>(
                 }
             })
     };
+
+    // Presets row
+    let presets = data::chart::drawing::DrawingTemplateStore::all();
+    let mut preset_chips = row![].spacing(3).align_y(Alignment::Center);
+    for t in presets.into_iter().take(5) {
+        let chip_color = Color::from_rgba(t.color[0], t.color[1], t.color[2], t.color[3]);
+        let t_clone = t.clone();
+        let (short_name, tip_label): (&'static str, &'static str) = match t.name.as_str() {
+            "Cyan Accent" => ("Cyan", "Cyan Accent Preset"),
+            "Key Level" => ("Key", "Key Level Preset"),
+            "Major Alert" => ("Alert", "Major Alert Preset"),
+            "Faint Guide" => ("Guide", "Faint Guide Preset"),
+            "Accent Zone" => ("Zone", "Accent Zone Preset"),
+            _ => ("Preset", "Drawing Preset"),
+        };
+        let btn = button(
+            row![
+                container("")
+                    .width(7)
+                    .height(7)
+                    .style(move |_| container::Style {
+                        background: Some(chip_color.into()),
+                        border: border::rounded(2),
+                        ..Default::default()
+                    }),
+                text(short_name).size(9).font(style::AZERET_MONO),
+            ]
+            .spacing(3)
+            .align_y(Alignment::Center),
+        )
+        .padding(padding::top(1).bottom(1).left(3).right(3))
+        .style(move |theme: &Theme, status| toolbar_button_style(theme, status, false))
+        .on_press(on_action(SelectionToolbarAction::ApplyTemplate(t_clone)));
+
+        preset_chips = preset_chips.push(tooltip(
+            btn,
+            Some(tip_label),
+            iced::widget::tooltip::Position::Top,
+        ));
+    }
+
+    let preset_row = row![
+        container(text("Preset:").size(10).font(style::AZERET_MONO)).width(48),
+        preset_chips,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
 
     // --- Take Profit Section ---
     let tp_is_auto = pos_style.profit_color.is_none();
@@ -699,6 +794,8 @@ fn view_position_settings<'a, Message: 'a + Clone>(
     .align_y(Alignment::Center);
 
     column![
+        separator(),
+        preset_row,
         separator(),
         tp_color_row,
         tp_opacity_row,

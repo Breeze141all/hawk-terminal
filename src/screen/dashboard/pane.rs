@@ -295,6 +295,23 @@ impl State {
                 self.notifications
                     .retain(|t| !t.title.contains("Footprint"));
             }
+            Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
+                self.notifications
+                    .retain(|t| t.title == "MEXC Footprint" || !t.title.contains("Footprint"));
+                if self.footprint_notice_dismissed != Some(exchange)
+                    && !self
+                        .notifications
+                        .iter()
+                        .any(|t| t.title == "MEXC Footprint")
+                {
+                    self.notifications.push(
+                        Toast::error("Дані з інших днів не надходитимуть через відсутність сервера (MEXC не надає публічних архівів угод).")
+                            .with_title("MEXC Footprint")
+                            .persistent()
+                            .closable(true),
+                    );
+                }
+            }
         }
     }
 
@@ -308,7 +325,11 @@ impl State {
         settings.pane_id = Some(id);
 
         if let Content::Kline { ref kind, .. } = content
-            && matches!(kind, data::chart::KlineChartKind::Footprint { .. })
+            && matches!(
+                kind,
+                data::chart::KlineChartKind::Footprint { .. }
+                    | data::chart::KlineChartKind::Tpo { .. }
+            )
             && !streams
                 .iter()
                 .any(|s| matches!(s, PersistStreamKind::DepthAndTrades(_)))
@@ -457,6 +478,34 @@ impl State {
                 let streams =
                     Self::build_footprint_streams(base_ticker, chart_kind, &self.settings, tf);
                 self.streams = ResolvedStream::Ready(streams);
+            } else if matches!(chart_kind, data::chart::KlineChartKind::Tpo { .. }) {
+                let tf = match self.settings.selected_basis {
+                    Some(Basis::Time(tf)) => tf,
+                    _ => self
+                        .streams
+                        .find_ready_map(|s| match s {
+                            StreamKind::Kline { timeframe, .. } => Some(*timeframe),
+                            _ => None,
+                        })
+                        .unwrap_or(Timeframe::M30),
+                };
+                let k_stream = StreamKind::Kline {
+                    ticker_info: base_ticker,
+                    timeframe: tf,
+                };
+                let depth_aggr = if base_ticker.exchange().is_depth_client_aggr() {
+                    StreamTicksize::Client
+                } else {
+                    StreamTicksize::ServerSide(
+                        self.settings.tick_multiply.unwrap_or(TickMultiplier(10)),
+                    )
+                };
+                let d_stream = StreamKind::DepthAndTrades {
+                    ticker_info: base_ticker,
+                    depth_aggr,
+                    push_freq: exchange::PushFrequency::ServerDefault,
+                };
+                self.streams = ResolvedStream::Ready(vec![k_stream, d_stream]);
             }
         }
     }
@@ -627,22 +676,21 @@ impl State {
                         self.id,
                     );
 
-                    let streams = by_basis_default(
-                        derived_plan.basis,
-                        Timeframe::M30,
-                        |tf| vec![kline_stream(derived_plan.ticker_info, tf)],
-                        || {
-                            let depth_aggr = derived_plan
-                                .ticker_info
-                                .exchange()
-                                .stream_ticksize(None, TickMultiplier(10));
-                            let temp = PaneSetup {
-                                depth_aggr,
-                                ..derived_plan
-                            };
-                            vec![depth_stream(&temp)]
-                        },
+                    let tf = match derived_plan.basis {
+                        Some(Basis::Time(t)) => t,
+                        _ => Timeframe::M30,
+                    };
+                    let k_stream = kline_stream(derived_plan.ticker_info, tf);
+                    let depth_aggr = derived_plan.ticker_info.exchange().stream_ticksize(
+                        None,
+                        self.settings.tick_multiply.unwrap_or(TickMultiplier(10)),
                     );
+                    let temp = PaneSetup {
+                        depth_aggr,
+                        ..derived_plan
+                    };
+                    let d_stream = depth_stream(&temp);
+                    let streams = vec![k_stream, d_stream];
 
                     (content, streams)
                 }
@@ -652,17 +700,31 @@ impl State {
                         .visual_config
                         .clone()
                         .and_then(|cfg| cfg.time_and_sales());
+
+                    let mut streams = Vec::new();
+                    let temp = PaneSetup {
+                        push_freq: exchange::PushFrequency::ServerDefault,
+                        ..derived_plan
+                    };
+                    streams.push(depth_stream(&temp));
+
+                    if let Some(ref cfg) = config {
+                        for add_ti in &cfg.additional_tickers {
+                            let add_setup = PaneSetup {
+                                ticker_info: *add_ti,
+                                push_freq: exchange::PushFrequency::ServerDefault,
+                                ..derived_plan
+                            };
+                            streams.push(depth_stream(&add_setup));
+                        }
+                    }
+
                     let content = Content::TimeAndSales(Some(TimeAndSales::new(
                         config,
                         derived_plan.ticker_info,
                     )));
 
-                    let temp = PaneSetup {
-                        push_freq: exchange::PushFrequency::ServerDefault,
-                        ..derived_plan
-                    };
-
-                    (content, vec![depth_stream(&temp)])
+                    (content, streams)
                 }
                 ContentKind::Ladder => {
                     let config = self
@@ -1090,7 +1152,7 @@ impl State {
                     });
                     let trade_input = panel.size_filter_input();
                     let settings_modal =
-                        || modal::pane::settings::timesales_cfg_view(panel.config, id, trade_input);
+                        || modal::pane::settings::timesales_cfg_view(panel.config.clone(), id, trade_input);
 
                     self.compose_stack_view(
                         base,
@@ -1274,7 +1336,9 @@ impl State {
                     let kind = ModifierKind::Heatmap(basis, tick_multiply);
                     let base_ticksize = ticker_info
                         .map(|ti| f32::from(ti.min_ticksize))
-                        .unwrap_or_else(|| tick_multiply.base(chart.tick_size().to_f64_lossy() as f32));
+                        .unwrap_or_else(|| {
+                            tick_multiply.base(chart.tick_size().to_f64_lossy() as f32)
+                        });
 
                     let modifiers = row![
                         basis_modifier(id, basis, modifier, kind),
@@ -1820,7 +1884,7 @@ impl State {
                 if let Content::ShaderHeatmap { chart: Some(c), .. } = &mut self.content {
                     c.update(message);
                 }
-            },
+            }
             Event::ToggleIndicator(ind) => {
                 self.content.toggle_indicator(ind);
             }
@@ -2071,6 +2135,7 @@ impl State {
                                     if matches!(
                                         chart_kind,
                                         data::chart::KlineChartKind::Footprint { .. }
+                                            | data::chart::KlineChartKind::Tpo { .. }
                                     ) {
                                         self.sync_footprint_streams();
                                         effect = Some(Effect::RefreshStreams);
@@ -2143,11 +2208,17 @@ impl State {
                                             && ticker_info.exchange().is_custom_push_freq()
                                         {
                                             match new_basis {
-                                                Basis::Time(tf) if ticker_info.exchange().supports_heatmap_timeframe(tf) => {
-                                                    *push_freq = exchange::PushFrequency::Custom(tf);
+                                                Basis::Time(tf)
+                                                    if ticker_info
+                                                        .exchange()
+                                                        .supports_heatmap_timeframe(tf) =>
+                                                {
+                                                    *push_freq =
+                                                        exchange::PushFrequency::Custom(tf);
                                                 }
                                                 _ => {
-                                                    *push_freq = exchange::PushFrequency::ServerDefault;
+                                                    *push_freq =
+                                                        exchange::PushFrequency::ServerDefault;
                                                 }
                                             }
                                         }
@@ -2170,6 +2241,33 @@ impl State {
                                                             &self.settings,
                                                             Some(tf),
                                                         )
+                                                    } else if matches!(
+                                                        chart_kind,
+                                                        data::chart::KlineChartKind::Tpo { .. }
+                                                    ) {
+                                                        let depth_aggr = if base_ticker
+                                                            .exchange()
+                                                            .is_depth_client_aggr()
+                                                        {
+                                                            StreamTicksize::Client
+                                                        } else {
+                                                            StreamTicksize::ServerSide(
+                                                                self.settings
+                                                                    .tick_multiply
+                                                                    .unwrap_or(TickMultiplier(10)),
+                                                            )
+                                                        };
+                                                        vec![
+                                                            StreamKind::Kline {
+                                                                ticker_info: base_ticker,
+                                                                timeframe: tf,
+                                                            },
+                                                            StreamKind::DepthAndTrades {
+                                                                ticker_info: base_ticker,
+                                                                depth_aggr,
+                                                                push_freq: exchange::PushFrequency::ServerDefault,
+                                                            },
+                                                        ]
                                                     } else {
                                                         vec![StreamKind::Kline {
                                                             ticker_info: base_ticker,
@@ -2628,6 +2726,29 @@ impl State {
                                 return Some(Effect::AutofillJournal(autofill));
                             }
                         }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ApplyTemplate(template) => {
+                            let old = c.selected_drawing().cloned();
+                            c.apply_template_to_selected(&template);
+                            if let Some(new) = c.selected_drawing().cloned()
+                                && let Some(old) = old
+                                && old != new
+                            {
+                                c.push_undo(crate::chart::kline::DrawingHistoryAction::Update {
+                                    old,
+                                    new: new.clone(),
+                                });
+                            }
+                            if let Some(d) = c.selected_drawing() {
+                                data::DrawingStore::update(&symbol, d.clone());
+                                if d.is_synced {
+                                    return Some(Effect::SyncDrawing {
+                                        symbol,
+                                        drawing: d.clone(),
+                                        originating_pane_id: self.id,
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3028,7 +3149,7 @@ impl State {
             }
             Some(Modal::StreamModifier(modifier)) => stack_modal(
                 base,
-                modifier.view(self.stream_pair()).map(move |message| {
+                modifier.view(self.stream_pair_kind()).map(move |message| {
                     Message::PaneEvent(pane, Event::StreamModifierChanged(message))
                 }),
                 Message::PaneEvent(pane, Event::HideModal),
@@ -3362,6 +3483,12 @@ impl State {
     pub fn matches_trades(&self, stream: &StreamKind) -> bool {
         if self.streams.matches_trades(stream) {
             return true;
+        }
+
+        if let Content::TimeAndSales(Some(panel)) = &self.content {
+            if panel.matches_ticker(&stream.ticker_info()) {
+                return true;
+            }
         }
 
         if let Content::Kline { kind, chart, .. } = &self.content {
@@ -4803,7 +4930,9 @@ mod tests {
             trade_size_filter: 1500.0,
             ..Default::default()
         };
-        state.content.change_visual_config(VisualConfig::Heatmap(cfg));
+        state
+            .content
+            .change_visual_config(VisualConfig::Heatmap(cfg));
         if let Content::ShaderHeatmap { chart: Some(c), .. } = &state.content {
             assert_eq!(c.config.trade_size_filter, 1500.0);
             assert_eq!(c.size_filter_inputs().0, "1500");

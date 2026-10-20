@@ -1,5 +1,5 @@
-use std::time::Duration;
 use fastwebsockets::{FragmentCollectorRead, Frame, OpCode, WebSocketWrite};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Instant;
 
@@ -330,18 +330,20 @@ pub async fn run_ws_connection<R, W>(
         heartbeat.mark_activity(Instant::now());
 
         let keep_running = match message.opcode {
-            OpCode::Text => {
-                frame_tx.send(Ok(message.payload.to_vec())).is_ok()
-            }
+            OpCode::Text => frame_tx.send(Ok(message.payload.to_vec())).is_ok(),
             OpCode::Ping => {
                 let _ = writer
-                    .write_frame(Frame::pong(fastwebsockets::Payload::Owned(message.payload.to_vec())))
+                    .write_frame(Frame::pong(fastwebsockets::Payload::Owned(
+                        message.payload.to_vec(),
+                    )))
                     .await;
                 true
             }
             OpCode::Close => {
                 let _ = writer
-                    .write_frame(Frame::close_raw(fastwebsockets::Payload::Owned(message.payload.to_vec())))
+                    .write_frame(Frame::close_raw(fastwebsockets::Payload::Owned(
+                        message.payload.to_vec(),
+                    )))
                     .await;
                 let _ = frame_tx.send(Err("Connection closed by peer".to_string()));
                 false
@@ -366,7 +368,10 @@ mod tests {
 
         // Initially in IdleMonitoring: next deadline is now + 30s
         assert_eq!(hb.next_deadline(), now + Duration::from_secs(30));
-        assert_eq!(hb.deadline_action(now + Duration::from_secs(10)), HeartbeatAction::Wait);
+        assert_eq!(
+            hb.deadline_action(now + Duration::from_secs(10)),
+            HeartbeatAction::Wait
+        );
 
         // At 30s idle, it sends a ping
         assert_eq!(
@@ -379,12 +384,18 @@ mod tests {
         assert_eq!(hb.next_deadline(), now + Duration::from_secs(60));
 
         // If no activity by 60s, it times out
-        assert_eq!(hb.deadline_action(now + Duration::from_secs(60)), HeartbeatAction::Timeout);
+        assert_eq!(
+            hb.deadline_action(now + Duration::from_secs(60)),
+            HeartbeatAction::Timeout
+        );
 
         // If activity arrives before timeout, it resets back to IdleMonitoring
         hb.mark_activity(now + Duration::from_secs(45));
         assert_eq!(hb.next_deadline(), now + Duration::from_secs(75));
-        assert_eq!(hb.deadline_action(now + Duration::from_secs(50)), HeartbeatAction::Wait);
+        assert_eq!(
+            hb.deadline_action(now + Duration::from_secs(50)),
+            HeartbeatAction::Wait
+        );
     }
 
     #[test]

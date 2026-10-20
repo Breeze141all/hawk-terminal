@@ -1,7 +1,8 @@
 use super::Message;
 use crate::style;
+use data::config::timezone::TimeLabelKind;
 pub use data::panel::timeandsales::Config;
-use data::panel::timeandsales::{HistAgg, StackedBar, StackedBarRatio, TradeDisplay, TradeEntry};
+use data::panel::timeandsales::{HistAgg, StackedBar, StackedBarRatio, TapeTrade};
 use exchange::{TickerInfo, Trade, volume_size_unit};
 
 use iced::widget::canvas::{self, Text};
@@ -58,7 +59,7 @@ impl super::Panel for TimeAndSales {
             self.is_paused = false;
 
             for trade in self.paused_trades_buffer.iter() {
-                self.hist_agg.add(&trade.display);
+                self.hist_agg.add(&trade.trade);
             }
 
             self.recent_trades
@@ -75,7 +76,7 @@ impl super::Panel for TimeAndSales {
         self.is_paused = false;
 
         for trade in self.paused_trades_buffer.iter() {
-            self.hist_agg.add(&trade.display);
+            self.hist_agg.add(&trade.trade);
         }
 
         self.recent_trades
@@ -93,15 +94,26 @@ impl super::Panel for TimeAndSales {
     fn is_empty(&self) -> bool {
         self.recent_trades.is_empty() && self.paused_trades_buffer.is_empty()
     }
+
+    fn view<'a>(&'a self, timezone: data::UserTimezone) -> iced::Element<'a, Message> {
+        iced::widget::canvas(TimeAndSalesView {
+            panel: self,
+            timezone,
+        })
+        .height(iced::Length::Fill)
+        .width(iced::Length::Fill)
+        .into()
+    }
 }
 
 pub struct TimeAndSales {
-    recent_trades: VecDeque<TradeEntry>,
-    paused_trades_buffer: VecDeque<TradeEntry>,
+    recent_trades: VecDeque<TapeTrade>,
+    paused_trades_buffer: VecDeque<TapeTrade>,
     hist_agg: HistAgg,
     is_paused: bool,
     max_filtered_qty: f32,
-    ticker_info: TickerInfo,
+    pub ticker_info: TickerInfo,
+    pub tickers: Vec<TickerInfo>,
     pub config: Config,
     cache: canvas::Cache,
     last_tick: Instant,
@@ -113,6 +125,13 @@ impl TimeAndSales {
     pub fn new(config: Option<Config>, ticker_info: TickerInfo) -> Self {
         let cfg = config.unwrap_or_default();
         let trade_size_input = format_filter_value(cfg.trade_size_filter);
+        let mut tickers = vec![ticker_info];
+        for add_ti in &cfg.additional_tickers {
+            if !tickers.iter().any(|t| t.ticker == add_ti.ticker) {
+                tickers.push(*add_ti);
+            }
+        }
+
         Self {
             recent_trades: VecDeque::new(),
             paused_trades_buffer: VecDeque::new(),
@@ -121,6 +140,7 @@ impl TimeAndSales {
             config: cfg,
             max_filtered_qty: 0.0,
             ticker_info,
+            tickers,
             cache: canvas::Cache::default(),
             last_tick: Instant::now(),
             scroll_offset: 0.0,
@@ -128,52 +148,67 @@ impl TimeAndSales {
         }
     }
 
-    pub fn insert_buffer(&mut self, trades_buffer: &[Trade]) {
-        let size_filter = self.config.trade_size_filter;
+    pub fn tickers(&self) -> &[TickerInfo] {
+        &self.tickers
+    }
 
-        let target_trades = if self.is_paused {
-            &mut self.paused_trades_buffer
-        } else {
-            &mut self.recent_trades
+    pub fn matches_ticker(&self, ti: &TickerInfo) -> bool {
+        self.tickers.iter().any(|t| t.ticker == ti.ticker)
+    }
+
+    pub fn insert_buffer(&mut self, trades_buffer: &[Trade]) {
+        let ti = self.ticker_info;
+        self.insert_buffer_tagged(&ti, trades_buffer);
+    }
+
+    pub fn insert_buffer_tagged(&mut self, ti: &TickerInfo, trades_buffer: &[Trade]) {
+        let ticker_idx = match self.tickers.iter().position(|t| t.ticker == ti.ticker) {
+            Some(idx) => idx as u8,
+            None => {
+                let idx = self.tickers.len() as u8;
+                self.tickers.push(*ti);
+                idx
+            }
         };
 
-        let market_type = self.ticker_info.market_type();
+        let size_filter = self.config.trade_size_filter;
+        let market_type = ti.market_type();
         let size_in_quote_ccy = volume_size_unit() == exchange::SizeUnit::Quote;
 
-        for trade in trades_buffer {
-            let trade_time_ms = trade.time;
+        for &trade in trades_buffer {
+            let trade_size_value =
+                market_type.qty_in_quote_value(trade.qty, trade.price, size_in_quote_ccy);
 
-            if let Some(trade_time) = chrono::DateTime::from_timestamp(
-                trade_time_ms as i64 / 1000,
-                (trade_time_ms % 1000) as u32 * 1_000_000,
-            ) {
-                let trade_display = TradeDisplay {
-                    time_str: trade_time.format("%M:%S.%3f").to_string(),
-                    price: trade.price,
-                    qty: trade.qty,
-                    is_sell: trade.is_sell,
-                };
+            if trade_size_value >= size_filter {
+                self.max_filtered_qty = self.max_filtered_qty.max(trade.qty);
+            }
 
-                let trade_size_value = market_type.qty_in_quote_value(
-                    trade_display.qty,
-                    trade.price,
-                    size_in_quote_ccy,
-                );
+            let tape_trade = TapeTrade {
+                trade,
+                ticker_index: ticker_idx,
+            };
 
-                if trade_size_value >= size_filter {
-                    self.max_filtered_qty = self.max_filtered_qty.max(trade_display.qty);
-                }
+            let target_trades = if self.is_paused {
+                &mut self.paused_trades_buffer
+            } else {
+                &mut self.recent_trades
+            };
 
-                target_trades.push_back(TradeEntry {
-                    ts_ms: trade_time_ms,
-                    display: trade_display,
-                });
+            // Chronological merge: if empty or newer than last element, append O(1),
+            // else binary search O(log N) insertion point to preserve temporal monotonicity.
+            if target_trades.is_empty()
+                || target_trades
+                    .back()
+                    .map_or(true, |last| last.trade.time <= trade.time)
+            {
+                target_trades.push_back(tape_trade);
+            } else {
+                let insert_idx = target_trades.partition_point(|t| t.trade.time <= trade.time);
+                target_trades.insert(insert_idx, tape_trade);
+            }
 
-                if !self.is_paused
-                    && let Some(last) = target_trades.back()
-                {
-                    self.hist_agg.add(&last.display);
-                }
+            if !self.is_paused {
+                self.hist_agg.add(&trade);
             }
         }
 
@@ -233,7 +268,11 @@ impl TimeAndSales {
 
         let now_ms = now_epoch_ms.unwrap_or_else(|| {
             let ts = chrono::Utc::now().timestamp_millis();
-            if ts < 0 { 0 } else { ts as u64 }
+            if ts < 0 {
+                0
+            } else {
+                ts as u64
+            }
         });
 
         let trade_retention_ms = self.config.trade_retention.as_millis() as u64;
@@ -243,7 +282,7 @@ impl TimeAndSales {
         let high_cutoff = now_ms.saturating_sub(trade_retention_ms.saturating_add(prune_slack_ms));
 
         if let Some(oldest) = self.recent_trades.front() {
-            if oldest.ts_ms >= high_cutoff {
+            if oldest.trade.time >= high_cutoff {
                 return;
             }
         } else {
@@ -254,39 +293,46 @@ impl TimeAndSales {
 
         let mut popped_any = false;
         while let Some(front) = self.recent_trades.front() {
-            if front.ts_ms >= low_cutoff {
+            if front.trade.time >= low_cutoff {
                 break;
             }
             let old = self.recent_trades.pop_front().unwrap();
-            self.hist_agg.remove(&old.display);
+            self.hist_agg.remove(&old.trade);
             popped_any = true;
         }
 
         if popped_any {
-            let market_type = self.ticker_info.market_type();
             let size_in_quote_ccy = volume_size_unit() == exchange::SizeUnit::Quote;
 
             self.max_filtered_qty = self
                 .recent_trades
                 .iter()
                 .filter(|t| {
-                    let trade_size = market_type.qty_in_quote_value(
-                        t.display.qty,
-                        t.display.price,
+                    let ti = self
+                        .tickers
+                        .get(t.ticker_index as usize)
+                        .unwrap_or(&self.ticker_info);
+                    let trade_size = ti.market_type().qty_in_quote_value(
+                        t.trade.qty,
+                        t.trade.price,
                         size_in_quote_ccy,
                     );
                     trade_size >= size_filter
                 })
-                .map(|e| e.display.qty)
+                .map(|e| e.trade.qty)
                 .fold(0.0, f32::max);
 
             let filtered_count = self
                 .recent_trades
                 .iter()
                 .filter(|t| {
-                    let trade_size = market_type.qty_in_quote_value(
-                        t.display.qty,
-                        t.display.price,
+                    let ti = self
+                        .tickers
+                        .get(t.ticker_index as usize)
+                        .unwrap_or(&self.ticker_info);
+                    let trade_size = ti.market_type().qty_in_quote_value(
+                        t.trade.qty,
+                        t.trade.price,
                         size_in_quote_ccy,
                     );
                     trade_size >= size_filter
@@ -310,14 +356,18 @@ impl TimeAndSales {
 
         let now_ms = now_epoch_ms.unwrap_or_else(|| {
             let ts = chrono::Utc::now().timestamp_millis();
-            if ts < 0 { 0 } else { ts as u64 }
+            if ts < 0 {
+                0
+            } else {
+                ts as u64
+            }
         });
 
         let low_cutoff = now_ms.saturating_sub(trade_retention_ms);
         let high_cutoff = now_ms.saturating_sub(trade_retention_ms.saturating_add(prune_slack_ms));
 
         if let Some(oldest) = self.paused_trades_buffer.front() {
-            if oldest.ts_ms >= high_cutoff {
+            if oldest.trade.time >= high_cutoff {
                 return;
             }
         } else {
@@ -325,7 +375,7 @@ impl TimeAndSales {
         }
 
         while let Some(front) = self.paused_trades_buffer.front() {
-            if front.ts_ms >= low_cutoff {
+            if front.trade.time >= low_cutoff {
                 break;
             }
             self.paused_trades_buffer.pop_front();
@@ -333,7 +383,13 @@ impl TimeAndSales {
     }
 }
 
-impl canvas::Program<Message> for TimeAndSales {
+/// Canvas program view for TimeAndSales supporting UserTimezone formatting and Multi-Ticker differentiation
+pub struct TimeAndSalesView<'a> {
+    pub panel: &'a TimeAndSales,
+    pub timezone: data::UserTimezone,
+}
+
+impl<'a> canvas::Program<Message> for TimeAndSalesView<'a> {
     type State = ();
 
     fn update(
@@ -352,7 +408,7 @@ impl canvas::Program<Message> for TimeAndSales {
                         Some(canvas::Action::publish(Message::ResetScroll).and_capture())
                     }
                     mouse::Button::Left => {
-                        let paused_box_height = self.pause_overlay_height();
+                        let paused_box_height = self.panel.pause_overlay_height();
                         let paused_box = Rectangle {
                             x: 0.0,
                             y: 0.0,
@@ -360,7 +416,7 @@ impl canvas::Program<Message> for TimeAndSales {
                             height: paused_box_height,
                         };
 
-                        if self.is_paused && paused_box.contains(cursor_position) {
+                        if self.panel.is_paused && paused_box.contains(cursor_position) {
                             Some(canvas::Action::publish(Message::ResetScroll).and_capture())
                         } else {
                             None
@@ -377,7 +433,7 @@ impl canvas::Program<Message> for TimeAndSales {
                     Some(canvas::Action::publish(Message::Scrolled(scroll_amount)).and_capture())
                 }
                 mouse::Event::CursorMoved { .. } => {
-                    if self.is_paused {
+                    if self.panel.is_paused {
                         let now = Some(Instant::now());
                         Some(canvas::Action::publish(Message::Invalidate(now)).and_capture())
                     } else {
@@ -398,21 +454,21 @@ impl canvas::Program<Message> for TimeAndSales {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let market_type = self.ticker_info.market_type();
-
         let palette = theme.extended_palette();
-        let is_scroll_paused = self.is_paused;
-        let stacked_bar_h = self.stacked_bar_height();
+        let is_scroll_paused = self.panel.is_paused;
+        let stacked_bar_h = self.panel.stacked_bar_height();
 
-        let content = self.cache.draw(renderer, bounds.size(), |frame| {
-            let content_top_y = -self.scroll_offset;
+        let content = self.panel.cache.draw(renderer, bounds.size(), |frame| {
+            let content_top_y = -self.panel.scroll_offset;
 
-            if let Some(hist) = &self.config.stacked_bar {
+            if let Some(hist) = &self.panel.config.stacked_bar {
                 let ratio_kind = match hist {
                     StackedBar::Compact(r) | StackedBar::Full(r) => *r,
                 };
 
-                if let Some((buy_val, sell_val, buy_ratio)) = self.hist_agg.values_for(ratio_kind) {
+                if let Some((buy_val, sell_val, buy_ratio)) =
+                    self.panel.hist_agg.values_for(ratio_kind)
+                {
                     let draw_stacked_bar =
                         |frame: &mut canvas::Frame, buy_bar_width: f32, sell_bar_width: f32| {
                             frame.fill_rectangle(
@@ -496,28 +552,40 @@ impl canvas::Program<Message> for TimeAndSales {
             // Feed
             let row_height = TRADE_ROW_HEIGHT;
             let row_width = bounds.width;
+            let is_multi_ticker = self.panel.tickers.len() > 1;
 
             let size_in_quote_ccy = volume_size_unit() == exchange::SizeUnit::Quote;
 
-            let filtered_trades: Vec<&TradeEntry> = self
+            let filtered_trades: Vec<&TapeTrade> = self
+                .panel
                 .recent_trades
                 .iter()
                 .filter(|t| {
-                    let trade_size = market_type.qty_in_quote_value(
-                        t.display.qty,
-                        t.display.price,
+                    let ti = self
+                        .panel
+                        .tickers
+                        .get(t.ticker_index as usize)
+                        .unwrap_or(&self.panel.ticker_info);
+
+                    if self.panel.config.disabled_tickers.contains(&ti.ticker) {
+                        return false;
+                    }
+
+                    let trade_size = ti.market_type().qty_in_quote_value(
+                        t.trade.qty,
+                        t.trade.price,
                         size_in_quote_ccy,
                     );
-                    trade_size >= self.config.trade_size_filter
+                    trade_size >= self.panel.config.trade_size_filter
                 })
                 .collect();
 
             let max_qty = filtered_trades
                 .iter()
-                .map(|e| e.display.qty)
+                .map(|e| e.trade.qty)
                 .fold(0.0, f32::max);
 
-            let row_scroll_offset = (self.scroll_offset - stacked_bar_h).max(0.0);
+            let row_scroll_offset = (self.panel.scroll_offset - stacked_bar_h).max(0.0);
             let start_index = (row_scroll_offset / row_height).floor() as usize;
             let visible_rows = (bounds.height / row_height).ceil() as usize;
 
@@ -539,7 +607,13 @@ impl canvas::Program<Message> for TimeAndSales {
                 };
 
             for (i, entry) in trades_to_draw.enumerate() {
-                let trade = &entry.display;
+                let trade = &entry.trade;
+                let ticker_ti = self
+                    .panel
+                    .tickers
+                    .get(entry.ticker_index as usize)
+                    .unwrap_or(&self.panel.ticker_info);
+
                 let y_position =
                     content_top_y + stacked_bar_h + ((start_index + i) as f32 * row_height);
 
@@ -583,10 +657,53 @@ impl canvas::Program<Message> for TimeAndSales {
                     bg_color.scale_alpha(bg_color_alpha),
                 );
 
+                // Multi-ticker badge
+                let (time_x, price_x, qty_x) = if is_multi_ticker {
+                    let badge_label = match ticker_ti.exchange().venue() {
+                        exchange::Venue::Binance => "BIN",
+                        exchange::Venue::Bybit => "BYB",
+                        exchange::Venue::Okex => "OKX",
+                        exchange::Venue::Hyperliquid => "HL",
+                        exchange::Venue::Mexc => "MEXC",
+                    };
+
+                    let badge_color = match entry.ticker_index % 6 {
+                        0 => iced::Color::from_rgb(0.25, 0.82, 0.95), // Cyan
+                        1 => iced::Color::from_rgb(1.0, 0.62, 0.15),  // Orange
+                        2 => iced::Color::from_rgb(0.80, 0.45, 1.0),  // Purple
+                        3 => iced::Color::from_rgb(1.0, 0.88, 0.25),  // Yellow
+                        4 => iced::Color::from_rgb(0.35, 0.90, 0.45), // Green
+                        _ => iced::Color::from_rgb(1.0, 0.45, 0.70),  // Pink
+                    };
+
+                    let badge_text = create_text(
+                        badge_label.to_string(),
+                        Point {
+                            x: 4.0,
+                            y: y_position,
+                        },
+                        Alignment::Start,
+                        badge_color,
+                    );
+                    frame.fill_text(badge_text);
+
+                    (row_width * 0.18, row_width * 0.67, row_width * 0.94)
+                } else {
+                    (row_width * 0.10, row_width * 0.67, row_width * 0.90)
+                };
+
+                let formatted_time = self
+                    .timezone
+                    .format_with_kind(
+                        trade.time as i64,
+                        TimeLabelKind::Custom("%M:%S.%3f"),
+                    )
+                    .unwrap_or_else(|| "00:00.000".to_string());
+
                 let trade_time = create_text(
-                    trade.time_str.clone(),
+                    formatted_time,
                     Point {
-                        x: row_width * 0.1,
+                        x: time_x,
                         y: y_position,
                     },
                     Alignment::Start,
@@ -595,9 +712,9 @@ impl canvas::Program<Message> for TimeAndSales {
                 frame.fill_text(trade_time);
 
                 let trade_price = create_text(
-                    trade.price.to_string(self.ticker_info.min_ticksize),
+                    trade.price.to_string(ticker_ti.min_ticksize),
                     Point {
-                        x: row_width * 0.67,
+                        x: price_x,
                         y: y_position,
                     },
                     Alignment::End,
@@ -608,7 +725,7 @@ impl canvas::Program<Message> for TimeAndSales {
                 let trade_qty = create_text(
                     data::util::abbr_large_numbers(trade.qty),
                     Point {
-                        x: row_width * 0.9,
+                        x: qty_x,
                         y: y_position,
                     },
                     Alignment::End,
@@ -618,7 +735,7 @@ impl canvas::Program<Message> for TimeAndSales {
             }
 
             if is_scroll_paused {
-                let pause_overlay_height = self.pause_overlay_height();
+                let pause_overlay_height = self.panel.pause_overlay_height();
                 let pause_overlay_y = 0.0;
 
                 let cursor_position = cursor.position_in(bounds);
@@ -677,8 +794,8 @@ impl canvas::Program<Message> for TimeAndSales {
         bounds: iced::Rectangle,
         cursor: iced_core::mouse::Cursor,
     ) -> iced_core::mouse::Interaction {
-        if self.is_paused {
-            let stacked_bar_h = self.stacked_bar_height();
+        if self.panel.is_paused {
+            let stacked_bar_h = self.panel.stacked_bar_height();
             let paused_box = Rectangle {
                 x: bounds.x,
                 y: bounds.y,
@@ -692,5 +809,81 @@ impl canvas::Program<Message> for TimeAndSales {
         }
 
         mouse::Interaction::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::Exchange;
+    use exchange::util::Price;
+
+    fn dummy_ticker_info(ticker_str: &str, ex: Exchange) -> TickerInfo {
+        TickerInfo::new(exchange::Ticker::new(ticker_str, ex), 0.1, 0.001, None)
+    }
+
+    #[test]
+    fn test_ter16_timeandsales_zero_alloc_buffer_and_tz() {
+        let ti = dummy_ticker_info("BTCUSDT", Exchange::BinanceLinear);
+        let mut tas = TimeAndSales::new(None, ti);
+
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let trade = Trade {
+            time: now - 1000,
+            is_sell: false,
+            price: Price::from_f64(35000.0),
+            qty: 1.5,
+        };
+
+        tas.insert_buffer(&[trade]);
+        assert_eq!(tas.recent_trades.len(), 1);
+
+        let tz = data::UserTimezone::default();
+        let formatted = tz
+            .format_with_kind(trade.time as i64, TimeLabelKind::Custom("%M:%S.%3f"))
+            .expect("formatted tz");
+        assert!(!formatted.is_empty());
+    }
+
+    #[test]
+    fn test_ter20_multi_ticker_chronological_ordering() {
+        let ti_bin = dummy_ticker_info("BTCUSDT", Exchange::BinanceLinear);
+        let ti_byb = dummy_ticker_info("BTCUSDT", Exchange::BybitLinear);
+
+        let mut tas = TimeAndSales::new(None, ti_bin);
+
+        let now = chrono::Utc::now().timestamp_millis() as u64;
+        let t1 = Trade {
+            time: now - 3000,
+            is_sell: false,
+            price: Price::from_f64(30000.0),
+            qty: 1.0,
+        };
+        let t3 = Trade {
+            time: now - 1000,
+            is_sell: true,
+            price: Price::from_f64(30005.0),
+            qty: 2.0,
+        };
+        let t2 = Trade {
+            time: now - 2000,
+            is_sell: false,
+            price: Price::from_f64(30002.0),
+            qty: 0.5,
+        };
+
+        tas.insert_buffer_tagged(&ti_bin, &[t1, t3]);
+        tas.insert_buffer_tagged(&ti_byb, &[t2]);
+
+        // Buffer must maintain chronological sort order: t1, t2, t3
+        assert_eq!(tas.recent_trades.len(), 3);
+        assert_eq!(tas.recent_trades[0].trade.time, now - 3000);
+        assert_eq!(tas.recent_trades[0].ticker_index, 0);
+
+        assert_eq!(tas.recent_trades[1].trade.time, now - 2000);
+        assert_eq!(tas.recent_trades[1].ticker_index, 1);
+
+        assert_eq!(tas.recent_trades[2].trade.time, now - 1000);
+        assert_eq!(tas.recent_trades[2].ticker_index, 0);
     }
 }

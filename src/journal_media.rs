@@ -79,7 +79,21 @@ fn save_rgba_image_and_thumb(rgba_img: &image::RgbaImage) -> Result<String, Stri
     Ok(file_name)
 }
 
-/// Opens native OS file picker to select an image file.
+/// Opens native OS file picker to select an image file asynchronously without blocking the UI thread.
+pub async fn pick_image_file_async() -> Option<PathBuf> {
+    let handle = rfd::AsyncFileDialog::new()
+        .set_title("Select Chart Image or Screenshot")
+        .add_filter(
+            "Images (*.png, *.jpg, *.jpeg, *.webp, *.bmp)",
+            &["png", "jpg", "jpeg", "webp", "bmp"],
+        )
+        .pick_file()
+        .await;
+
+    handle.map(|h| h.path().to_path_buf())
+}
+
+/// Opens native OS file picker to select an image file synchronously.
 pub fn pick_image_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .set_title("Select Chart Image or Screenshot")
@@ -112,5 +126,12 @@ mod tests {
         data::delete_journal_image_files(&file_name);
         assert!(!full_path.exists());
         assert!(!thumb_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_ter09_async_file_dialog_future() {
+        fn assert_send<T: Send>(_: T) {}
+        let fut = pick_image_file_async();
+        assert_send(fut);
     }
 }

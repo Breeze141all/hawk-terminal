@@ -270,12 +270,9 @@ pub fn view<'a>(
         }
 
         content_sections = content_sections.push(
-            column![
-                text(group.label()).size(12),
-                group_col.width(Length::Fill),
-            ]
-            .spacing(4)
-            .width(Length::Fill),
+            column![text(group.label()).size(12), group_col.width(Length::Fill),]
+                .spacing(4)
+                .width(Length::Fill),
         );
     }
 
@@ -295,10 +292,7 @@ pub fn view<'a>(
 }
 
 fn builtin_row<'a>(pane: pane_grid::Pane, b: AvailableBuiltin) -> Element<'a, PaneMessage> {
-    let mut content = row![
-        text(b.indicator.to_string()).size(13),
-        space::horizontal(),
-    ];
+    let mut content = row![text(b.indicator.to_string()).size(13), space::horizontal(),];
 
     if b.active {
         content = content.push(container(icon_text(Icon::Checkmark, 12)));
@@ -316,10 +310,7 @@ fn builtin_row<'a>(pane: pane_grid::Pane, b: AvailableBuiltin) -> Element<'a, Pa
 
 fn scripted_row<'a>(pane: pane_grid::Pane, ind: AvailableIndicator) -> Element<'a, PaneMessage> {
     let is_active = ind.active_count > 0;
-    let mut content = row![
-        text(ind.name).size(13),
-        space::horizontal(),
-    ];
+    let mut content = row![text(ind.name).size(13), space::horizontal(),];
 
     if ind.active_count > 0 {
         let badge_text = if ind.active_count > 1 {

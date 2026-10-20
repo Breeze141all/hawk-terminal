@@ -421,8 +421,8 @@ pub fn global_settings_modal_view<'a>(
                     .spacing(6)
                 } else {
                     let refresh_btn = {
-                        let btn = button(text("Refresh now").size(11))
-                            .style(move |theme, status| {
+                        let btn =
+                            button(text("Refresh now").size(11)).style(move |theme, status| {
                                 style::button::modifier(theme, status, is_metadata_loading)
                             });
                         let btn = if is_metadata_loading {
@@ -433,7 +433,11 @@ pub fn global_settings_modal_view<'a>(
 
                         tooltip(
                             btn,
-                            if is_metadata_loading { None } else { Some("Refresh metadata now") },
+                            if is_metadata_loading {
+                                None
+                            } else {
+                                Some("Refresh metadata now")
+                            },
                             TooltipPosition::Top,
                         )
                     };

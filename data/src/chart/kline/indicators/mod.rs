@@ -13,12 +13,11 @@ pub mod theme;
 #[cfg(test)]
 pub mod tests;
 
+use crate::chart::Basis;
 use composition::{
     AxisBinding, LayerDataKind, MarkKind, PanelScaleMode, PanelValueLabelPolicy,
     PanelValuePrecision,
 };
-use crate::chart::Basis;
-use theme::{ThemeColor, ThemeColorRole, ThemeColorShade};
 use exchange::adapter::MarketKind;
 use exchange::{TickerInfo, Timeframe, UnixMs};
 use indicator_engine::IndicatorFrame;
@@ -27,6 +26,7 @@ pub use indicator_engine::{BaseSeriesSource, IndicatorAuthor};
 use std::fmt::{Display, Formatter};
 use std::ops::Range;
 use std::sync::Arc;
+use theme::{ThemeColor, ThemeColorRole, ThemeColorShade};
 
 pub(crate) fn region_intersects_source_range(
     region: &indicator_engine::RegionOutput,
@@ -576,8 +576,7 @@ impl IndicatorDefinition {
                     || !matches!(
                         mark.mark,
                         MarkKind::Bar(
-                            composition::BarMode::Regular
-                                | composition::BarMode::Histogram(_)
+                            composition::BarMode::Regular | composition::BarMode::Histogram(_)
                         )
                     ))
             {

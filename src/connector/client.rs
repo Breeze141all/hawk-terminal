@@ -46,7 +46,11 @@ pub struct ServerClient {
 impl ServerClient {
     /// Create a new client targeting the given base URL (e.g. `http://127.0.0.1:8080`).
     /// Trailing slashes are stripped. Returns `None` if the URL is empty or invalid.
-    pub fn new(base_url: &str, auth_token: Option<String>, client: reqwest::Client) -> Option<Self> {
+    pub fn new(
+        base_url: &str,
+        auth_token: Option<String>,
+        client: reqwest::Client,
+    ) -> Option<Self> {
         let trimmed = base_url.trim().trim_end_matches('/');
 
         if trimmed.is_empty() {
@@ -152,7 +156,9 @@ impl ServerClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             log::warn!("Server returned {status}: {body}");
-            return Err(AdapterError::ParseError(format!("server (arrow) {status}: {body}")));
+            return Err(AdapterError::ParseError(format!(
+                "server (arrow) {status}: {body}"
+            )));
         }
 
         if let Some(content_type) = response
@@ -283,11 +289,12 @@ impl QtyNormalization {
             }
         };
 
-        let result = if matches!(self.market_kind, MarketKind::InversePerps) || self.size_in_quote_ccy {
-            quote_qty
-        } else {
-            base_qty
-        };
+        let result =
+            if matches!(self.market_kind, MarketKind::InversePerps) || self.size_in_quote_ccy {
+                quote_qty
+            } else {
+                base_qty
+            };
         result as f32
     }
 }
@@ -485,7 +492,8 @@ mod tests {
             Field::new(ARROW_PRICE_COL, DataType::Float64, false),
             Field::new(ARROW_TS_COL, DataType::Int64, false),
         ]);
-        let cols = validate_arrow_schema(&schema).expect("schema must allow reordering and extra columns");
+        let cols =
+            validate_arrow_schema(&schema).expect("schema must allow reordering and extra columns");
         assert_eq!(cols.ts, 4);
         assert_eq!(cols.price, 3);
         assert_eq!(cols.qty, 2);
@@ -500,7 +508,10 @@ mod tests {
             Field::new(ARROW_QTY_COL, DataType::Float64, false),
         ]);
         let err = validate_arrow_schema(&schema).unwrap_err();
-        assert!(err.to_string().contains("missing required column 'is_sell'"));
+        assert!(
+            err.to_string()
+                .contains("missing required column 'is_sell'")
+        );
     }
 
     #[test]
@@ -524,8 +535,13 @@ mod tests {
             Field::new(ARROW_IS_SELL_COL, DataType::Boolean, false),
         ]));
 
-        let ts_array: ArrayRef = Arc::new(Int64Array::from(vec![1_700_000_000, 1_700_000_100, 1_700_000_200]));
-        let price_array: ArrayRef = Arc::new(Float64Array::from(vec![50_000.0, 50_100.0, 49_950.0]));
+        let ts_array: ArrayRef = Arc::new(Int64Array::from(vec![
+            1_700_000_000,
+            1_700_000_100,
+            1_700_000_200,
+        ]));
+        let price_array: ArrayRef =
+            Arc::new(Float64Array::from(vec![50_000.0, 50_100.0, 49_950.0]));
         let qty_array: ArrayRef = Arc::new(Float64Array::from(vec![1.5, 2.0, 0.5]));
         let is_sell_array: ArrayRef = Arc::new(BooleanArray::from(vec![false, true, false]));
 
@@ -628,8 +644,9 @@ mod tests {
         assert!(ServerClient::from_url("   ", None).is_none());
         assert!(ServerClient::from_url("not_a_valid_url", None).is_none());
 
-        let client = ServerClient::from_url("http://127.0.0.1:8080///", Some("token123".to_string()))
-            .expect("Valid URL must succeed");
+        let client =
+            ServerClient::from_url("http://127.0.0.1:8080///", Some("token123".to_string()))
+                .expect("Valid URL must succeed");
         assert_eq!(client.base_url(), "http://127.0.0.1:8080");
         assert_eq!(client.auth_token(), Some("token123"));
     }

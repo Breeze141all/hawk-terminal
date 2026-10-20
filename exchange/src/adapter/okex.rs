@@ -640,10 +640,14 @@ pub async fn fetch_ticksize(
         }
 
         let accept = match market_type {
-            MarketKind::Spot => item["quoteCcy"].as_str() == Some("USDT"),
+            MarketKind::Spot => {
+                item["quoteCcy"].as_str() == Some("USDT")
+                    || item["quoteCcy"].as_str() == Some("USDC")
+            }
             MarketKind::LinearPerps => {
                 item["ctType"].as_str() == Some("linear")
-                    && (item["settleCcy"].as_str() == Some("USDT"))
+                    && (item["settleCcy"].as_str() == Some("USDT")
+                        || item["settleCcy"].as_str() == Some("USDC"))
             }
             MarketKind::InversePerps => item["ctType"].as_str() == Some("inverse"),
         };

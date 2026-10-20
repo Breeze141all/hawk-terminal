@@ -172,8 +172,7 @@ mod tests {
 
     #[test]
     fn origins_and_full_ids_control_collection_loading() {
-        let root =
-            std::env::temp_dir().join(format!("hawk-host-loading-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("hawk-host-loading-{}", std::process::id()));
         let bundled = root.join("bundled");
         let installed = root.join("installed");
         std::fs::create_dir_all(&bundled).unwrap();
@@ -210,8 +209,7 @@ mod tests {
 
     #[test]
     fn embedded_bundle_initializes_without_a_source_directory() {
-        let root =
-            std::env::temp_dir().join(format!("hawk-host-embedded-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("hawk-host-embedded-{}", std::process::id()));
         let paths = IndicatorCatalogPaths {
             bundled_directory: None,
             installed_directory: root.clone(),

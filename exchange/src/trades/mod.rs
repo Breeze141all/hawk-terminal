@@ -23,6 +23,9 @@ pub async fn dispatch_fetch_trades(
         Exchange::HyperliquidSpot | Exchange::HyperliquidLinear => {
             crate::adapter::hyperliquid::fetch_trades(ticker_info, from_time, data_path).await
         }
+        Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => {
+            crate::adapter::mexc::fetch_trades(ticker_info, from_time, data_path).await
+        }
     }
 }
 

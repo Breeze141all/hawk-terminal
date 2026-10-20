@@ -1,3 +1,4 @@
+pub mod big_trades;
 pub mod comparison;
 pub mod drawing_selection_toolbar;
 pub mod drawing_toolbar;

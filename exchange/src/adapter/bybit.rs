@@ -931,6 +931,7 @@ pub async fn fetch_ticksize(
 
         if let Some(quote_asset) = item["quoteCoin"].as_str()
             && quote_asset != "USDT"
+            && quote_asset != "USDC"
             && quote_asset != "USD"
         {
             continue;

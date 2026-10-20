@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use super::tpo::{SessionCluster, SessionPeriod};
 use crate::aggr::time::DataPoint;
 
+pub mod big_trades;
 pub mod indicators;
+
+pub use big_trades::BigTradesConfig;
 
 pub use indicators::adapter::{
     datapoint_to_indicator_frame, kline_to_indicator_frame, kline_to_indicator_frame_with_context,
@@ -27,9 +30,6 @@ pub use indicators::instance::{
 };
 pub use indicators::scripting::ScriptIndicatorRuntime;
 pub use indicators::{
-    all_indicators, availability, catalog, declared_input_requirements, display_name,
-    indicator_definition, initialize_indicator_catalog, initialize_indicator_catalog_with_paths,
-    is_supported_for_market, panel_recipe, requires_trade_data, table_columns, unsupported_reason,
     AvailabilityContext, BaseSeriesSource, CatalogInstallError, IndicatorAuthor,
     IndicatorAvailability, IndicatorCatalog, IndicatorCatalogPaths, IndicatorColorSpec,
     IndicatorConfig, IndicatorConfigError, IndicatorDefinition, IndicatorDefinitionError,
@@ -39,8 +39,11 @@ pub use indicators::{
     IndicatorOverlayChannelSpec, IndicatorOverlaySource, IndicatorPanelRecipe,
     IndicatorReadoutScope, IndicatorReadoutSpec, IndicatorRegistration, IndicatorSegmentSpec,
     IndicatorSetting, IndicatorSettingChoice, IndicatorSettingControl, IndicatorSettingValue,
-    IndicatorSettingsContext, IndicatorSourceInput, IndicatorUnsupportedReason,
-    TableColumnColor, TableColumnFormat, TableColumnSpec, TableColumnValue,
+    IndicatorSettingsContext, IndicatorSourceInput, IndicatorUnsupportedReason, TableColumnColor,
+    TableColumnFormat, TableColumnSpec, TableColumnValue, all_indicators, availability, catalog,
+    declared_input_requirements, display_name, indicator_definition, initialize_indicator_catalog,
+    initialize_indicator_catalog_with_paths, is_supported_for_market, panel_recipe,
+    requires_trade_data, table_columns, unsupported_reason,
 };
 
 #[derive(Debug, Clone)]
@@ -53,7 +56,9 @@ pub struct KlineDataPoint {
 impl KlineDataPoint {
     pub fn max_cluster_qty(&self, cluster_kind: ClusterKind, highest: Price, lowest: Price) -> f32 {
         match cluster_kind {
-            ClusterKind::BidAsk | ClusterKind::Table => self.footprint.max_qty_by(highest, lowest, f32::max),
+            ClusterKind::BidAsk | ClusterKind::Table => {
+                self.footprint.max_qty_by(highest, lowest, f32::max)
+            }
             ClusterKind::DeltaProfile => self
                 .footprint
                 .max_qty_by(highest, lowest, |buy, sell| (buy - sell).abs()),
@@ -772,7 +777,10 @@ impl KlineChartKind {
     pub fn allows_indicator(&self, indicator: super::indicator::KlineIndicator) -> bool {
         !matches!(
             (self, indicator),
-            (KlineChartKind::Candles, super::indicator::KlineIndicator::BarAnalysis)
+            (
+                KlineChartKind::Candles,
+                super::indicator::KlineIndicator::BarAnalysis
+            )
         )
     }
 }
@@ -1379,6 +1387,13 @@ pub enum FootprintStudy {
         style: HighlightStyle,
         color: HighlightColor,
     },
+    BigTrades {
+        min_usd: f64,
+        min_radius: f32,
+        max_radius: f32,
+        scale: f32,
+        opacity: f32,
+    },
 }
 
 impl Eq for FootprintStudy {}
@@ -1392,18 +1407,26 @@ impl FootprintStudy {
                 FootprintStudy::ClusterSearch { id: a, .. },
                 FootprintStudy::ClusterSearch { id: b, .. },
             ) => a == b,
+            (FootprintStudy::BigTrades { .. }, FootprintStudy::BigTrades { .. }) => true,
             _ => false,
         }
     }
 }
 
 impl FootprintStudy {
-    pub const ALL: [FootprintStudy; 6] = [
+    pub const ALL: [FootprintStudy; 7] = [
         FootprintStudy::NPoC { lookback: 80 },
         FootprintStudy::Imbalance {
             threshold: 200,
             color_scale: Some(400),
             ignore_zeros: true,
+        },
+        FootprintStudy::BigTrades {
+            min_usd: 100_000.0,
+            min_radius: 4.0,
+            max_radius: 28.0,
+            scale: 5.0,
+            opacity: 0.65,
         },
         FootprintStudy::ClusterSearch {
             id: 1,
@@ -1446,6 +1469,7 @@ impl std::fmt::Display for FootprintStudy {
             FootprintStudy::NPoC { .. } => write!(f, "Naked Point of Control"),
             FootprintStudy::Imbalance { .. } => write!(f, "Imbalance"),
             FootprintStudy::ClusterSearch { id, .. } => write!(f, "Cluster Search {}", id),
+            FootprintStudy::BigTrades { .. } => write!(f, "Big Trades"),
         }
     }
 }
@@ -1809,12 +1833,31 @@ pub fn save_daily_footprint(
     );
     let temp_path = path.with_extension(temp_name);
     std::fs::write(&temp_path, &encoded)?;
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
+    let mut last_err = None;
+    let mut delay = std::time::Duration::from_millis(10);
+    let mut success = false;
+    for attempt in 0..3 {
+        if path.exists() {
+            let _ = std::fs::remove_file(path);
+        }
+        match std::fs::rename(&temp_path, path) {
+            Ok(()) => {
+                success = true;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 2 {
+                    std::thread::sleep(delay);
+                    delay *= 2;
+                }
+            }
+        }
     }
-    if let Err(e) = std::fs::rename(&temp_path, path) {
+    if !success {
         let _ = std::fs::remove_file(&temp_path);
-        return Err(e);
+        return Err(last_err
+            .unwrap_or_else(|| std::io::Error::other("Failed to rename footprint cache file")));
     }
     Ok(())
 }
@@ -2215,8 +2258,51 @@ mod tests {
             footprint,
             trades_fetched: true,
         };
-        let max_qty_table = dp.max_cluster_qty(ClusterKind::Table, Price::from_f32(110.0), Price::from_f32(90.0));
-        let max_qty_bidask = dp.max_cluster_qty(ClusterKind::BidAsk, Price::from_f32(110.0), Price::from_f32(90.0));
+        let max_qty_table = dp.max_cluster_qty(
+            ClusterKind::Table,
+            Price::from_f32(110.0),
+            Price::from_f32(90.0),
+        );
+        let max_qty_bidask = dp.max_cluster_qty(
+            ClusterKind::BidAsk,
+            Price::from_f32(110.0),
+            Price::from_f32(90.0),
+        );
         assert_eq!(max_qty_table, max_qty_bidask);
+    }
+
+    #[test]
+    fn test_dat11_save_daily_footprint_retry_and_write() {
+        let temp_dir = std::env::temp_dir().join(format!("hawk_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let target_path = temp_dir.join("test_fp.bin");
+
+        let kline = Kline {
+            time: 1_700_000_000,
+            open: Price::from_f32(100.0),
+            high: Price::from_f32(105.0),
+            low: Price::from_f32(95.0),
+            close: Price::from_f32(102.0),
+            volume: (50.0, 50.0),
+        };
+        let step = PriceStep::from_f32(1.0);
+        let footprint = KlineTrades::simulate_from_kline(&kline, step);
+        let dp = KlineDataPoint {
+            kline,
+            footprint,
+            trades_fetched: true,
+        };
+        let datapoints = vec![(1_700_000_000, dp)];
+
+        // Initial save
+        save_daily_footprint(&target_path, &datapoints).expect("save must succeed");
+        assert!(target_path.exists());
+
+        // Overwrite save (exercises removal and atomic rename)
+        save_daily_footprint(&target_path, &datapoints).expect("overwrite save must succeed");
+        assert!(target_path.exists());
+
+        let _ = std::fs::remove_file(&target_path);
+        let _ = std::fs::remove_dir(&temp_dir);
     }
 }

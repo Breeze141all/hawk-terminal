@@ -1,27 +1,25 @@
 use crate::chart::{
-    indicator::plot::YScale,
-    indicator::IndicatorLabel,
-    Caches, Message, ViewState,
+    Caches, Message, ViewState, indicator::IndicatorLabel, indicator::plot::YScale,
 };
 use crate::style::dashed_line;
-use data::chart::{PlotData, kline::KlineDataPoint};
 use data::chart::kline::indicators::{
-    composition::MarkKind,
-    theme::{ThemeAccent, ThemeColor, ThemeColorRole, ThemeColorShade},
     IndicatorAttachmentMode, IndicatorFillSpec, IndicatorHost, IndicatorInstance,
     IndicatorInstanceStore, IndicatorOverlaySource, LineStrokeStyle, OutputChannelSpec,
     OutputValueType,
+    composition::MarkKind,
+    theme::{ThemeAccent, ThemeColor, ThemeColorRole, ThemeColorShade},
 };
+use data::chart::{PlotData, kline::KlineDataPoint};
 use exchange::util::Price;
-use iced::{
-    mouse,
-    widget::{
-        canvas::{self, Cache, Frame, Geometry, LineCap, LineDash, Path, Stroke},
-        container, row, rule, Canvas,
-    },
-    Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
-};
 use iced::theme::palette::Extended;
+use iced::{
+    Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector, mouse,
+    widget::{
+        Canvas,
+        canvas::{self, Cache, Frame, Geometry, LineCap, LineDash, Path, Stroke},
+        container, row, rule,
+    },
+};
 use std::ops::RangeInclusive;
 
 /// Converts a 32-bit ARGB `indicator_engine::Color` into an `iced::Color`.
@@ -142,11 +140,7 @@ pub fn resolve_fill_color(
 
 /// Constructs a stroke for indicator lines with width and dash pattern.
 #[inline]
-pub fn indicator_line_stroke(
-    width: f32,
-    style: LineStrokeStyle,
-    color: Color,
-) -> Stroke<'static> {
+pub fn indicator_line_stroke(width: f32, style: LineStrokeStyle, color: Color) -> Stroke<'static> {
     let mut stroke = Stroke::default()
         .with_width(width.clamp(1.0, 4.0))
         .with_color(color);
@@ -320,8 +314,12 @@ pub fn fill_indicator_band(
 ) {
     if upper_points.len() < 2
         || lower_points.len() < 2
-        || upper_points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
-        || lower_points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
+        || upper_points
+            .iter()
+            .any(|p| !p.x.is_finite() || !p.y.is_finite())
+        || lower_points
+            .iter()
+            .any(|p| !p.x.is_finite() || !p.y.is_finite())
     {
         return;
     }
@@ -435,7 +433,10 @@ pub fn draw_horizontal_level(
         segments: &[4.0, 4.0],
         offset: 0,
     };
-    frame.stroke(&Path::line(Point::new(left_x, y), Point::new(right_x, y)), stroke);
+    frame.stroke(
+        &Path::line(Point::new(left_x, y), Point::new(right_x, y)),
+        stroke,
+    );
     if let Some(lbl) = label {
         frame.fill_text(canvas::Text {
             content: lbl.to_string(),
@@ -502,7 +503,11 @@ pub fn visible_candle_indices(
 
             // Locate boundary neighbors in O(log N)
             let prev = ts.datapoints.range(..earliest).next_back().map(|(&t, _)| t);
-            let next = ts.datapoints.range(latest.saturating_add(1)..).next().map(|(&t, _)| t);
+            let next = ts
+                .datapoints
+                .range(latest.saturating_add(1)..)
+                .next()
+                .map(|(&t, _)| t);
 
             let cull_start = prev.unwrap_or(earliest);
             let cull_end = next.unwrap_or(latest);
@@ -648,14 +653,13 @@ pub fn draw_scripted_indicator_overlays(
                 continue;
             }
             let border = reg.border_color.map(engine_color_to_iced);
-            let fill = reg
-                .fill_color
-                .map(engine_color_to_iced)
-                .map(|c| Color {
-                    a: c.a.min(0.25),
-                    ..c
-                });
-            draw_region(frame, left_x, right_x, upper_y, lower_y, border, fill, reg.width);
+            let fill = reg.fill_color.map(engine_color_to_iced).map(|c| Color {
+                a: c.a.min(0.25),
+                ..c
+            });
+            draw_region(
+                frame, left_x, right_x, upper_y, lower_y, border, fill, reg.width,
+            );
         }
 
         // 3. Fills / Series Bands (Clouds)
@@ -735,7 +739,13 @@ pub fn draw_scripted_indicator_overlays(
                                 .map(engine_color_to_iced)
                                 .unwrap_or_else(|| resolve_output_color(instance, output, palette));
 
-                            append_indicator_line_point(&mut runs, prev_pt_color, pt, color, is_step);
+                            append_indicator_line_point(
+                                &mut runs,
+                                prev_pt_color,
+                                pt,
+                                color,
+                                is_step,
+                            );
                             prev_pt_color = Some((pt, color));
                             continue;
                         }
@@ -786,12 +796,8 @@ pub fn draw_scripted_indicator_overlays(
                     seg.start_index,
                     earliest,
                 );
-                let end_time = resolve_candle_timestamp(
-                    data_source,
-                    &candle_indices,
-                    seg.end_index,
-                    latest,
-                );
+                let end_time =
+                    resolve_candle_timestamp(data_source, &candle_indices, seg.end_index, latest);
                 let sx = interval_to_x(start_time);
                 let sy = price_to_y(Price::from_f32(sv_f));
                 let ex = interval_to_x(end_time);
@@ -862,10 +868,8 @@ impl canvas::Program<Message> for ScriptedPanelCanvas<'_> {
             let to_y = |val: f32| scale.to_y(val);
 
             let def = self.instance.kind.definition();
-            let source_range = candle_indices
-                .first()
-                .map(|f| f.0)
-                .unwrap_or(0)..candle_indices.last().map(|l| l.0 + 1).unwrap_or(1);
+            let source_range = candle_indices.first().map(|f| f.0).unwrap_or(0)
+                ..candle_indices.last().map(|l| l.0 + 1).unwrap_or(1);
 
             let region_width = bounds.width / self.chart.scaling;
             let region_x = -self.chart.translation.x - region_width / 2.0;
@@ -1043,7 +1047,9 @@ impl canvas::Program<Message> for ScriptedPanelCanvas<'_> {
             // Markers
             for &(idx, t) in &candle_indices {
                 let x = self.chart.interval_to_x(t);
-                let markers = self.indicator_host.marker_outputs_for(self.instance.id, idx);
+                let markers = self
+                    .indicator_host
+                    .marker_outputs_for(self.instance.id, idx);
                 for m in markers {
                     if let Some(val) = m.value {
                         let f = val as f32;
@@ -1054,7 +1060,13 @@ impl canvas::Program<Message> for ScriptedPanelCanvas<'_> {
                                     .color
                                     .map(engine_color_to_iced)
                                     .unwrap_or(palette.primary.base.color);
-                                draw_marker(frame, Point::new(x, y), None, color, m.text.as_deref());
+                                draw_marker(
+                                    frame,
+                                    Point::new(x, y),
+                                    None,
+                                    color,
+                                    m.text.as_deref(),
+                                );
                             }
                         }
                     }
@@ -1062,11 +1074,11 @@ impl canvas::Program<Message> for ScriptedPanelCanvas<'_> {
             }
 
             // Segments
-            let segments = self.indicator_host.segment_outputs_for(
-                self.instance.id,
-                source_range,
-                |s, e| candle_indices.iter().any(|&(i, _)| i >= s && i <= e),
-            );
+            let segments =
+                self.indicator_host
+                    .segment_outputs_for(self.instance.id, source_range, |s, e| {
+                        candle_indices.iter().any(|&(i, _)| i >= s && i <= e)
+                    });
             for seg in segments {
                 if let (Some(sv), Some(ev)) = (seg.start_value, seg.end_value) {
                     let sv_f = sv as f32;
@@ -1386,10 +1398,10 @@ mod tests {
 
     #[test]
     fn test_adversarial_viewport_culling_100k_bars_scaling_and_asymptotics() {
-        use std::collections::BTreeMap;
         use data::aggr::time::TimeSeries;
-        use exchange::{Kline, Timeframe};
         use exchange::util::{Price, PriceStep};
+        use exchange::{Kline, Timeframe};
+        use std::collections::BTreeMap;
 
         let count = 100_000;
         let step_ms = 60_000u64;
@@ -1462,7 +1474,10 @@ mod tests {
 
         // 4. Inverted range (latest < earliest)
         let indices_inverted = visible_candle_indices(&plot_data, right_latest, right_earliest);
-        assert!(indices_inverted.is_empty(), "Inverted viewport must be empty");
+        assert!(
+            indices_inverted.is_empty(),
+            "Inverted viewport must be empty"
+        );
 
         println!(
             "100k bars benchmark: Left viewport (idx 0..50) = {:?}, Right viewport (idx 99950..100000) = {:?}",
@@ -1475,27 +1490,47 @@ mod tests {
         let px_height = 200.0;
 
         // A. Identical min and max (zero division vector)
-        let scale_identical = YScale { min: 100.0, max: 100.0, px_height };
+        let scale_identical = YScale {
+            min: 100.0,
+            max: 100.0,
+            px_height,
+        };
         assert_eq!(scale_identical.to_y(100.0), px_height);
         assert_eq!(scale_identical.to_y(150.0), px_height);
         assert_eq!(scale_identical.to_y(50.0), px_height);
 
         // B. Inverted min and max (max < min)
-        let scale_inverted = YScale { min: 150.0, max: 100.0, px_height };
+        let scale_inverted = YScale {
+            min: 150.0,
+            max: 100.0,
+            px_height,
+        };
         assert_eq!(scale_inverted.to_y(120.0), px_height);
 
         // C. Zero scale (0.0 to 0.0)
-        let scale_zero = YScale { min: 0.0, max: 0.0, px_height };
+        let scale_zero = YScale {
+            min: 0.0,
+            max: 0.0,
+            px_height,
+        };
         assert_eq!(scale_zero.to_y(0.0), px_height);
 
         // D. Strictly negative price range (-200.0 to -100.0)
-        let scale_negative = YScale { min: -200.0, max: -100.0, px_height };
+        let scale_negative = YScale {
+            min: -200.0,
+            max: -100.0,
+            px_height,
+        };
         assert!((scale_negative.to_y(-200.0) - px_height).abs() < 1e-4);
         assert!((scale_negative.to_y(-100.0) - 0.0).abs() < 1e-4);
         assert!((scale_negative.to_y(-150.0) - 100.0).abs() < 1e-4);
 
         // E. Sub-normal epsilon span (100.0 to 100.0 + f32::EPSILON)
-        let scale_eps = YScale { min: 100.0, max: 100.0 + f32::EPSILON, px_height };
+        let scale_eps = YScale {
+            min: 100.0,
+            max: 100.0 + f32::EPSILON,
+            px_height,
+        };
         let y_eps = scale_eps.to_y(100.0);
         assert!(y_eps.is_finite(), "Epsilon span must not produce NaN/Inf");
 
@@ -1514,7 +1549,10 @@ mod tests {
         };
 
         assert_eq!(check_extents(f32::NAN, f32::NAN), (0.0, 100.0));
-        assert_eq!(check_extents(f32::NEG_INFINITY, f32::INFINITY), (0.0, 100.0));
+        assert_eq!(
+            check_extents(f32::NEG_INFINITY, f32::INFINITY),
+            (0.0, 100.0)
+        );
         assert_eq!(check_extents(50.0, 50.0), (0.0, 100.0));
         assert_eq!(check_extents(80.0, 20.0), (0.0, 100.0));
 
@@ -1543,7 +1581,11 @@ mod tests {
         assert!((price_neg.to_f32() - (-50.25)).abs() < 1e-4);
 
         // Verify YScale when given NaN or Inf values
-        let scale = YScale { min: 0.0, max: 100.0, px_height: 200.0 };
+        let scale = YScale {
+            min: 0.0,
+            max: 100.0,
+            px_height: 200.0,
+        };
         let y_nan = scale.to_y(f32::NAN);
         assert!(y_nan.is_nan(), "to_y(NaN) propagates NaN");
 
@@ -1604,13 +1646,7 @@ mod tests {
         assert_eq!(step_runs.len(), 1);
         assert_eq!(
             step_runs[0].points,
-            vec![
-                s0,
-                Point::new(20.0, 100.0),
-                s1,
-                Point::new(30.0, 200.0),
-                s2,
-            ]
+            vec![s0, Point::new(20.0, 100.0), s1, Point::new(30.0, 200.0), s2,]
         );
     }
 
@@ -1657,10 +1693,10 @@ mod tests {
 
     #[test]
     fn test_adversarial_culling_asymptotic_scaling_empirical_ratio() {
-        use std::collections::BTreeMap;
         use data::aggr::time::TimeSeries;
-        use exchange::{Kline, Timeframe};
         use exchange::util::{Price, PriceStep};
+        use exchange::{Kline, Timeframe};
+        use std::collections::BTreeMap;
 
         let build_series = |size: usize| -> PlotData<KlineDataPoint> {
             let mut datapoints = BTreeMap::new();
@@ -1694,18 +1730,19 @@ mod tests {
         let series_10k = build_series(10_000);
         let series_100k = build_series(100_000);
 
-        let bench = |data: &PlotData<KlineDataPoint>, total: usize| -> (std::time::Duration, usize) {
-            let earliest = ((total - 50) as u64) * 60_000;
-            let latest = ((total - 1) as u64) * 60_000;
-            let iters = 50;
-            let t0 = std::time::Instant::now();
-            let mut count = 0;
-            for _ in 0..iters {
-                let res = visible_candle_indices(data, earliest, latest);
-                count = res.len();
-            }
-            (t0.elapsed() / iters, count)
-        };
+        let bench =
+            |data: &PlotData<KlineDataPoint>, total: usize| -> (std::time::Duration, usize) {
+                let earliest = ((total - 50) as u64) * 60_000;
+                let latest = ((total - 1) as u64) * 60_000;
+                let iters = 50;
+                let t0 = std::time::Instant::now();
+                let mut count = 0;
+                for _ in 0..iters {
+                    let res = visible_candle_indices(data, earliest, latest);
+                    count = res.len();
+                }
+                (t0.elapsed() / iters, count)
+            };
 
         let (dur_1k, c1) = bench(&series_1k, 1_000);
         let (dur_10k, c10) = bench(&series_10k, 10_000);

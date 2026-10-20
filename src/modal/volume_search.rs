@@ -92,6 +92,7 @@ impl std::fmt::Display for TickerDisplayWrapper {
             ExchangeInclusive::Bybit => "Bybit",
             ExchangeInclusive::Hyperliquid => "Hyperliquid",
             ExchangeInclusive::Okex => "OKX",
+            ExchangeInclusive::Mexc => "MEXC",
         };
         write!(f, "{ex}: {sym}")
     }
@@ -1702,6 +1703,7 @@ pub fn exchange_data_folder(exchange: exchange::adapter::Exchange) -> &'static s
         Exchange::BybitSpot | Exchange::BybitLinear | Exchange::BybitInverse => "bybit",
         Exchange::OkexSpot | Exchange::OkexLinear | Exchange::OkexInverse => "okex",
         Exchange::HyperliquidSpot | Exchange::HyperliquidLinear => "hyperliquid",
+        Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => "mexc",
     }
 }
 
@@ -2055,6 +2057,9 @@ mod tests {
                 }
                 Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => {
                     assert_eq!(inclusive, ExchangeInclusive::Hyperliquid);
+                }
+                Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
+                    assert_eq!(inclusive, ExchangeInclusive::Mexc);
                 }
             }
         }

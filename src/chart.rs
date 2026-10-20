@@ -2,7 +2,8 @@ pub mod comparison;
 pub mod heatmap;
 pub mod indicator;
 pub mod kline;
-mod scale;
+pub mod scale;
+pub mod ticks;
 
 use crate::style;
 use crate::widget::multi_split::{DRAG_SIZE, MultiSplit};
@@ -11,9 +12,9 @@ use data::chart::{Autoscale, Basis, PlotData, ViewConfig, indicator::Indicator};
 use exchange::TickerInfo;
 use exchange::fetcher::{FetchRange, FetchRequests, FetchSpec, ReqError, RequestHandler};
 use exchange::util::{Price, PriceStep};
-pub use scale::PriceAxisBadge;
-use scale::linear::PriceInfoLabel;
-use scale::{AxisLabelsX, AxisLabelsY};
+pub use ticks::PriceAxisBadge;
+use ticks::y::PriceInfoLabel;
+use ticks::{x::AxisLabelsX, y::AxisLabelsY};
 
 use iced::theme::palette::Extended;
 use iced::widget::canvas::{self, Cache, Canvas, Event, Frame, LineDash, Path, Stroke};
@@ -609,10 +610,12 @@ pub fn view<'a, T: Chart>(
             labels_cache: &state.cache.y_labels,
             translation_y: state.translation.y,
             scaling: state.scaling,
-            decimals: state.decimals,
-            min: state.base_price_y.to_f32_lossy(),
+            min: state.base_price_y,
             last_price: state.last_price,
-            tick_size: state.tick_size.to_f32_lossy(),
+            axis: ticks::y::PriceAxis::new(
+                state.effective_tick_size(),
+                Some(state.ticker_info.min_ticksize),
+            ),
             cell_height: state.cell_height,
             basis: state.basis,
             chart_bounds: state.bounds,
@@ -757,6 +760,14 @@ impl ViewState {
             decimals,
             ticker_info,
             layout,
+        }
+    }
+
+    pub fn effective_tick_size(&self) -> PriceStep {
+        if self.tick_size.units > 0 {
+            self.tick_size
+        } else {
+            self.ticker_info.min_ticksize.into()
         }
     }
 

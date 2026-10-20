@@ -450,7 +450,6 @@ pub fn mix_color(foreground: Color, background: Color, foreground_weight: f32) -
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

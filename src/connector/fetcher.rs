@@ -110,9 +110,7 @@ pub fn fetch_trades_paged(
                     .await?;
 
                 let is_empty = parsed.raw_row_count == 0;
-                if !is_empty
-                    && let Some(last_ts) = parsed.last_ts
-                {
+                if !is_empty && let Some(last_ts) = parsed.last_ts {
                     actual_last_trade_t = actual_last_trade_t.max(last_ts);
                     cursor = last_ts.saturating_add(1);
                 }
@@ -123,16 +121,13 @@ pub fn fetch_trades_paged(
                     break;
                 }
             } else {
-                let (mut batch, next_trade_t) = match exchange::trades::fetch_trades(
-                    ticker_info,
-                    cursor,
-                    data_path.clone(),
-                )
-                .await
-                {
-                    Ok(res) => res,
-                    Err(err) => return Err(err),
-                };
+                let (mut batch, next_trade_t) =
+                    match exchange::trades::fetch_trades(ticker_info, cursor, data_path.clone())
+                        .await
+                    {
+                        Ok(res) => res,
+                        Err(err) => return Err(err),
+                    };
 
                 let batch_len = batch.len();
                 let now_ms = exchange::clock::server_time_ms(Some(ticker_info.exchange()));

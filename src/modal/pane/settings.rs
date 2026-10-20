@@ -474,6 +474,7 @@ pub fn timesales_cfg_view<'a>(
     };
 
     let retention_minutes = (cfg.trade_retention.as_secs_f32() / 60.0).max(1.0);
+    let cfg_slider = cfg.clone();
     let retention_slider = {
         let slider_ui = slider(1.0..=60.0, retention_minutes, move |new_minutes| {
             let mins = new_minutes.round().max(1.0) as u64;
@@ -481,7 +482,7 @@ pub fn timesales_cfg_view<'a>(
                 pane,
                 VisualConfig::TimeAndSales(timeandsales::Config {
                     trade_retention: Duration::from_secs(mins * 60),
-                    ..cfg
+                    ..cfg_slider.clone()
                 }),
                 false,
             )
@@ -512,10 +513,11 @@ pub fn timesales_cfg_view<'a>(
 
     let stacked_bar: Element<_> = {
         let is_shown = cfg.stacked_bar.is_some();
+        let cfg_cb = cfg.clone();
 
         let enable_checkbox = checkbox(is_shown).label("Show stacked bar").on_toggle({
             move |value| {
-                let current_ratio = cfg.stacked_bar.map(|h| h.ratio()).unwrap_or_default();
+                let current_ratio = cfg_cb.stacked_bar.map(|h| h.ratio()).unwrap_or_default();
                 Message::VisualConfigChanged(
                     pane,
                     VisualConfig::TimeAndSales(timeandsales::Config {
@@ -524,24 +526,26 @@ pub fn timesales_cfg_view<'a>(
                         } else {
                             None
                         },
-                        ..cfg
+                        ..cfg_cb.clone()
                     }),
                     false,
                 )
             }
         });
 
+        let cfg_for_controls = cfg.clone();
         let controls: Option<Element<_>> = cfg.stacked_bar.map(|hist| {
             let ratio = hist.ratio();
             let is_compact = matches!(hist, StackedBar::Compact(_));
 
+            let cfg_compact = cfg_for_controls.clone();
             let compact = radio("Compact", true, Some(is_compact), {
                 move |_v| {
                     Message::VisualConfigChanged(
                         pane,
                         VisualConfig::TimeAndSales(timeandsales::Config {
                             stacked_bar: Some(StackedBar::Compact(ratio)),
-                            ..cfg
+                            ..cfg_compact.clone()
                         }),
                         false,
                     )
@@ -549,13 +553,14 @@ pub fn timesales_cfg_view<'a>(
             })
             .spacing(4);
 
+            let cfg_full = cfg_for_controls.clone();
             let full = radio("Full", false, Some(is_compact), {
                 move |_v| {
                     Message::VisualConfigChanged(
                         pane,
                         VisualConfig::TimeAndSales(timeandsales::Config {
                             stacked_bar: Some(StackedBar::Full(ratio)),
-                            ..cfg
+                            ..cfg_full.clone()
                         }),
                         false,
                     )
@@ -563,8 +568,9 @@ pub fn timesales_cfg_view<'a>(
             })
             .spacing(4);
 
+            let cfg_metric = cfg_for_controls.clone();
             let metric_picklist = pick_list(StackedBarRatio::ALL, Some(ratio), move |new_ratio| {
-                let new_hist = Some(match cfg.stacked_bar {
+                let new_hist = Some(match cfg_metric.stacked_bar {
                     Some(StackedBar::Full(_)) => StackedBar::Full(new_ratio),
                     _ => StackedBar::Compact(new_ratio),
                 });
@@ -572,7 +578,7 @@ pub fn timesales_cfg_view<'a>(
                     pane,
                     VisualConfig::TimeAndSales(timeandsales::Config {
                         stacked_bar: new_hist,
-                        ..cfg
+                        ..cfg_metric.clone()
                     }),
                     false,
                 )
@@ -608,7 +614,7 @@ pub fn timesales_cfg_view<'a>(
         trade_size_column,
         history_column,
         stacked_bar,
-        row![space::horizontal(), sync_all_button(pane, VisualConfig::TimeAndSales(cfg))],
+        row![space::horizontal(), sync_all_button(pane, VisualConfig::TimeAndSales(cfg.clone()))],
         ; spacing = 12, align_x = Alignment::Start
     ];
 
@@ -1925,7 +1931,7 @@ pub mod study {
     use data::chart::heatmap::{CLEANUP_THRESHOLD, HeatmapStudy, ProfileKind};
     use data::chart::kline::FootprintStudy;
     use iced::{
-        Element, padding,
+        Alignment, Element, Length, padding,
         widget::{
             button, checkbox, column, container, pick_list, row, slider, space, text, text_input,
         },
@@ -2006,6 +2012,76 @@ pub mod study {
                         .padding(8)
                         .spacing(4)
                         .into()
+                }
+                FootprintStudy::BigTrades {
+                    min_usd,
+                    min_radius,
+                    max_radius,
+                    scale,
+                    opacity,
+                } => {
+                    let min_usd_str = if min_usd >= 1_000_000.0 {
+                        format!("${:.1}M", min_usd / 1_000_000.0)
+                    } else {
+                        format!("${:.0}k", min_usd / 1_000.0)
+                    };
+
+                    let usd_slider = slider(10_000.0..=2_000_000.0, min_usd as f32, move |val| {
+                        on_change(FootprintStudy::BigTrades {
+                            min_usd: val as f64,
+                            min_radius,
+                            max_radius,
+                            scale,
+                            opacity,
+                        })
+                    })
+                    .step(10_000.0);
+
+                    let radius_slider = slider(10.0..=50.0, max_radius, move |val| {
+                        on_change(FootprintStudy::BigTrades {
+                            min_usd,
+                            min_radius,
+                            max_radius: val,
+                            scale,
+                            opacity,
+                        })
+                    })
+                    .step(2.0);
+
+                    let opacity_slider = slider(0.1..=1.0, opacity, move |val| {
+                        on_change(FootprintStudy::BigTrades {
+                            min_usd,
+                            min_radius,
+                            max_radius,
+                            scale,
+                            opacity: val,
+                        })
+                    })
+                    .step(0.05);
+
+                    column![
+                        row![
+                            text("Min Trade USD:").width(Length::Fill),
+                            text(min_usd_str).size(13)
+                        ]
+                        .align_y(Alignment::Center),
+                        usd_slider,
+                        row![
+                            text("Max Bubble Radius:").width(Length::Fill),
+                            text(format!("{:.0}px", max_radius)).size(13)
+                        ]
+                        .align_y(Alignment::Center),
+                        radius_slider,
+                        row![
+                            text("Opacity:").width(Length::Fill),
+                            text(format!("{:.0}%", opacity * 100.0)).size(13)
+                        ]
+                        .align_y(Alignment::Center),
+                        opacity_slider,
+                    ]
+                    .padding(8)
+                    .spacing(6)
+                    .into()
                 }
                 FootprintStudy::Imbalance {
                     threshold,

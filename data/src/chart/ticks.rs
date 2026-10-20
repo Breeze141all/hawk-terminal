@@ -1,3 +1,4 @@
+pub mod x;
 pub mod y;
 
 /// Safety cap on the number of grid lines produced by any strategy.

@@ -10,6 +10,7 @@
 use exchange::util::Price;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 /// Configuration for the liquidation heatmap
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,13 +155,13 @@ pub struct LiquidationHeatmap {
     /// ATR RMA state (running moving average)
     atr_rma: f32,
     /// Volume SMA buffer for buy volume
-    pub buy_vol_buffer: Vec<f32>,
+    pub buy_vol_buffer: VecDeque<f32>,
     /// Volume SMA buffer for sell volume
-    pub sell_vol_buffer: Vec<f32>,
+    pub sell_vol_buffer: VecDeque<f32>,
     /// Current bar index
     pub current_bar: u64,
     /// Price ranges for ATR calculation
-    price_ranges: Vec<f32>,
+    price_ranges: VecDeque<f32>,
     /// Configuration
     pub config: LiquidationHeatmapConfig,
 }
@@ -180,10 +181,10 @@ impl LiquidationHeatmap {
             bin_size: 0.0,
             atr: 0.0,
             atr_rma: 0.0,
-            buy_vol_buffer: Vec::new(),
-            sell_vol_buffer: Vec::new(),
+            buy_vol_buffer: VecDeque::new(),
+            sell_vol_buffer: VecDeque::new(),
             current_bar: 0,
-            price_ranges: Vec::new(),
+            price_ranges: VecDeque::new(),
             config,
         }
     }
@@ -213,7 +214,7 @@ impl LiquidationHeatmap {
     }
 
     /// Calculate SMA of a buffer
-    fn calculate_sma(buffer: &[f32]) -> f32 {
+    fn calculate_sma(buffer: &VecDeque<f32>) -> f32 {
         if buffer.is_empty() {
             return 1.0;
         }
@@ -223,10 +224,10 @@ impl LiquidationHeatmap {
     /// Update ATR with new price range
     fn update_atr(&mut self, high: f32, low: f32) {
         let price_range = high - low;
-        self.price_ranges.push(price_range);
+        self.price_ranges.push_back(price_range);
 
         if self.price_ranges.len() > self.config.auto_scale_length {
-            self.price_ranges.remove(0);
+            self.price_ranges.pop_front();
         }
 
         if self.atr_rma == 0.0 && !self.price_ranges.is_empty() {
@@ -240,15 +241,15 @@ impl LiquidationHeatmap {
 
     /// Update volume buffers
     fn update_volume_buffers(&mut self, buy_volume: f32, sell_volume: f32) {
-        self.buy_vol_buffer.push(buy_volume);
-        self.sell_vol_buffer.push(sell_volume);
+        self.buy_vol_buffer.push_back(buy_volume);
+        self.sell_vol_buffer.push_back(sell_volume);
 
         let max_len = self.config.volume_length.max(1);
         if self.buy_vol_buffer.len() > max_len {
-            self.buy_vol_buffer.remove(0);
+            self.buy_vol_buffer.pop_front();
         }
         if self.sell_vol_buffer.len() > max_len {
-            self.sell_vol_buffer.remove(0);
+            self.sell_vol_buffer.pop_front();
         }
     }
 

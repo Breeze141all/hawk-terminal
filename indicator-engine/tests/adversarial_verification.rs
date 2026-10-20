@@ -1,5 +1,5 @@
 use indicator_engine::{
-    compile, ChartFrame, IndicatorConfig, IndicatorFrame, InstrumentContext, TimeOrTick, Value,
+    ChartFrame, IndicatorConfig, IndicatorFrame, InstrumentContext, TimeOrTick, Value, compile,
 };
 use std::sync::Arc;
 
@@ -43,7 +43,9 @@ fn evaluate_script(source: &str, frames: Vec<IndicatorFrame>, plot_id: &str) -> 
     frames
         .into_iter()
         .map(|f| {
-            let output = instance.evaluate_closed(f).expect("evaluation should succeed");
+            let output = instance
+                .evaluate_closed(f)
+                .expect("evaluation should succeed");
             output
                 .plots
                 .iter()
@@ -69,7 +71,17 @@ fn test_ta_rsi_numerical_precision_and_edge_conditions() {
     let frames = alternating_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
     assert_eq!(&rsi_vals[..3], &[Value::Na, Value::Na, Value::Na]);
@@ -93,52 +105,134 @@ fn test_ta_rsi_numerical_precision_and_edge_conditions() {
     let frames = flat_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(50.0), "Flat prices must yield exactly 50.0 at bar 3");
-    assert_eq!(rsi_vals[4], Value::Float(50.0), "Flat prices must yield exactly 50.0 at bar 4");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(50.0),
+        "Flat prices must yield exactly 50.0 at bar 3"
+    );
+    assert_eq!(
+        rsi_vals[4],
+        Value::Float(50.0),
+        "Flat prices must yield exactly 50.0 at bar 4"
+    );
 
     // 3. Zero-loss prices: monotonic increasing prices -> RSI 100.0
     let gain_prices = [100.0, 105.0, 110.0, 115.0, 120.0];
     let frames = gain_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(100.0), "Zero-loss prices must yield exactly 100.0 at bar 3");
-    assert_eq!(rsi_vals[4], Value::Float(100.0), "Zero-loss prices must yield exactly 100.0 at bar 4");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(100.0),
+        "Zero-loss prices must yield exactly 100.0 at bar 3"
+    );
+    assert_eq!(
+        rsi_vals[4],
+        Value::Float(100.0),
+        "Zero-loss prices must yield exactly 100.0 at bar 4"
+    );
 
     // 4. Zero-gain prices: monotonic decreasing prices -> RSI 0.0
     let drop_prices = [100.0, 95.0, 90.0, 85.0, 80.0];
     let frames = drop_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(0.0), "Zero-gain prices must yield exactly 0.0 at bar 3");
-    assert_eq!(rsi_vals[4], Value::Float(0.0), "Zero-gain prices must yield exactly 0.0 at bar 4");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(0.0),
+        "Zero-gain prices must yield exactly 0.0 at bar 3"
+    );
+    assert_eq!(
+        rsi_vals[4],
+        Value::Float(0.0),
+        "Zero-gain prices must yield exactly 0.0 at bar 4"
+    );
 
     // 5. Tiny delta resilience (no underflow / precision collapse)
     let tiny_gain_prices = [10.0, 10.0 + 1e-12, 10.0 + 2e-12, 10.0 + 3e-12];
     let frames = tiny_gain_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(100.0), "Tiny gains must yield exactly 100.0");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(100.0),
+        "Tiny gains must yield exactly 100.0"
+    );
 
     let tiny_loss_prices = [10.0, 10.0 - 1e-12, 10.0 - 2e-12, 10.0 - 3e-12];
     let frames = tiny_loss_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(0.0), "Tiny losses must yield exactly 0.0");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(0.0),
+        "Tiny losses must yield exactly 0.0"
+    );
 }
 
 #[test]
@@ -164,7 +258,15 @@ fn test_ta_sma_precision_and_missing_values() {
     assert_eq!(sma_vals[4], Value::Float(35.0)); // (20+30+40+50)/4 = 35.0
 
     // Missing value inside window invalidates SMA until it exits
-    let gap_prices = [Some(10.0), Some(20.0), None, Some(40.0), Some(50.0), Some(60.0), Some(70.0)];
+    let gap_prices = [
+        Some(10.0),
+        Some(20.0),
+        None,
+        Some(40.0),
+        Some(50.0),
+        Some(60.0),
+        Some(70.0),
+    ];
     let frames = gap_prices
         .iter()
         .enumerate()
@@ -251,7 +353,17 @@ fn test_ta_stdev_precision_and_constant_zero_variance() {
     let frames = prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let stdev_vals = evaluate_script(source, frames, "stdev");
     match &stdev_vals[3] {
@@ -267,10 +379,24 @@ fn test_ta_stdev_precision_and_constant_zero_variance() {
     let frames = const_prices
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let stdev_vals = evaluate_script(source, frames, "stdev");
-    assert_eq!(stdev_vals[3], Value::Float(0.0), "Constant values must give exact 0.0 standard deviation");
+    assert_eq!(
+        stdev_vals[3],
+        Value::Float(0.0),
+        "Constant values must give exact 0.0 standard deviation"
+    );
 }
 
 #[test]
@@ -290,7 +416,17 @@ fn test_ta_vwma_precision_and_zero_volume_division_safety() {
     let frames = p_and_v
         .iter()
         .enumerate()
-        .map(|(i, &(p, v))| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(v)))
+        .map(|(i, &(p, v))| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(v),
+            )
+        })
         .collect();
     let vwma_vals = evaluate_script(source, frames, "vwma");
     match &vwma_vals[2] {
@@ -307,7 +443,17 @@ fn test_ta_vwma_precision_and_zero_volume_division_safety() {
     let frames = zero_vol
         .iter()
         .enumerate()
-        .map(|(i, &(p, v))| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(v)))
+        .map(|(i, &(p, v))| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(v),
+            )
+        })
         .collect();
     let vwma_vals = evaluate_script(source, frames, "vwma");
     assert_eq!(
@@ -330,9 +476,33 @@ fn test_ta_avwap_precision_boundary_reset_and_zero_volume() {
     // 2024-01-01 15:00:00 UTC = 1704121200000 ms
     // 2024-01-02 01:00:00 UTC = 1704157200000 ms (New Day!)
     let frames = vec![
-        test_frame(0, 1704103200000, Some(100.0), Some(100.0), Some(100.0), Some(100.0), Some(10.0)),
-        test_frame(1, 1704121200000, Some(120.0), Some(120.0), Some(120.0), Some(120.0), Some(10.0)),
-        test_frame(2, 1704157200000, Some(200.0), Some(200.0), Some(200.0), Some(200.0), Some(5.0)),
+        test_frame(
+            0,
+            1704103200000,
+            Some(100.0),
+            Some(100.0),
+            Some(100.0),
+            Some(100.0),
+            Some(10.0),
+        ),
+        test_frame(
+            1,
+            1704121200000,
+            Some(120.0),
+            Some(120.0),
+            Some(120.0),
+            Some(120.0),
+            Some(10.0),
+        ),
+        test_frame(
+            2,
+            1704157200000,
+            Some(200.0),
+            Some(200.0),
+            Some(200.0),
+            Some(200.0),
+            Some(5.0),
+        ),
     ];
     let avwap_vals = evaluate_script(source, frames, "avwap");
 
@@ -344,11 +514,21 @@ fn test_ta_avwap_precision_boundary_reset_and_zero_volume() {
     assert_eq!(avwap_vals[2], Value::Float(200.0));
 
     // Zero volume returns Na safely without panic
-    let zero_vol_frames = vec![
-        test_frame(0, 1704103200000, Some(100.0), Some(100.0), Some(100.0), Some(100.0), Some(0.0)),
-    ];
+    let zero_vol_frames = vec![test_frame(
+        0,
+        1704103200000,
+        Some(100.0),
+        Some(100.0),
+        Some(100.0),
+        Some(100.0),
+        Some(0.0),
+    )];
     let avwap_vals = evaluate_script(source, zero_vol_frames, "avwap");
-    assert_eq!(avwap_vals[0], Value::Na, "AVWAP with 0 volume must return Value::Na");
+    assert_eq!(
+        avwap_vals[0],
+        Value::Na,
+        "AVWAP with 0 volume must return Value::Na"
+    );
 }
 
 #[test]
@@ -362,21 +542,49 @@ fn test_nan_inf_normalization_to_na() {
         plot(math.abs(na), id = "abs_na")
     "#;
 
-    let frames = vec![test_frame(0, 0, Some(1.0), Some(1.0), Some(1.0), Some(1.0), Some(1.0))];
+    let frames = vec![test_frame(
+        0,
+        0,
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+    )];
 
     let compiled = compile(source, "adv_nonfinite.ind").expect("compilation should succeed");
     let mut instance = compiled
         .instantiate(IndicatorConfig::default())
         .expect("instantiation should succeed");
-    let output = instance.evaluate_closed(frames.into_iter().next().unwrap()).expect("eval");
+    let output = instance
+        .evaluate_closed(frames.into_iter().next().unwrap())
+        .expect("eval");
 
     let get_plot = |id: &str| {
-        output.plots.iter().find(|p| p.id == id).unwrap().value.clone()
+        output
+            .plots
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .value
+            .clone()
     };
 
-    assert_eq!(get_plot("div_zero"), Value::Na, "1.0 / 0.0 must normalize to Value::Na");
-    assert_eq!(get_plot("zero_div_zero"), Value::Na, "0.0 / 0.0 must normalize to Value::Na");
-    assert_eq!(get_plot("abs_na"), Value::Na, "math.abs(na) must be Value::Na");
+    assert_eq!(
+        get_plot("div_zero"),
+        Value::Na,
+        "1.0 / 0.0 must normalize to Value::Na"
+    );
+    assert_eq!(
+        get_plot("zero_div_zero"),
+        Value::Na,
+        "0.0 / 0.0 must normalize to Value::Na"
+    );
+    assert_eq!(
+        get_plot("abs_na"),
+        Value::Na,
+        "math.abs(na) must be Value::Na"
+    );
 }
 
 #[test]
@@ -393,24 +601,64 @@ fn test_checked_integer_arithmetic_overflow_safety() {
         plot((-9223372036854775807 - 1) % -1, id = "int_min_rem_neg_one")
     "#;
 
-    let frames = vec![test_frame(0, 0, Some(1.0), Some(1.0), Some(1.0), Some(1.0), Some(1.0))];
+    let frames = vec![test_frame(
+        0,
+        0,
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+    )];
 
     let compiled = compile(source, "adv_int_overflow.ind").expect("compilation should succeed");
     let mut instance = compiled
         .instantiate(IndicatorConfig::default())
         .expect("instantiation should succeed");
-    let output = instance.evaluate_closed(frames.into_iter().next().unwrap()).expect("eval");
+    let output = instance
+        .evaluate_closed(frames.into_iter().next().unwrap())
+        .expect("eval");
 
     let get_plot = |id: &str| {
-        output.plots.iter().find(|p| p.id == id).unwrap().value.clone()
+        output
+            .plots
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .value
+            .clone()
     };
 
-    assert_eq!(get_plot("add_overflow"), Value::Na, "i64::MAX + 1 must return Value::Na without panic");
-    assert_eq!(get_plot("sub_underflow"), Value::Na, "i64::MIN - 1 must return Value::Na without panic");
-    assert_eq!(get_plot("mul_overflow"), Value::Na, "i64::MAX * 2 must return Value::Na without panic");
-    assert_eq!(get_plot("int_div_zero"), Value::Na, "Integer / 0 must return Value::Na without panic");
-    assert_eq!(get_plot("int_rem_zero"), Value::Na, "Integer % 0 must return Value::Na without panic");
-    assert_eq!(get_plot("int_min_rem_neg_one"), Value::Na, "i64::MIN % -1 must return Value::Na without panic/SIGFPE");
+    assert_eq!(
+        get_plot("add_overflow"),
+        Value::Na,
+        "i64::MAX + 1 must return Value::Na without panic"
+    );
+    assert_eq!(
+        get_plot("sub_underflow"),
+        Value::Na,
+        "i64::MIN - 1 must return Value::Na without panic"
+    );
+    assert_eq!(
+        get_plot("mul_overflow"),
+        Value::Na,
+        "i64::MAX * 2 must return Value::Na without panic"
+    );
+    assert_eq!(
+        get_plot("int_div_zero"),
+        Value::Na,
+        "Integer / 0 must return Value::Na without panic"
+    );
+    assert_eq!(
+        get_plot("int_rem_zero"),
+        Value::Na,
+        "Integer % 0 must return Value::Na without panic"
+    );
+    assert_eq!(
+        get_plot("int_min_rem_neg_one"),
+        Value::Na,
+        "i64::MIN % -1 must return Value::Na without panic/SIGFPE"
+    );
 }
 
 #[test]
@@ -428,7 +676,9 @@ fn test_long_horizon_10k_bars_drift_and_asymptotic_stability() {
     "#;
 
     let compiled = compile(source, "adv_10k.ind").expect("compile");
-    let mut instance = compiled.instantiate(IndicatorConfig::default()).expect("instantiate");
+    let mut instance = compiled
+        .instantiate(IndicatorConfig::default())
+        .expect("instantiate");
 
     let count = 10_000;
     let mut last_output = None;
@@ -449,23 +699,42 @@ fn test_long_horizon_10k_bars_drift_and_asymptotic_stability() {
     }
 
     let out = last_output.unwrap();
-    let get_plot = |id: &str| {
-        out.plots.iter().find(|p| p.id == id).unwrap().value.clone()
-    };
+    let get_plot = |id: &str| out.plots.iter().find(|p| p.id == id).unwrap().value.clone();
 
-    assert_eq!(get_plot("rsi"), Value::Float(50.0), "10k bars constant close must yield exactly 50.0 RSI");
-    assert_eq!(get_plot("sma"), Value::Float(100.0), "10k bars constant close must yield exactly 100.0 SMA");
+    assert_eq!(
+        get_plot("rsi"),
+        Value::Float(50.0),
+        "10k bars constant close must yield exactly 50.0 RSI"
+    );
+    assert_eq!(
+        get_plot("sma"),
+        Value::Float(100.0),
+        "10k bars constant close must yield exactly 100.0 SMA"
+    );
     match get_plot("ema") {
-        Value::Float(v) => assert!((v - 100.0).abs() < 1e-12, "10k bars EMA must converge to 100.0, got {v}"),
+        Value::Float(v) => assert!(
+            (v - 100.0).abs() < 1e-12,
+            "10k bars EMA must converge to 100.0, got {v}"
+        ),
         other => panic!("Expected Float for EMA, got {:?}", other),
     }
     match get_plot("rma") {
-        Value::Float(v) => assert!((v - 100.0).abs() < 1e-12, "10k bars RMA must converge to 100.0, got {v}"),
+        Value::Float(v) => assert!(
+            (v - 100.0).abs() < 1e-12,
+            "10k bars RMA must converge to 100.0, got {v}"
+        ),
         other => panic!("Expected Float for RMA, got {:?}", other),
     }
-    assert_eq!(get_plot("stdev"), Value::Float(0.0), "10k bars constant close must yield exactly 0.0 STDEV");
+    assert_eq!(
+        get_plot("stdev"),
+        Value::Float(0.0),
+        "10k bars constant close must yield exactly 0.0 STDEV"
+    );
     match get_plot("vwma") {
-        Value::Float(v) => assert!((v - 100.0).abs() < 1e-12, "10k bars VWMA must yield 100.0, got {v}"),
+        Value::Float(v) => assert!(
+            (v - 100.0).abs() < 1e-12,
+            "10k bars VWMA must yield 100.0, got {v}"
+        ),
         other => panic!("Expected Float for VWMA, got {:?}", other),
     }
 }
@@ -484,20 +753,48 @@ fn test_negative_prices_and_extreme_magnitudes() {
     let frames = neg_increasing
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(100.0), "Negative prices with gains must yield 100.0 RSI");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(100.0),
+        "Negative prices with gains must yield 100.0 RSI"
+    );
 
     // Negative prices: [-70.0, -80.0, -90.0, -100.0] -> strictly decreasing deltas (-10.0)
     let neg_decreasing = [-70.0, -80.0, -90.0, -100.0];
     let frames = neg_decreasing
         .iter()
         .enumerate()
-        .map(|(i, &p)| test_frame(i, i as i64 * 60_000, Some(p), Some(p), Some(p), Some(p), Some(1.0)))
+        .map(|(i, &p)| {
+            test_frame(
+                i,
+                i as i64 * 60_000,
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(p),
+                Some(1.0),
+            )
+        })
         .collect();
     let rsi_vals = evaluate_script(source, frames, "rsi");
-    assert_eq!(rsi_vals[3], Value::Float(0.0), "Negative prices with drops must yield 0.0 RSI");
+    assert_eq!(
+        rsi_vals[3],
+        Value::Float(0.0),
+        "Negative prices with drops must yield 0.0 RSI"
+    );
 }
 
 #[test]
@@ -518,14 +815,48 @@ fn test_avwap_week_and_month_boundary_resets() {
     // Jan 31 2024 23:59:00 UTC = 1706745540000 ms
     // Feb 01 2024 00:01:00 UTC = 1706745660000 ms (New month!)
     let frames = vec![
-        test_frame(0, 1704671940000, Some(100.0), Some(100.0), Some(100.0), Some(100.0), Some(10.0)),
-        test_frame(1, 1704672060000, Some(200.0), Some(200.0), Some(200.0), Some(200.0), Some(5.0)),
-        test_frame(2, 1706745540000, Some(300.0), Some(300.0), Some(300.0), Some(300.0), Some(10.0)),
-        test_frame(3, 1706745660000, Some(400.0), Some(400.0), Some(400.0), Some(400.0), Some(10.0)),
+        test_frame(
+            0,
+            1704671940000,
+            Some(100.0),
+            Some(100.0),
+            Some(100.0),
+            Some(100.0),
+            Some(10.0),
+        ),
+        test_frame(
+            1,
+            1704672060000,
+            Some(200.0),
+            Some(200.0),
+            Some(200.0),
+            Some(200.0),
+            Some(5.0),
+        ),
+        test_frame(
+            2,
+            1706745540000,
+            Some(300.0),
+            Some(300.0),
+            Some(300.0),
+            Some(300.0),
+            Some(10.0),
+        ),
+        test_frame(
+            3,
+            1706745660000,
+            Some(400.0),
+            Some(400.0),
+            Some(400.0),
+            Some(400.0),
+            Some(10.0),
+        ),
     ];
 
     let compiled = compile(source, "adv_avwap_bounds.ind").expect("compile");
-    let mut instance = compiled.instantiate(IndicatorConfig::default()).expect("instantiate");
+    let mut instance = compiled
+        .instantiate(IndicatorConfig::default())
+        .expect("instantiate");
 
     let outputs: Vec<_> = frames
         .into_iter()

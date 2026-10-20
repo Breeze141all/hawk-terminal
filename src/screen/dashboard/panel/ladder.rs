@@ -51,6 +51,13 @@ impl super::Panel for Ladder {
         }
         self.grouped_asks().is_empty() && self.grouped_bids().is_empty() && self.trades.is_empty()
     }
+
+    fn view<'a>(&'a self, _timezone: data::UserTimezone) -> iced::Element<'a, Message> {
+        iced::widget::canvas(self)
+            .height(iced::Length::Fill)
+            .width(iced::Length::Fill)
+            .into()
+    }
 }
 
 pub struct Ladder {

@@ -345,6 +345,8 @@ async fn try_resync(
             orderbook.update(DepthUpdate::Snapshot(depth), ticker_info.min_ticksize);
         }
         Ok(Err(e)) => {
+            *is_disconnected = true;
+
             let _ = output
                 .send(Event::Disconnected(
                     exchange,
@@ -1513,6 +1515,7 @@ pub async fn fetch_ticksize(
         }
         if let Some(quote_asset) = item["quoteAsset"].as_str()
             && quote_asset != "USDT"
+            && quote_asset != "USDC"
             && quote_asset != "USD"
         {
             continue;
@@ -1570,7 +1573,9 @@ fn parse_ticker_volume(item: &serde_json::Value, market: MarketKind) -> Result<f
             .as_str()
             .and_then(|v| v.parse::<f32>().ok())
             .or_else(|| item["volume"].as_str().and_then(|v| v.parse::<f32>().ok()))
-            .ok_or_else(|| AdapterError::ParseError("Quote volume or volume not found".to_string())),
+            .ok_or_else(|| {
+                AdapterError::ParseError("Quote volume or volume not found".to_string())
+            }),
         MarketKind::InversePerps => item["volume"]
             .as_str()
             .ok_or_else(|| AdapterError::ParseError("Volume not found".to_string()))?
@@ -2941,5 +2946,3 @@ invalid,row
         assert_eq!(kline_path_spot, "stream");
     }
 }
-
-

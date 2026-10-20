@@ -1,7 +1,7 @@
 use super::theme::ThemeColor;
 use super::{
-    BaseSeriesSource, IndicatorColorSpec, IndicatorConfig, IndicatorHistoryRequirement, IndicatorId,
-    IndicatorOutputRef,
+    BaseSeriesSource, IndicatorColorSpec, IndicatorConfig, IndicatorHistoryRequirement,
+    IndicatorId, IndicatorOutputRef,
 };
 use crate::chart::Basis;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};

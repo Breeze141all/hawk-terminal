@@ -1,19 +1,23 @@
 use std::time::Duration;
 
-use exchange::util::Price;
+use exchange::Trade;
 use serde::{Deserialize, Serialize};
 
 use crate::util::ok_or_default;
 
 const TRADE_RETENTION_MS: u64 = 120_000;
 
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub trade_size_filter: f32,
     #[serde(default = "default_buffer_filter")]
     pub trade_retention: Duration,
     #[serde(deserialize_with = "ok_or_default", default)]
     pub stacked_bar: Option<StackedBar>,
+    #[serde(default)]
+    pub additional_tickers: Vec<exchange::TickerInfo>,
+    #[serde(default)]
+    pub disabled_tickers: Vec<exchange::Ticker>,
 }
 
 impl Default for Config {
@@ -22,6 +26,8 @@ impl Default for Config {
             trade_size_filter: 0.0,
             trade_retention: Duration::from_millis(TRADE_RETENTION_MS),
             stacked_bar: StackedBar::Compact(StackedBarRatio::default()).into(),
+            additional_tickers: Vec::new(),
+            disabled_tickers: Vec::new(),
         }
     }
 }
@@ -30,18 +36,12 @@ fn default_buffer_filter() -> Duration {
     Duration::from_millis(TRADE_RETENTION_MS)
 }
 
-#[derive(Debug, Clone)]
-pub struct TradeDisplay {
-    pub time_str: String,
-    pub price: Price,
-    pub qty: f32,
-    pub is_sell: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct TradeEntry {
-    pub ts_ms: u64,
-    pub display: TradeDisplay,
+/// Zero-allocation tape trade tagged with ticker index for multi-ticker aggregation
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TapeTrade {
+    pub trade: Trade,
+    #[serde(default)]
+    pub ticker_index: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Copy)]
@@ -100,7 +100,7 @@ pub struct HistAgg {
 }
 
 impl HistAgg {
-    pub fn add(&mut self, trade: &TradeDisplay) {
+    pub fn add(&mut self, trade: &Trade) {
         let qty = trade.qty as f64;
 
         if trade.is_sell {
@@ -112,7 +112,7 @@ impl HistAgg {
         }
     }
 
-    pub fn remove(&mut self, trade: &TradeDisplay) {
+    pub fn remove(&mut self, trade: &Trade) {
         let qty = trade.qty as f64;
 
         if trade.is_sell {
@@ -171,5 +171,55 @@ impl HistAgg {
                 Some((buy_avg, sell_avg, buy_ratio))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use exchange::util::Price;
+
+    #[test]
+    fn test_ter16_zero_alloc_tape_trade_and_hist_agg() {
+        let mut agg = HistAgg::default();
+        let t1 = Trade {
+            time: 1000,
+            is_sell: false,
+            price: Price::from_f64(100.0),
+            qty: 2.5,
+        };
+        let t2 = Trade {
+            time: 1050,
+            is_sell: true,
+            price: Price::from_f64(100.5),
+            qty: 1.5,
+        };
+
+        agg.add(&t1);
+        agg.add(&t2);
+
+        let (buy_cnt, sell_cnt, count_ratio) =
+            agg.values_for(StackedBarRatio::Count).expect("count ratio");
+        assert_eq!(buy_cnt, 1.0);
+        assert_eq!(sell_cnt, 1.0);
+        assert!((count_ratio - 0.5).abs() < 1e-4);
+
+        let (buy_vol, sell_vol, vol_ratio) =
+            agg.values_for(StackedBarRatio::Volume).expect("vol ratio");
+        assert_eq!(buy_vol, 2.5);
+        assert_eq!(sell_vol, 1.5);
+        assert!((vol_ratio - (2.5 / 4.0)).abs() < 1e-4);
+
+        agg.remove(&t1);
+        let (buy_cnt_after, _, _) = agg.values_for(StackedBarRatio::Count).expect("after remove");
+        assert_eq!(buy_cnt_after, 0.0);
+    }
+
+    #[test]
+    fn test_ter20_multi_ticker_config_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.additional_tickers.is_empty());
+        assert!(cfg.disabled_tickers.is_empty());
+        assert_eq!(cfg.trade_size_filter, 0.0);
     }
 }

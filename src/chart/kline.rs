@@ -1,6 +1,6 @@
 use super::{
-    Action, Basis, Caches, Chart, Interaction, Message, PlotConstants, PlotData, PriceAxisBadge, TEXT_SIZE,
-    ViewState, indicator, request_fetch, scale::linear::PriceInfoLabel,
+    Action, Basis, Caches, Chart, Interaction, Message, PlotConstants, PlotData, PriceAxisBadge,
+    TEXT_SIZE, ViewState, indicator, request_fetch, scale::linear::PriceInfoLabel,
 };
 use crate::chart::indicator::kline::KlineIndicatorImpl;
 use crate::{modal::pane::settings::study, style};
@@ -15,8 +15,8 @@ use data::chart::{
     KlineChartKind, ViewConfig,
     indicator::{Indicator, KlineIndicator},
     kline::{
-        ClusterKind, FootprintStudy, FootprintSummary, GroupedTrades, KlineDataPoint, KlineTrades, NPoc,
-        PointOfControl,
+        ClusterKind, FootprintStudy, FootprintSummary, GroupedTrades, KlineDataPoint, KlineTrades,
+        NPoc, PointOfControl,
     },
     liquidation_heatmap::{LiquidationHeatmap, LiquidationHeatmapConfig, interpolate_color_themed},
 };
@@ -107,21 +107,24 @@ impl Chart for KlineChart {
         // 2. Scripted panel indicators
         for instance in self.indicator_instances.instances() {
             let def = instance.kind.definition();
-            if def.attachment_mode != data::chart::kline::indicators::IndicatorAttachmentMode::Panel {
+            if def.attachment_mode != data::chart::kline::indicators::IndicatorAttachmentMode::Panel
+            {
                 continue;
             }
             if !def.supported_markets.is_empty() && !def.supported_markets.contains(&market) {
                 continue;
             }
             if let Some(cache) = self.script_panel_caches.get(&instance.id) {
-                elements.push(crate::chart::indicator::kline::scripted::render_scripted_panel_row(
-                    chart_state,
-                    cache,
-                    instance,
-                    &self.indicator_host,
-                    &self.data_source,
-                    earliest..=latest,
-                ));
+                elements.push(
+                    crate::chart::indicator::kline::scripted::render_scripted_panel_row(
+                        chart_state,
+                        cache,
+                        instance,
+                        &self.indicator_host,
+                        &self.data_source,
+                        earliest..=latest,
+                    ),
+                );
             }
         }
 
@@ -280,6 +283,7 @@ pub(crate) struct TpoCache {
     tick_size: f64,
     period: Option<data::chart::tpo::SessionPeriod>,
     sessions: HashMap<i64, TpoCacheEntry>,
+    pub(crate) trade_tpo_cache: data::chart::tpo::TradeTpoCache,
     pub(crate) session_ranges: Vec<TpoSessionRange>,
     pub(crate) context_menu: Option<TpoContextMenu>,
 }
@@ -287,6 +291,7 @@ pub(crate) struct TpoCache {
 impl TpoCache {
     pub(crate) fn clear(&mut self) {
         self.sessions.clear();
+        self.trade_tpo_cache.clear();
         self.session_ranges.clear();
         self.context_menu = None;
     }
@@ -349,7 +354,8 @@ pub struct KlineChart {
     // === Scripted Indicator Engine Subsystem ===
     pub indicator_instances: data::chart::kline::indicators::IndicatorInstanceStore,
     pub indicator_host: data::chart::kline::indicators::IndicatorHost,
-    pub script_panel_caches: rustc_hash::FxHashMap<data::chart::kline::indicators::IndicatorInstanceId, Caches>,
+    pub script_panel_caches:
+        rustc_hash::FxHashMap<data::chart::kline::indicators::IndicatorInstanceId, Caches>,
     // ===========================================
     fetching_trades: (bool, Vec<Handle>),
     active_trade_fetches: usize,
@@ -552,7 +558,8 @@ impl KlineChart {
                     data_source,
                     raw_trades,
                     indicators,
-                    indicator_instances: data::chart::kline::indicators::IndicatorInstanceStore::default(),
+                    indicator_instances:
+                        data::chart::kline::indicators::IndicatorInstanceStore::default(),
                     indicator_host: data::chart::kline::indicators::IndicatorHost::default(),
                     script_panel_caches: rustc_hash::FxHashMap::default(),
                     fetching_trades: (false, Vec::new()),
@@ -641,7 +648,8 @@ impl KlineChart {
                     data_source,
                     raw_trades,
                     indicators,
-                    indicator_instances: data::chart::kline::indicators::IndicatorInstanceStore::default(),
+                    indicator_instances:
+                        data::chart::kline::indicators::IndicatorInstanceStore::default(),
                     indicator_host: data::chart::kline::indicators::IndicatorHost::default(),
                     script_panel_caches: rustc_hash::FxHashMap::default(),
                     fetching_trades: (false, Vec::new()),
@@ -908,6 +916,9 @@ impl KlineChart {
                     | exchange::adapter::Exchange::OkexInverse => "okex",
                     exchange::adapter::Exchange::HyperliquidSpot
                     | exchange::adapter::Exchange::HyperliquidLinear => "hyperliquid",
+                    exchange::adapter::Exchange::MexcSpot
+                    | exchange::adapter::Exchange::MexcLinear
+                    | exchange::adapter::Exchange::MexcInverse => "mexc",
                 };
                 let trades_data_path =
                     data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -1462,6 +1473,13 @@ impl KlineChart {
     pub fn update_selected_drawing_width(&mut self, width: f32) {
         if let Some(d) = self.selected_drawing_mut() {
             d.width = width;
+            self.invalidate_all();
+        }
+    }
+
+    pub fn apply_template_to_selected(&mut self, template: &data::chart::drawing::DrawingTemplate) {
+        if let Some(d) = self.selected_drawing_mut() {
+            d.apply_template(template);
             self.invalidate_all();
         }
     }
@@ -2302,6 +2320,9 @@ impl KlineChart {
                 | exchange::adapter::Exchange::OkexInverse => "okex",
                 exchange::adapter::Exchange::HyperliquidSpot
                 | exchange::adapter::Exchange::HyperliquidLinear => "hyperliquid",
+                exchange::adapter::Exchange::MexcSpot
+                | exchange::adapter::Exchange::MexcLinear
+                | exchange::adapter::Exchange::MexcInverse => "mexc",
             };
             let trades_data_path =
                 data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -2421,6 +2442,32 @@ impl KlineChart {
             self.raw_trades.drain(..excess);
         }
 
+        if matches!(self.kind, KlineChartKind::Tpo { .. })
+            || self.indicators[KlineIndicator::Tpo].is_some()
+        {
+            let base_price = self.chart.base_price_y.to_f32_lossy() as f64;
+            let exchange_tick = self.chart.tick_size.to_f32_lossy() as f64;
+            let tick_step = match self.kind {
+                KlineChartKind::Tpo { tick_step, .. } => tick_step,
+                _ => data::chart::kline::TpoTickStep::Auto,
+            };
+            let tpo_tick = data::chart::tpo::calculate_tpo_tick_size(
+                base_price,
+                exchange_tick,
+                tick_step.multiplier(),
+            );
+            let anchor = match self.kind.effective_tpo_period() {
+                data::chart::tpo::SessionPeriod::Weekly => data::chart::tpo::TpoAnchor::Weekly,
+                data::chart::tpo::SessionPeriod::Monthly => data::chart::tpo::TpoAnchor::Monthly,
+                _ => data::chart::tpo::TpoAnchor::Daily,
+            };
+            let mut cache = self.tpo_cache.borrow_mut();
+            if cache.trade_tpo_cache.anchor() != anchor {
+                cache.trade_tpo_cache.set_anchor(anchor);
+            }
+            cache.trade_tpo_cache.on_trades(trades_buffer, tpo_tick);
+        }
+
         match self.data_source {
             PlotData::TickBased(ref mut tick_aggr) => {
                 let old_dp_len = tick_aggr.datapoints.len();
@@ -2454,9 +2501,16 @@ impl KlineChart {
                     }
                     if let Some(latest_acc) = tick_aggr.datapoints.last() {
                         let preview_idx = new_dp_len.saturating_sub(1);
-                        let preview_frame = data::chart::kline::indicators::kline_to_indicator_frame_with_context(
-                            preview_idx, &latest_acc.kline, Some(&latest_acc.footprint), None, basis, min_tick, true,
-                        );
+                        let preview_frame =
+                            data::chart::kline::indicators::kline_to_indicator_frame_with_context(
+                                preview_idx,
+                                &latest_acc.kline,
+                                Some(&latest_acc.footprint),
+                                None,
+                                basis,
+                                min_tick,
+                                true,
+                            );
                         self.indicator_host.preview_open(&preview_frame);
                     }
                 }
@@ -2504,18 +2558,25 @@ impl KlineChart {
                                 .enumerate()
                             {
                                 let idx = start_idx + offset;
-                                let frame = data::chart::kline::indicators::datapoint_to_indicator_frame(
-                                    idx, dp, None, basis, min_tick, true,
-                                );
+                                let frame =
+                                    data::chart::kline::indicators::datapoint_to_indicator_frame(
+                                        idx, dp, None, basis, min_tick, true,
+                                    );
                                 self.indicator_host.evaluate_closed(&frame);
                             }
                         }
                     }
                     if let Some(latest_dp) = timeseries.datapoints.values().last() {
                         let preview_idx = new_dp_len.saturating_sub(1);
-                        let preview_frame = data::chart::kline::indicators::datapoint_to_indicator_frame(
-                            preview_idx, latest_dp, None, basis, min_tick, true,
-                        );
+                        let preview_frame =
+                            data::chart::kline::indicators::datapoint_to_indicator_frame(
+                                preview_idx,
+                                latest_dp,
+                                None,
+                                basis,
+                                min_tick,
+                                true,
+                            );
                         self.indicator_host.preview_open(&preview_frame);
                     }
                 }
@@ -2634,6 +2695,9 @@ impl KlineChart {
                     | exchange::adapter::Exchange::OkexInverse => "okex",
                     exchange::adapter::Exchange::HyperliquidSpot
                     | exchange::adapter::Exchange::HyperliquidLinear => "hyperliquid",
+                    exchange::adapter::Exchange::MexcSpot
+                    | exchange::adapter::Exchange::MexcLinear
+                    | exchange::adapter::Exchange::MexcInverse => "mexc",
                 };
                 let trades_data_path =
                     data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -3142,7 +3206,8 @@ impl KlineChart {
             .iter()
             .filter(|inst| {
                 let def = inst.kind.definition();
-                def.attachment_mode == data::chart::kline::indicators::IndicatorAttachmentMode::Panel
+                def.attachment_mode
+                    == data::chart::kline::indicators::IndicatorAttachmentMode::Panel
                     && (def.supported_markets.is_empty() || def.supported_markets.contains(&market))
             })
             .count();
@@ -4737,6 +4802,35 @@ impl canvas::Program<Message> for KlineChart {
                             },
                         );
                     }
+
+                    for study in studies {
+                        if let FootprintStudy::BigTrades {
+                            min_usd,
+                            min_radius,
+                            max_radius,
+                            scale,
+                            opacity,
+                        } = study
+                        {
+                            let big_cfg = data::chart::kline::BigTradesConfig {
+                                min_usd: *min_usd,
+                                min_radius: *min_radius,
+                                max_radius: *max_radius,
+                                scale: *scale,
+                                opacity: *opacity,
+                            };
+                            crate::widget::chart::big_trades::draw_big_trades_overlay(
+                                frame,
+                                &self.raw_trades,
+                                earliest,
+                                latest,
+                                &interval_to_x,
+                                &price_to_y,
+                                palette,
+                                &big_cfg,
+                            );
+                        }
+                    }
                 }
                 KlineChartKind::Candles => {
                     let candle_width = chart.cell_width * 0.8;
@@ -6232,9 +6326,7 @@ fn draw_clusters(
         );
     }
 
-    if show_footprint_summary
-        && let Some(summary) = FootprintSummary::from_trades(footprint)
-    {
+    if show_footprint_summary && let Some(summary) = FootprintSummary::from_trades(footprint) {
         let summary_layout = FootprintSummaryLayout::new(cell_height, scaling);
         let summary_x = match cluster_kind {
             ClusterKind::Table => {
@@ -7171,6 +7263,10 @@ fn prepare_tpo_profiles(
         cache.tick_size = tpo_tick;
         cache.period = Some(effective_period);
         cache.sessions.clear();
+        if let Ok(anchor) = data::chart::tpo::TpoAnchor::try_from(effective_period) {
+            cache.trade_tpo_cache.set_anchor(anchor);
+        }
+        cache.trade_tpo_cache.set_tick_size(tpo_tick);
     }
     cache.session_ranges.clear();
 
@@ -7267,7 +7363,19 @@ fn prepare_tpo_profiles(
                 p
             };
 
-        raw_profiles.push((*profile).clone());
+        let final_profile =
+            if let Some(trade_prof) = cache.trade_tpo_cache.session_profile(session_start) {
+                if !trade_prof.matrix.is_empty() {
+                    data::chart::tpo::merge_tpo_profiles(&[(*profile).clone(), trade_prof.clone()])
+                        .unwrap_or_else(|| (*profile).clone())
+                } else {
+                    (*profile).clone()
+                }
+            } else {
+                (*profile).clone()
+            };
+
+        raw_profiles.push(final_profile);
     }
 
     // Resolve clusters
@@ -7826,28 +7934,23 @@ fn draw_vwap_overlay(
     let mut candles: Vec<(i64, f64, f64)> = Vec::new();
     match data_source {
         PlotData::TimeBased(ts) => {
-            for (time, dp) in &ts.datapoints {
-                if *time >= earliest && *time <= latest {
-                    let tp = (dp.kline.high.to_f32()
-                        + dp.kline.low.to_f32()
-                        + dp.kline.close.to_f32()) as f64
-                        / 3.0;
-                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
-                    candles.push((*time as i64, tp, vol));
-                }
+            for (time, dp) in ts.datapoints.range(earliest..=latest) {
+                let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
+                    as f64
+                    / 3.0;
+                let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                candles.push((*time as i64, tp, vol));
             }
         }
         PlotData::TickBased(ta) => {
-            for dp in &ta.datapoints {
-                let time = dp.kline.time;
-                if time >= earliest && time <= latest {
-                    let tp = (dp.kline.high.to_f32()
-                        + dp.kline.low.to_f32()
-                        + dp.kline.close.to_f32()) as f64
-                        / 3.0;
-                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
-                    candles.push((dp.kline.time as i64, tp, vol));
-                }
+            let start_idx = ta.datapoints.partition_point(|dp| dp.kline.time < earliest);
+            let end_idx = ta.datapoints.partition_point(|dp| dp.kline.time <= latest);
+            for dp in &ta.datapoints[start_idx..end_idx] {
+                let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
+                    as f64
+                    / 3.0;
+                let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                candles.push((dp.kline.time as i64, tp, vol));
             }
         }
     }
@@ -8052,28 +8155,27 @@ fn draw_rolling_vwap_overlay(
 
         match data_source {
             PlotData::TimeBased(ts) => {
-                for (time, dp) in &ts.datapoints {
-                    if *time >= fetch_earliest && *time <= latest {
-                        let tp = (dp.kline.high.to_f32()
-                            + dp.kline.low.to_f32()
-                            + dp.kline.close.to_f32()) as f64
-                            / 3.0;
-                        let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
-                        candles.push((*time as i64, tp, vol));
-                    }
+                for (time, dp) in ts.datapoints.range(fetch_earliest..=latest) {
+                    let tp = (dp.kline.high.to_f32()
+                        + dp.kline.low.to_f32()
+                        + dp.kline.close.to_f32()) as f64
+                        / 3.0;
+                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                    candles.push((*time as i64, tp, vol));
                 }
             }
             PlotData::TickBased(ta) => {
-                for dp in &ta.datapoints {
-                    let time = dp.kline.time;
-                    if time >= fetch_earliest && time <= latest {
-                        let tp = (dp.kline.high.to_f32()
-                            + dp.kline.low.to_f32()
-                            + dp.kline.close.to_f32()) as f64
-                            / 3.0;
-                        let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
-                        candles.push((dp.kline.time as i64, tp, vol));
-                    }
+                let start_idx = ta
+                    .datapoints
+                    .partition_point(|dp| dp.kline.time < fetch_earliest);
+                let end_idx = ta.datapoints.partition_point(|dp| dp.kline.time <= latest);
+                for dp in &ta.datapoints[start_idx..end_idx] {
+                    let tp = (dp.kline.high.to_f32()
+                        + dp.kline.low.to_f32()
+                        + dp.kline.close.to_f32()) as f64
+                        / 3.0;
+                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                    candles.push((dp.kline.time as i64, tp, vol));
                 }
             }
         }
@@ -10204,6 +10306,38 @@ mod tests {
         chart.delete_drawing(d_locked.id);
         assert!(chart.drawings.is_empty());
         assert!(chart.selected_drawing().is_none());
+    }
+
+    #[test]
+    fn test_task24_drawing_templates_application_and_presets() {
+        use data::chart::drawing::{Drawing, DrawingTemplate, DrawingTemplateStore};
+
+        let mut chart = make_test_chart();
+        let d = Drawing::horizontal(50000.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let d_id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(d_id));
+
+        // Builtin presets check
+        let presets = DrawingTemplateStore::all();
+        assert!(!presets.is_empty());
+        let cyan_preset = presets
+            .iter()
+            .find(|p| p.name == "Cyan Accent")
+            .expect("Cyan Accent preset missing");
+
+        // Apply template
+        chart.apply_template_to_selected(cyan_preset);
+        let selected = chart.selected_drawing().unwrap();
+        assert_eq!(selected.color, [0.0, 0.85, 1.0, 1.0]);
+        assert_eq!(selected.width, 2.0);
+
+        // Apply custom template
+        let custom = DrawingTemplate::new("Custom Purple", [0.7, 0.2, 0.9, 0.9], 4.0);
+        chart.apply_template_to_selected(&custom);
+        let selected2 = chart.selected_drawing().unwrap();
+        assert_eq!(selected2.color, [0.7, 0.2, 0.9, 0.9]);
+        assert_eq!(selected2.width, 4.0);
     }
 
     #[test]
@@ -13193,7 +13327,12 @@ mod tests {
         // Verify footprint integrity
         if let PlotData::TimeBased(ref ts) = chart.data_source {
             let dp = ts.datapoints.get(&start_time).unwrap();
-            let vol: f32 = dp.footprint.trades.values().map(|b| b.buy_qty + b.sell_qty).sum();
+            let vol: f32 = dp
+                .footprint
+                .trades
+                .values()
+                .map(|b| b.buy_qty + b.sell_qty)
+                .sum();
             assert_eq!(vol, 5.0, "Footprint trades volume must be preserved");
         }
 
@@ -13205,6 +13344,93 @@ mod tests {
 
         // Output should not exist past cutoff
         let val_1 = chart.indicator_host.output_value_for(rsi_id, "value", 1);
-        assert_eq!(val_1, None, "Frame past replay cutoff must not have evaluated output");
+        assert_eq!(
+            val_1, None,
+            "Frame past replay cutoff must not have evaluated output"
+        );
+    }
+
+    #[test]
+    fn test_ter11_vwap_range_scan_datapoints() {
+        use exchange::unit::Price;
+        use std::collections::BTreeMap;
+
+        // 1. TimeBased range scan verification
+        let mut datapoints: BTreeMap<u64, KlineDataPoint> = BTreeMap::new();
+        for i in 0..10_000u64 {
+            let t = 1_000_000 + i * 60_000;
+            let kline = Kline {
+                time: t,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(90.0),
+                close: Price::from_f32(105.0),
+                volume: (50.0, 50.0),
+            };
+            datapoints.insert(
+                t,
+                KlineDataPoint {
+                    kline,
+                    footprint: Default::default(),
+                    trades_fetched: false,
+                },
+            );
+        }
+
+        let earliest = 1_000_000 + 500 * 60_000;
+        let latest = 1_000_000 + 550 * 60_000;
+
+        let scanned: Vec<(i64, f64, f64)> = datapoints
+            .range(earliest..=latest)
+            .map(|(t, dp)| {
+                let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
+                    as f64
+                    / 3.0;
+                let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                (*t as i64, tp, vol)
+            })
+            .collect();
+
+        assert_eq!(scanned.len(), 51);
+        assert_eq!(scanned.first().unwrap().0, earliest as i64);
+        assert_eq!(scanned.last().unwrap().0, latest as i64);
+
+        // 2. TickBased binary search partition_point verification
+        let mut tick_datapoints: Vec<KlineDataPoint> = Vec::with_capacity(10_000);
+        for i in 0..10_000u64 {
+            let t = 1_000_000 + i * 60_000;
+            let kline = Kline {
+                time: t,
+                open: Price::from_f32(100.0),
+                high: Price::from_f32(110.0),
+                low: Price::from_f32(90.0),
+                close: Price::from_f32(105.0),
+                volume: (50.0, 50.0),
+            };
+            tick_datapoints.push(KlineDataPoint {
+                kline,
+                footprint: Default::default(),
+                trades_fetched: false,
+            });
+        }
+
+        let start_idx = tick_datapoints.partition_point(|dp| dp.kline.time < earliest);
+        let end_idx = tick_datapoints.partition_point(|dp| dp.kline.time <= latest);
+        assert_eq!(start_idx, 500);
+        assert_eq!(end_idx, 551);
+
+        let tick_scanned: Vec<(i64, f64, f64)> = tick_datapoints[start_idx..end_idx]
+            .iter()
+            .map(|dp| {
+                let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
+                    as f64
+                    / 3.0;
+                let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                (dp.kline.time as i64, tp, vol)
+            })
+            .collect();
+
+        assert_eq!(tick_scanned.len(), 51);
+        assert_eq!(scanned, tick_scanned);
     }
 }

@@ -5,23 +5,26 @@ use crate::chart::kline::indicators::adapter::{
 use crate::chart::kline::indicators::core::IndicatorHost;
 use crate::chart::kline::indicators::instance::IndicatorInstanceStore;
 use crate::chart::kline::indicators::loader::initialize_indicator_catalog;
-use crate::chart::kline::indicators::registry::{
-    IndicatorConfig, IndicatorId, catalog,
-};
+use crate::chart::kline::indicators::registry::{IndicatorConfig, IndicatorId, catalog};
 use crate::chart::kline::indicators::scripting::ScriptIndicatorRuntime;
 use crate::chart::kline::{KlineDataPoint, KlineTrades};
 use exchange::Kline;
 use exchange::util::{Price, PriceStep};
-use indicator_engine::{
-    BaseSeriesSource, RuntimeError, TimeOrTick,
-};
+use indicator_engine::{BaseSeriesSource, RuntimeError, TimeOrTick};
 use std::sync::Arc;
 
 fn ensure_catalog() {
     let _ = initialize_indicator_catalog();
 }
 
-fn create_kline(index: usize, open: f64, high: f64, low: f64, close: f64, vol: (f32, f32)) -> Kline {
+fn create_kline(
+    index: usize,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    vol: (f32, f32),
+) -> Kline {
     Kline {
         time: 1_700_000_000_000 + (index as u64 * 60_000),
         open: Price::from_f64(open),
@@ -199,7 +202,11 @@ fn test_lifecycle_high_frequency_preview_zero_leak_benchmark() {
         runtime.preview_open(&frame);
     }
     let elapsed = start.elapsed();
-    assert!(elapsed.as_millis() < 500, "1,000 preview ticks took {:?}", elapsed);
+    assert!(
+        elapsed.as_millis() < 500,
+        "1,000 preview ticks took {:?}",
+        elapsed
+    );
     assert!(runtime.output_value("value", 100).is_some());
 }
 
@@ -236,26 +243,42 @@ fn test_lifecycle_candle_close_and_rollover() {
 fn test_warmup_analysis_core_indicators() {
     ensure_catalog();
 
-    let rsi_reg = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let rsi_warmup = rsi_reg.compiled.warmup_bars(&indicator_engine::IndicatorConfig::default());
+    let rsi_reg = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let rsi_warmup = rsi_reg
+        .compiled
+        .warmup_bars(&indicator_engine::IndicatorConfig::default());
     assert_eq!(rsi_warmup, Some(26));
 
-    let bb_reg = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
-    let bb_warmup = bb_reg.compiled.warmup_bars(&indicator_engine::IndicatorConfig::default());
+    let bb_reg = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
+    let bb_warmup = bb_reg
+        .compiled
+        .warmup_bars(&indicator_engine::IndicatorConfig::default());
     assert_eq!(bb_warmup, Some(20));
 
-    let ma_reg = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
-    let ma_warmup = ma_reg.compiled.warmup_bars(&indicator_engine::IndicatorConfig::default());
+    let ma_reg = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
+    let ma_warmup = ma_reg
+        .compiled
+        .warmup_bars(&indicator_engine::IndicatorConfig::default());
     assert_eq!(ma_warmup, Some(250));
 
-    let avwap_reg = catalog().get(&IndicatorId::new("core.anchored-vwap").unwrap()).unwrap();
+    let avwap_reg = catalog()
+        .get(&IndicatorId::new("core.anchored-vwap").unwrap())
+        .unwrap();
     assert!(avwap_reg.compiled.requires_anchored_history());
 }
 
 #[test]
 fn test_warmup_dynamic_config_recalculation() {
     ensure_catalog();
-    let rsi_reg = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let rsi_reg = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
 
     let mut values = std::collections::BTreeMap::new();
     values.insert("period".to_owned(), indicator_engine::InputValue::Int(50));
@@ -264,7 +287,10 @@ fn test_warmup_dynamic_config_recalculation() {
 
     let mut values2 = std::collections::BTreeMap::new();
     values2.insert("period".to_owned(), indicator_engine::InputValue::Int(50));
-    values2.insert("ema_period".to_owned(), indicator_engine::InputValue::Int(21));
+    values2.insert(
+        "ema_period".to_owned(),
+        indicator_engine::InputValue::Int(21),
+    );
     let cfg50_21 = indicator_engine::IndicatorConfig { values: values2 };
     assert_eq!(rsi_reg.compiled.warmup_bars(&cfg50_21), Some(72));
 }
@@ -272,10 +298,15 @@ fn test_warmup_dynamic_config_recalculation() {
 #[test]
 fn test_warmup_window_clamping_to_runtime_limits() {
     ensure_catalog();
-    let rsi_reg = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
+    let rsi_reg = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
 
     let mut values = std::collections::BTreeMap::new();
-    values.insert("period".to_owned(), indicator_engine::InputValue::Int(100_000));
+    values.insert(
+        "period".to_owned(),
+        indicator_engine::InputValue::Int(100_000),
+    );
     let huge_cfg = indicator_engine::IndicatorConfig { values };
     let warmup = rsi_reg.compiled.warmup_bars(&huge_cfg).unwrap();
     assert!((5_000..=5_050).contains(&warmup));
@@ -293,7 +324,9 @@ format(precision = "fixed_step:1")
 plot(ta.sma(chart.close, 50))
 "#;
     let compiled = indicator_engine::compile(script, std::path::Path::new("test.ind")).unwrap();
-    let mut instance = compiled.instantiate(indicator_engine::IndicatorConfig::default()).unwrap();
+    let mut instance = compiled
+        .instantiate(indicator_engine::IndicatorConfig::default())
+        .unwrap();
 
     for i in 0..1_000 {
         let kline = create_kline(i, 100.0, 101.0, 99.0, 100.0, (10.0, 10.0));
@@ -399,13 +432,21 @@ fn test_rsi_numerical_accuracy_against_analytical_model() {
     let mut avg_loss = losses[1..=period].iter().sum::<f64>() / period as f64;
 
     let mut analytical_rsi = vec![None; 100];
-    let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+    let rs = if avg_loss == 0.0 {
+        100.0
+    } else {
+        avg_gain / avg_loss
+    };
     analytical_rsi[period] = Some(100.0 - (100.0 / (1.0 + rs)));
 
     for i in (period + 1)..100 {
         avg_gain = (avg_gain * (period as f64 - 1.0) + gains[i]) / period as f64;
         avg_loss = (avg_loss * (period as f64 - 1.0) + losses[i]) / period as f64;
-        let rs = if avg_loss == 0.0 { 100.0 } else { avg_gain / avg_loss };
+        let rs = if avg_loss == 0.0 {
+            100.0
+        } else {
+            avg_gain / avg_loss
+        };
         analytical_rsi[i] = Some(100.0 - (100.0 / (1.0 + rs)));
     }
 
@@ -470,9 +511,21 @@ fn test_bollinger_bands_geometry_and_invariants() {
         runtime.evaluate_closed(&frame);
     }
     for i in 20..100 {
-        let upper = runtime.output_value("bollinger.upper", i).unwrap().as_number().unwrap();
-        let basis = runtime.output_value("value", i).unwrap().as_number().unwrap();
-        let lower = runtime.output_value("bollinger.lower", i).unwrap().as_number().unwrap();
+        let upper = runtime
+            .output_value("bollinger.upper", i)
+            .unwrap()
+            .as_number()
+            .unwrap();
+        let basis = runtime
+            .output_value("value", i)
+            .unwrap()
+            .as_number()
+            .unwrap();
+        let lower = runtime
+            .output_value("bollinger.lower", i)
+            .unwrap()
+            .as_number()
+            .unwrap();
         assert!((upper - basis).abs() < 1e-6);
         assert!((lower - basis).abs() < 1e-6);
     }
@@ -486,9 +539,15 @@ fn test_bollinger_bands_geometry_and_invariants() {
 fn test_host_multi_indicator_coexistence() {
     ensure_catalog();
     let mut instances = IndicatorInstanceStore::default();
-    let reg_rsi = catalog().get(&IndicatorId::new("core.rsi").unwrap()).unwrap();
-    let reg_bb = catalog().get(&IndicatorId::new("core.bollinger-bands").unwrap()).unwrap();
-    let reg_ma = catalog().get(&IndicatorId::new("core.moving-averages").unwrap()).unwrap();
+    let reg_rsi = catalog()
+        .get(&IndicatorId::new("core.rsi").unwrap())
+        .unwrap();
+    let reg_bb = catalog()
+        .get(&IndicatorId::new("core.bollinger-bands").unwrap())
+        .unwrap();
+    let reg_ma = catalog()
+        .get(&IndicatorId::new("core.moving-averages").unwrap())
+        .unwrap();
 
     let id_rsi = instances.create(reg_rsi.id.clone());
     let id_bb = instances.create(reg_bb.id.clone());

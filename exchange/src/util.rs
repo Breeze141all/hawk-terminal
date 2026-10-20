@@ -185,6 +185,56 @@ impl UnixMs {
             .as_millis() as u64;
         Self(ms)
     }
+
+    #[inline]
+    pub fn as_datetime_utc(self) -> Option<chrono::DateTime<chrono::Utc>> {
+        let millis = i64::try_from(self.0).ok()?;
+        chrono::DateTime::from_timestamp_millis(millis)
+    }
+
+    #[inline]
+    pub const fn saturating_add(self, delta_ms: u64) -> Self {
+        Self(self.0.saturating_add(delta_ms))
+    }
+
+    #[inline]
+    pub const fn saturating_sub(self, delta_ms: u64) -> Self {
+        Self(self.0.saturating_sub(delta_ms))
+    }
+
+    #[inline]
+    pub const fn checked_add(self, delta_ms: u64) -> Option<Self> {
+        match self.0.checked_add(delta_ms) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub const fn checked_sub(self, delta_ms: u64) -> Option<Self> {
+        match self.0.checked_sub(delta_ms) {
+            Some(v) => Some(Self(v)),
+            None => None,
+        }
+    }
+}
+
+impl std::ops::Add for UnixMs {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        self.saturating_add(rhs.0)
+    }
+}
+
+impl std::ops::Sub for UnixMs {
+    type Output = Self;
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self {
+        self.saturating_sub(rhs.0)
+    }
 }
 
 impl From<u64> for UnixMs {
@@ -221,6 +271,7 @@ pub struct Price {
 }
 
 impl Price {
+    pub const ZERO: Self = Self { units: 0 };
     /// number of decimal places of the atomic unit (10^-8)
     pub const PRICE_SCALE: i32 = 8;
 
@@ -355,6 +406,24 @@ impl Price {
             self.floor_to_step(step)
         } else {
             self.ceil_to_step(step)
+        }
+    }
+
+    /// Difference of two prices, saturating instead of panicking on overflow
+    pub fn saturating_sub(self, rhs: Self) -> Self {
+        Self {
+            units: self.units.saturating_sub(rhs.units),
+        }
+    }
+
+    /// Normalized position of `self` within `[low, high]`: `0.0` at `low`,
+    /// `1.0` at `high`. Returns `0.0` for an empty range.
+    pub fn ratio_in_range(self, low: Self, high: Self) -> f64 {
+        let range = high.units.saturating_sub(low.units);
+        if range == 0 {
+            0.0
+        } else {
+            self.units.saturating_sub(low.units) as f64 / range as f64
         }
     }
 

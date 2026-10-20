@@ -8,7 +8,6 @@ pub use iced::window::{Id, Position, Screenshot, Settings, close, open, screensh
 // Windows popout rendering can freeze, enable when upstream rendering is fixed.
 pub const MULTI_WINDOW_SUPPORTED: bool = !cfg!(target_os = "windows");
 
-
 pub fn copy_screenshot_to_clipboard(screenshot: &Screenshot) -> Result<(), String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     let image_data = arboard::ImageData {
@@ -176,4 +175,3 @@ mod tests {
         );
     }
 }
-

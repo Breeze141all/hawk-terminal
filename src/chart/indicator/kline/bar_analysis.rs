@@ -65,15 +65,19 @@ impl BarAnalysisIndicator {
         match source {
             PlotData::TimeBased(timeseries) => {
                 for (timestamp, dp) in &timeseries.datapoints {
-                    let summary = FootprintSummary::from_trades(&dp.footprint)
-                        .unwrap_or_else(|| FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1));
+                    let summary =
+                        FootprintSummary::from_trades(&dp.footprint).unwrap_or_else(|| {
+                            FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1)
+                        });
                     self.data.insert(*timestamp, summary);
                 }
             }
             PlotData::TickBased(tickseries) => {
                 for (idx, dp) in tickseries.datapoints.iter().enumerate() {
-                    let summary = FootprintSummary::from_trades(&dp.footprint)
-                        .unwrap_or_else(|| FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1));
+                    let summary =
+                        FootprintSummary::from_trades(&dp.footprint).unwrap_or_else(|| {
+                            FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1)
+                        });
                     self.data.insert(idx as u64, summary);
                 }
             }
@@ -367,14 +371,8 @@ impl canvas::Program<Message> for BarAnalysisCanvas<'_> {
 
                     let mut rows: Vec<(String, Color)> = Vec::with_capacity(5);
                     if self.settings.show_buy_sell {
-                        rows.push((
-                            abbr_large_numbers(row.buy),
-                            palette.success.base.color,
-                        ));
-                        rows.push((
-                            abbr_large_numbers(row.sell),
-                            palette.danger.base.color,
-                        ));
+                        rows.push((abbr_large_numbers(row.buy), palette.success.base.color));
+                        rows.push((abbr_large_numbers(row.sell), palette.danger.base.color));
                     }
                     if self.settings.show_volume {
                         rows.push((
@@ -401,10 +399,7 @@ impl canvas::Program<Message> for BarAnalysisCanvas<'_> {
                         draw_text(
                             frame,
                             label,
-                            Point::new(
-                                column_left + column_width / 2.0,
-                                row_y + row_height / 2.0,
-                            ),
+                            Point::new(column_left + column_width / 2.0, row_y + row_height / 2.0),
                             text_size,
                             *color,
                         );
@@ -475,7 +470,8 @@ mod tests {
         assert!((summary.delta_pct - 20.0).abs() < 1e-4);
 
         let step = PriceStep::from_f32(1.0);
-        let mut timeseries = data::aggr::time::TimeSeries::<KlineDataPoint>::new(exchange::Timeframe::M1, step, &[]);
+        let mut timeseries =
+            data::aggr::time::TimeSeries::<KlineDataPoint>::new(exchange::Timeframe::M1, step, &[]);
         let simulated_footprint = KlineTrades::simulate_from_kline(&kline, step);
         timeseries.datapoints.insert(
             kline.time,
@@ -493,4 +489,3 @@ mod tests {
         assert!((rebuilt.total - 100.0).abs() < 1e-1);
     }
 }
-

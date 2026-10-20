@@ -143,8 +143,12 @@ impl<D: DataPoint> TimeSeries<D> {
     }
 
     /// Ensures a datapoint bucket exists at `rounded_t` and ingests all trades into it.
-    pub fn ingest_trades_bucket(&mut self, rounded_t: u64, trades: &[exchange::Trade], step: exchange::util::PriceStep)
-    where
+    pub fn ingest_trades_bucket(
+        &mut self,
+        rounded_t: u64,
+        trades: &[exchange::Trade],
+        step: exchange::util::PriceStep,
+    ) where
         D: Default,
     {
         let bucket = self.datapoints.entry(rounded_t).or_default();
@@ -182,7 +186,8 @@ impl<D: DataPoint> TimeSeries<D> {
         }
 
         if missing_count > 0 {
-            let mut missing_keys = Vec::with_capacity(((latest - earliest) / interval) as usize);
+            let initial_cap = std::cmp::min(64, ((latest - earliest) / interval) as usize);
+            let mut missing_keys = Vec::with_capacity(initial_cap);
             let mut time = earliest;
 
             while time < latest {
@@ -328,6 +333,8 @@ impl TimeSeries<KlineDataPoint> {
                 data_point.calculate_poc();
             }
         }
+
+        self.enforce_retention_limit();
     }
 
     pub fn insert_trades_existing_buckets(&mut self, buffer: &[Trade]) {
@@ -566,6 +573,8 @@ impl TimeSeries<KlineDataPoint> {
                 data_point.calculate_poc();
             }
         }
+
+        self.enforce_retention_limit();
     }
 
     pub fn change_tick_size(&mut self, tick_size: f32, raw_trades: &[Trade]) {
@@ -2123,6 +2132,30 @@ mod tests {
         );
         let earliest_key = ts.datapoints.keys().next().copied().unwrap();
         assert_eq!(earliest_key, 51 * 60_000);
+    }
+
+    #[test]
+    fn test_ter10_timeseries_realtime_trades_retention_limit() {
+        let step = PriceStep::from_f32(1.0);
+        let interval = Timeframe::M1;
+        let mut ts = TimeSeries::<KlineDataPoint>::new(interval, step, &[]);
+
+        let count = TimeSeries::<KlineDataPoint>::MAX_RETAINED_DATAPOINTS + 5;
+        let trades: Vec<Trade> = (0..count)
+            .map(|i| Trade {
+                time: (i as u64 + 1) * 60_000,
+                price: Price::from_f32(100.0),
+                qty: 1.0,
+                is_sell: false,
+            })
+            .collect();
+
+        ts.insert_realtime_trades(&trades);
+
+        assert_eq!(
+            ts.datapoints.len(),
+            TimeSeries::<KlineDataPoint>::MAX_RETAINED_DATAPOINTS
+        );
     }
 
     #[test]

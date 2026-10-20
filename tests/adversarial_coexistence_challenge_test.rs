@@ -1,7 +1,7 @@
 use data::aggr::time::TimeSeries;
 use data::chart::kline::indicators::{
-    datapoint_to_indicator_frame, initialize_indicator_catalog, kline_to_indicator_frame,
     IndicatorHost, IndicatorId, IndicatorInstanceStore, IndicatorOutputRef,
+    datapoint_to_indicator_frame, initialize_indicator_catalog, kline_to_indicator_frame,
 };
 use data::chart::kline::{KlineDataPoint, KlineTrades};
 use exchange::adapter::Exchange;
@@ -81,7 +81,8 @@ fn test_adversarial_footprint_cluster_deep_immutability_250_levels() {
         last_time: u64,
     }
 
-    let mut snapshot: std::collections::BTreeMap<Price, BinSnapshot> = std::collections::BTreeMap::new();
+    let mut snapshot: std::collections::BTreeMap<Price, BinSnapshot> =
+        std::collections::BTreeMap::new();
     for (price, bin) in &footprint.trades {
         snapshot.insert(
             *price,
@@ -105,7 +106,10 @@ fn test_adversarial_footprint_cluster_deep_immutability_250_levels() {
             100.0 + (total_levels as f64) * 0.5,
             99.0,
             100.0 + 125.0 * 0.5,
-            (initial_summary.buy_qty as f32, initial_summary.sell_qty as f32),
+            (
+                initial_summary.buy_qty as f32,
+                initial_summary.sell_qty as f32,
+            ),
         ),
         footprint,
         trades_fetched: true,
@@ -190,11 +194,20 @@ fn test_adversarial_footprint_cluster_deep_immutability_250_levels() {
     );
 
     // 3. Trade aggregate summary bit-for-bit identity
-    let post_summary = dp.footprint.trade_summary().expect("Post summary must exist");
+    let post_summary = dp
+        .footprint
+        .trade_summary()
+        .expect("Post summary must exist");
     assert_eq!(post_summary.buy_count, initial_summary.buy_count);
     assert_eq!(post_summary.sell_count, initial_summary.sell_count);
-    assert_eq!(post_summary.buy_qty.to_bits(), initial_summary.buy_qty.to_bits());
-    assert_eq!(post_summary.sell_qty.to_bits(), initial_summary.sell_qty.to_bits());
+    assert_eq!(
+        post_summary.buy_qty.to_bits(),
+        initial_summary.buy_qty.to_bits()
+    );
+    assert_eq!(
+        post_summary.sell_qty.to_bits(),
+        initial_summary.sell_qty.to_bits()
+    );
 
     // 4. Deep verify all 250 price bins
     for (price, expected_bin) in snapshot {
@@ -291,7 +304,9 @@ fn test_adversarial_replay_isolation_step_backward_zero_future_leakage() {
     let inst_rsi = store.create(rsi_id);
     let inst_ma = store.create(ma_id.clone());
 
-    let reg_ma = data::chart::kline::indicators::catalog().get(&ma_id).unwrap();
+    let reg_ma = data::chart::kline::indicators::catalog()
+        .get(&ma_id)
+        .unwrap();
     let mut cfg_ma = reg_ma.default_config();
     cfg_ma.set("fast_period", 5i64);
     store.update_config(inst_ma, cfg_ma);
@@ -420,7 +435,8 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover() {
         initial_klines.push(make_candle(t, p, p + 1.0, p - 1.0, p + 0.2, (20.0, 20.0)));
     }
 
-    let mut ts = TimeSeries::<KlineDataPoint>::new(timeframe, step, &initial_klines).with_exchange(Exchange::BinanceSpot);
+    let mut ts = TimeSeries::<KlineDataPoint>::new(timeframe, step, &initial_klines)
+        .with_exchange(Exchange::BinanceSpot);
 
     let mut store = IndicatorInstanceStore::default();
     let rsi_id = IndicatorId::parse("core.rsi").unwrap();
@@ -428,7 +444,9 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover() {
     let inst_rsi = store.create(rsi_id);
     let inst_ma = store.create(ma_id.clone());
 
-    let reg_ma = data::chart::kline::indicators::catalog().get(&ma_id).unwrap();
+    let reg_ma = data::chart::kline::indicators::catalog()
+        .get(&ma_id)
+        .unwrap();
     let mut cfg_ma = reg_ma.default_config();
     cfg_ma.set("fast_period", 5i64);
     store.update_config(inst_ma, cfg_ma);
@@ -534,12 +552,20 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover() {
     );
 
     let active_dp = ts.datapoints.values().last().unwrap();
-    let fp_vol: f32 = active_dp.footprint.trades.values().map(|b| b.buy_qty + b.sell_qty).sum();
+    let fp_vol: f32 = active_dp
+        .footprint
+        .trades
+        .values()
+        .map(|b| b.buy_qty + b.sell_qty)
+        .sum();
     assert!(
         (fp_vol - total_active_volume).abs() < 1e-2,
         "Footprint volume {fp_vol} must match total trade volume {total_active_volume}"
     );
-    assert!(active_dp.footprint.poc.is_some(), "Active bar must have valid POC");
+    assert!(
+        active_dp.footprint.poc.is_some(),
+        "Active bar must have valid POC"
+    );
 
     // Indicator memory check: Host must remain healthy without quarantine
     let diagnostic = host.diagnostic_for(inst_rsi);
@@ -571,7 +597,8 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover_clean_life
         initial_klines.push(make_candle(t, p, p + 1.0, p - 1.0, p + 0.2, (20.0, 20.0)));
     }
 
-    let mut ts = TimeSeries::<KlineDataPoint>::new(timeframe, step, &initial_klines).with_exchange(Exchange::BinanceSpot);
+    let mut ts = TimeSeries::<KlineDataPoint>::new(timeframe, step, &initial_klines)
+        .with_exchange(Exchange::BinanceSpot);
 
     let mut store = IndicatorInstanceStore::default();
     let rsi_id = IndicatorId::parse("core.rsi").unwrap();
@@ -579,7 +606,9 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover_clean_life
     let inst_rsi = store.create(rsi_id);
     let inst_ma = store.create(ma_id.clone());
 
-    let reg_ma = data::chart::kline::indicators::catalog().get(&ma_id).unwrap();
+    let reg_ma = data::chart::kline::indicators::catalog()
+        .get(&ma_id)
+        .unwrap();
     let mut cfg_ma = reg_ma.default_config();
     cfg_ma.set("fast_period", 5i64);
     store.update_config(inst_ma, cfg_ma);
@@ -673,16 +702,33 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover_clean_life
 
     assert_eq!(ts.datapoints.len(), hist_count + 1);
     let active_dp = ts.datapoints.values().last().unwrap();
-    let fp_vol: f32 = active_dp.footprint.trades.values().map(|b| b.buy_qty + b.sell_qty).sum();
+    let fp_vol: f32 = active_dp
+        .footprint
+        .trades
+        .values()
+        .map(|b| b.buy_qty + b.sell_qty)
+        .sum();
     assert!(
         (fp_vol - total_active_volume).abs() < 1e-2,
         "Footprint volume {fp_vol} must match total trade volume {total_active_volume}"
     );
-    assert!(active_dp.footprint.poc.is_some(), "Active bar must have valid POC");
+    assert!(
+        active_dp.footprint.poc.is_some(),
+        "Active bar must have valid POC"
+    );
 
-    assert!(host.diagnostic_for(inst_rsi).is_none(), "RSI must not be quarantined");
-    assert!(host.output_value_for(inst_rsi, "value", hist_count).is_some());
-    assert!(host.output_value_for(inst_ma, "value", hist_count).is_some());
+    assert!(
+        host.diagnostic_for(inst_rsi).is_none(),
+        "RSI must not be quarantined"
+    );
+    assert!(
+        host.output_value_for(inst_rsi, "value", hist_count)
+            .is_some()
+    );
+    assert!(
+        host.output_value_for(inst_ma, "value", hist_count)
+            .is_some()
+    );
 
     // ------------------------------------------------------------------------
     // Part B: Rapid Rollover Storm — 100 Consecutive Candle Rollovers (10,000 trades)
@@ -777,22 +823,13 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover_clean_life
             dp.kline.high,
             dp.kline.low
         );
-        assert!(
-            dp.kline.high >= dp.kline.open,
-            "Bar at {time}: high < open"
-        );
+        assert!(dp.kline.high >= dp.kline.open, "Bar at {time}: high < open");
         assert!(
             dp.kline.high >= dp.kline.close,
             "Bar at {time}: high < close"
         );
-        assert!(
-            dp.kline.low <= dp.kline.open,
-            "Bar at {time}: low > open"
-        );
-        assert!(
-            dp.kline.low <= dp.kline.close,
-            "Bar at {time}: low > close"
-        );
+        assert!(dp.kline.low <= dp.kline.open, "Bar at {time}: low > open");
+        assert!(dp.kline.low <= dp.kline.close, "Bar at {time}: low > close");
         if !dp.footprint.trades.is_empty() {
             assert!(
                 dp.footprint.poc.is_some(),
@@ -803,7 +840,10 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover_clean_life
 
     // Verify all 101 bars with streaming trades have calculated POC
     for dp in ts.datapoints.values().skip(hist_count) {
-        assert!(dp.footprint.poc.is_some(), "Streaming bar must have calculated POC");
+        assert!(
+            dp.footprint.poc.is_some(),
+            "Streaming bar must have calculated POC"
+        );
     }
 
     // 2. Indicators evaluated properly across all 121 bars without quarantine

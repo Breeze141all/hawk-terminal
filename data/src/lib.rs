@@ -20,10 +20,10 @@ pub use audio::AudioStream;
 #[cfg(feature = "volume-search")]
 pub use chart::volume_search;
 pub use config::ScaleFactor;
-pub use config::network::{Network, TradeFetchMode};
 pub use config::bundle::{
     BundleMetadata, BundlePayload, BundleValidationError, ConfigBundle, ExportType, WorkspaceBundle,
 };
+pub use config::network::{Network, TradeFetchMode};
 pub use config::sidebar::{self, Sidebar};
 pub use config::state::{
     DEFAULT_HAWK_STATE_JSON, Layouts, State, default_hawk_layout, default_state,
@@ -111,9 +111,28 @@ pub fn save_export_file(json: &str, file_name: &str) -> std::io::Result<PathBuf>
 }
 
 pub use chart::alert::AlertStore;
-pub use chart::drawing::{DrawingRecord, DrawingStore};
+pub use chart::drawing::{DrawingRecord, DrawingStore, DrawingTemplate, DrawingTemplateStore};
 
 pub const DRAWINGS_PATH: &str = "drawings.json";
+pub const DRAWING_TEMPLATES_PATH: &str = "drawing-templates.json";
+
+pub fn save_drawing_templates(templates: &[chart::drawing::DrawingTemplate]) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(templates)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_json_to_file(&json, DRAWING_TEMPLATES_PATH)
+}
+
+pub fn load_drawing_templates() -> Vec<chart::drawing::DrawingTemplate> {
+    let path = data_path(Some(DRAWING_TEMPLATES_PATH));
+    let Ok(mut file) = File::open(&path) else {
+        return Vec::new();
+    };
+    let mut contents = String::new();
+    if file.read_to_string(&mut contents).is_err() {
+        return Vec::new();
+    }
+    serde_json::from_str(&contents).unwrap_or_default()
+}
 
 pub fn save_drawings(drawings: &[chart::drawing::DrawingRecord]) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(drawings)

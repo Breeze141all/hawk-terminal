@@ -16,7 +16,7 @@ use crate::style;
 pub const DEFAULT_TIMEOUT: u64 = 8;
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Status {
     #[default]
     Primary,
@@ -26,14 +26,14 @@ pub enum Status {
     Warning,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Notification {
     Error(String),
     Info(String),
     Warn(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Toast {
     pub title: String,
     pub body: String,
@@ -55,6 +55,28 @@ impl Default for Toast {
 }
 
 impl Toast {
+    pub fn custom(title: impl Into<String>, body: impl Into<String>, status: Status) -> Self {
+        Self {
+            title: title.into(),
+            body: body.into(),
+            status,
+            closable: true,
+            persistent: false,
+        }
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub fn status(&self) -> Status {
+        self.status
+    }
+
     pub fn new(context: Notification) -> Self {
         let (title, body, status) = match context {
             Notification::Error(body) => ("Error".to_string(), body, Status::Danger),

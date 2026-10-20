@@ -22,7 +22,7 @@ use exchange::{
     Kline, PushFrequency, StreamPairKind, TickMultiplier, TickerInfo, Timeframe, Trade,
     adapter::{
         self, AdapterError, Exchange, PersistStreamKind, ResolvedStream, StreamConfig, StreamKind,
-        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, hyperliquid, okex,
+        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, hyperliquid, mexc, okex,
     },
     depth::Depth,
     fetcher::{FetchRange, FetchedData, NetOiInterval},
@@ -439,7 +439,8 @@ impl Dashboard {
                                                 pane::Content::Kline { .. }
                                             ) | (
                                                 data::layout::pane::VisualConfig::Heatmap(_),
-                                                pane::Content::Heatmap { .. } | pane::Content::ShaderHeatmap { .. }
+                                                pane::Content::Heatmap { .. }
+                                                    | pane::Content::ShaderHeatmap { .. }
                                             ) | (
                                                 data::layout::pane::VisualConfig::TimeAndSales(_),
                                                 pane::Content::TimeAndSales(_)
@@ -1665,7 +1666,7 @@ impl Dashboard {
                             }
                         }
                         pane::Content::TimeAndSales(Some(p)) if !trades_buffer.is_empty() => {
-                            p.insert_buffer(trades_buffer);
+                            p.insert_buffer_tagged(&stream.ticker_info(), trades_buffer);
                         }
                         pane::Content::Ladder(Some(panel)) if exact_match => {
                             panel.insert_buffers(depth_update_t, depth, trades_buffer);
@@ -1981,6 +1982,7 @@ fn request_fetch(
                     Exchange::BybitSpot | Exchange::BybitLinear | Exchange::BybitInverse => "bybit",
                     Exchange::OkexSpot | Exchange::OkexLinear | Exchange::OkexInverse => "okex",
                     Exchange::HyperliquidSpot | Exchange::HyperliquidLinear => "hyperliquid",
+                    Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => "mexc",
                 };
                 let data_path = data::data_path(Some(&format!("market_data/{exchange_folder}/")));
 
@@ -2375,6 +2377,11 @@ pub fn depth_subscription(
                 |cfg: &StreamConfig<TickerInfo>| okex::connect_market_stream(cfg.id, cfg.push_freq);
             Subscription::run_with(config, builder)
         }
+        Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
+            let builder =
+                |cfg: &StreamConfig<TickerInfo>| mexc::connect_market_stream(cfg.id, cfg.push_freq);
+            Subscription::run_with(config, builder)
+        }
     }
 }
 
@@ -2405,6 +2412,12 @@ pub fn kline_subscription(
         Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => {
             let builder = |cfg: &StreamConfig<Vec<(TickerInfo, Timeframe)>>| {
                 okex::connect_kline_stream(cfg.id.clone(), cfg.market_type)
+            };
+            Subscription::run_with(config, builder)
+        }
+        Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
+            let builder = |cfg: &StreamConfig<Vec<(TickerInfo, Timeframe)>>| {
+                mexc::connect_kline_stream(cfg.id.clone(), cfg.market_type)
             };
             Subscription::run_with(config, builder)
         }
@@ -3224,7 +3237,9 @@ mod tests {
             Some(data::layout::pane::VisualConfig::Kline(cfg)) => {
                 assert_eq!(cfg.rolling_vwap_window_hours, 42);
             }
-            _ => panic!("Expected inherited VisualConfig::Kline with rolling_vwap_window_hours = 42"),
+            _ => {
+                panic!("Expected inherited VisualConfig::Kline with rolling_vwap_window_hours = 42")
+            }
         }
         // Check cluster kind was inherited
         assert_eq!(

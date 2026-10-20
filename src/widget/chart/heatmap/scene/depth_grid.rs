@@ -176,9 +176,7 @@ impl GridRing {
             for run in runs.iter() {
                 // Overlap run with [oldest_time, latest_time+aggr)
                 let run_start = run.start_time.max(oldest_time_unix);
-                let run_end_excl = run
-                    .until_time
-                    .min(latest_time_unix.saturating_add(aggr));
+                let run_end_excl = run.until_time.min(latest_time_unix.saturating_add(aggr));
                 if run_end_excl <= run_start {
                     continue;
                 }
@@ -204,9 +202,7 @@ impl GridRing {
                     }
                 }
 
-                let q_u32 = (q * qty_scale)
-                    .round()
-                    .clamp(0.0, u32::MAX as f32) as u32;
+                let q_u32 = (q * qty_scale).round().clamp(0.0, u32::MAX as f32) as u32;
                 if q_u32 == 0 {
                     continue;
                 }

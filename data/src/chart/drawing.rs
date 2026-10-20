@@ -324,6 +324,16 @@ impl Drawing {
             *style = Some(s);
         }
     }
+
+    pub fn apply_template(&mut self, template: &DrawingTemplate) {
+        self.color = template.color;
+        self.width = template.width;
+        if let Some(pos_style) = template.position_style {
+            if let DrawingKind::Position { ref mut style, .. } = self.kind {
+                *style = Some(pos_style);
+            }
+        }
+    }
 }
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -484,6 +494,164 @@ impl DrawingStore {
     pub fn save_sync() -> std::io::Result<()> {
         let snapshot = read_drawings().clone();
         crate::save_drawings(&snapshot)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawingTemplate {
+    pub id: uuid::Uuid,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<DrawingTool>,
+    pub color: [f32; 4],
+    pub width: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position_style: Option<PositionStyle>,
+    #[serde(default)]
+    pub is_builtin: bool,
+}
+
+impl DrawingTemplate {
+    pub fn new(name: impl Into<String>, color: [f32; 4], width: f32) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            tool: None,
+            color,
+            width,
+            position_style: None,
+            is_builtin: false,
+        }
+    }
+
+    pub fn with_tool(mut self, tool: DrawingTool) -> Self {
+        self.tool = Some(tool);
+        self
+    }
+
+    pub fn with_position_style(mut self, style: PositionStyle) -> Self {
+        self.position_style = Some(style);
+        self
+    }
+
+    pub fn builtin(name: impl Into<String>, color: [f32; 4], width: f32) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            tool: None,
+            color,
+            width,
+            position_style: None,
+            is_builtin: true,
+        }
+    }
+
+    pub fn builtin_presets() -> Vec<Self> {
+        vec![
+            Self::builtin("Cyan Accent", [0.0, 0.85, 1.0, 1.0], 2.0),
+            Self::builtin("Key Level", [1.0, 0.84, 0.0, 1.0], 2.0),
+            Self::builtin("Major Alert", [0.94, 0.27, 0.24, 1.0], 3.0),
+            Self::builtin("Faint Guide", [0.7, 0.7, 0.7, 0.4], 1.0),
+            Self::builtin("Accent Zone", [0.67, 0.28, 0.74, 0.8], 2.0),
+        ]
+    }
+}
+
+static GLOBAL_DRAWING_TEMPLATES: LazyLock<RwLock<Vec<DrawingTemplate>>> = LazyLock::new(|| {
+    let mut loaded = crate::load_drawing_templates();
+    if loaded.is_empty() {
+        loaded = DrawingTemplate::builtin_presets();
+    }
+    RwLock::new(loaded)
+});
+
+static TEMPLATE_SAVE_LOCK: Mutex<()> = Mutex::new(());
+static TEMPLATE_SAVE_VERSION: AtomicU64 = AtomicU64::new(0);
+static TEMPLATE_LAST_WRITTEN_VERSION: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn read_templates() -> std::sync::RwLockReadGuard<'static, Vec<DrawingTemplate>> {
+    GLOBAL_DRAWING_TEMPLATES.read().unwrap_or_else(|p| p.into_inner())
+}
+
+#[inline]
+fn write_templates() -> std::sync::RwLockWriteGuard<'static, Vec<DrawingTemplate>> {
+    GLOBAL_DRAWING_TEMPLATES.write().unwrap_or_else(|p| p.into_inner())
+}
+
+fn spawn_save_templates(snapshot: Vec<DrawingTemplate>) {
+    let version = TEMPLATE_SAVE_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
+    std::thread::spawn(move || {
+        let _guard = TEMPLATE_SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        if version < TEMPLATE_LAST_WRITTEN_VERSION.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = crate::save_drawing_templates(&snapshot);
+        TEMPLATE_LAST_WRITTEN_VERSION.store(version, Ordering::Relaxed);
+    });
+}
+
+pub struct DrawingTemplateStore;
+
+impl DrawingTemplateStore {
+    /// Retrieve a clone of all drawing templates (presets + user defined)
+    pub fn all() -> Vec<DrawingTemplate> {
+        read_templates().clone()
+    }
+
+    /// Retrieve drawing templates matching a specific tool (or general templates where tool is None)
+    pub fn for_tool(tool: Option<DrawingTool>) -> Vec<DrawingTemplate> {
+        read_templates()
+            .iter()
+            .filter(|t| t.tool.is_none() || tool.is_none() || t.tool == tool)
+            .cloned()
+            .collect()
+    }
+
+    /// Add or update a template and persist to disk asynchronously
+    pub fn add(template: DrawingTemplate) {
+        let snapshot = {
+            let mut list = write_templates();
+            if let Some(existing) = list.iter_mut().find(|t| t.id == template.id) {
+                *existing = template;
+            } else {
+                list.push(template);
+            }
+            list.clone()
+        };
+        spawn_save_templates(snapshot);
+    }
+
+    /// Remove a template by ID and persist to disk asynchronously
+    pub fn remove(id: uuid::Uuid) {
+        let snapshot = {
+            let mut list = write_templates();
+            list.retain(|t| t.id != id);
+            list.clone()
+        };
+        spawn_save_templates(snapshot);
+    }
+
+    /// Reset templates to built-in presets and persist to disk asynchronously
+    pub fn reset_to_defaults() {
+        let snapshot = {
+            let mut list = write_templates();
+            *list = DrawingTemplate::builtin_presets();
+            list.clone()
+        };
+        spawn_save_templates(snapshot);
+    }
+
+    /// Force save all templates to disk asynchronously
+    pub fn save() {
+        let snapshot = read_templates().clone();
+        spawn_save_templates(snapshot);
+    }
+
+    /// Force synchronous save of all templates to disk
+    pub fn save_sync() -> std::io::Result<()> {
+        let snapshot = read_templates().clone();
+        crate::save_drawing_templates(&snapshot)
     }
 }
 
@@ -749,5 +917,61 @@ mod tests {
                 .iter()
                 .any(|item| item.id == id)
         );
+    }
+
+    #[test]
+    fn test_drawing_template_application() {
+        let mut d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let template = DrawingTemplate::builtin("Test Preset", [0.0, 0.85, 1.0, 1.0], 3.0);
+        d.apply_template(&template);
+        assert_eq!(d.color, [0.0, 0.85, 1.0, 1.0]);
+        assert_eq!(d.width, 3.0);
+    }
+
+    #[test]
+    fn test_drawing_template_application_to_position() {
+        let mut pos = Drawing::position(
+            (100, 50000.0),
+            49000.0,
+            53000.0,
+            true,
+            Some(200),
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+        );
+        let custom_pos_style = PositionStyle {
+            profit_color: Some([0.1, 0.9, 0.2, 0.5]),
+            stop_color: Some([0.9, 0.1, 0.2, 0.5]),
+            entry_color: [0.0, 0.5, 1.0, 1.0],
+            show_price_path: false,
+        };
+        let template = DrawingTemplate::new("Pos Preset", [0.2, 0.8, 0.4, 1.0], 2.5)
+            .with_tool(DrawingTool::LongPosition)
+            .with_position_style(custom_pos_style);
+
+        pos.apply_template(&template);
+        assert_eq!(pos.color, [0.2, 0.8, 0.4, 1.0]);
+        assert_eq!(pos.width, 2.5);
+        assert_eq!(pos.position_style(), custom_pos_style);
+    }
+
+    #[test]
+    fn test_drawing_template_store_crud_and_serialization() {
+        let t1 = DrawingTemplate::new("Custom Scalp", [1.0, 0.5, 0.0, 1.0], 2.0);
+        let id1 = t1.id;
+        DrawingTemplateStore::add(t1);
+
+        let all = DrawingTemplateStore::all();
+        assert!(all.iter().any(|t| t.id == id1));
+
+        let for_none = DrawingTemplateStore::for_tool(None);
+        assert!(for_none.iter().any(|t| t.id == id1));
+
+        let for_kline = DrawingTemplateStore::for_tool(Some(DrawingTool::Trendline));
+        assert!(for_kline.iter().any(|t| t.id == id1));
+
+        DrawingTemplateStore::remove(id1);
+        let after_remove = DrawingTemplateStore::all();
+        assert!(!after_remove.iter().any(|t| t.id == id1));
     }
 }

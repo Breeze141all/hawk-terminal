@@ -656,10 +656,7 @@ impl HeatmapShader {
         let cutoff_rounded = (cutoff / aggr_time) * aggr_time;
 
         // Prune trades (TimeSeries datapoints are bucket timestamps)
-        let keep = self
-            .trades
-            .datapoints
-            .split_off(&cutoff_rounded);
+        let keep = self.trades.datapoints.split_off(&cutoff_rounded);
         self.trades.datapoints = keep;
 
         // Prune HistoricalDepth to match the oldest remaining trade bucket (if any),
@@ -667,8 +664,7 @@ impl HeatmapShader {
         if let Some(oldest_time) = self.trades.datapoints.keys().next().copied() {
             self.depth_history.cleanup_old_price_levels(oldest_time);
         } else {
-            self.depth_history
-                .cleanup_old_price_levels(cutoff_rounded);
+            self.depth_history.cleanup_old_price_levels(cutoff_rounded);
         }
     }
 
@@ -808,8 +804,7 @@ impl HeatmapShader {
 
         let aggr_time: u64 = self.depth_history.aggr_time_ms();
         let market_type = self.ticker_info.market_type();
-        let size_in_quote_ccy =
-            exchange::volume_size_unit() == exchange::SizeUnit::Quote;
+        let size_in_quote_ccy = exchange::volume_size_unit() == exchange::SizeUnit::Quote;
         let order_size_filter = self.config.order_size_filter.max(0.0);
 
         let prev_steps_per_y_bin: i64 = self.scene.params.steps_per_y_bin();
