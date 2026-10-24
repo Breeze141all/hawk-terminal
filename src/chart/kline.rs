@@ -845,34 +845,46 @@ impl KlineChart {
                 .next()
                 .map(|(&k, _)| k);
 
+            let now_ms = exchange::clock::server_time_ms(Some(self.ticker_info.exchange()));
             if first_in_view.is_none() && visible_earliest > 0 {
                 let fetch_start = visible_earliest.saturating_sub(50 * timeframe_ms);
-                let fetch_end = fetch_start.saturating_add(1000 * timeframe_ms);
-                let range = FetchRange::Kline(fetch_start, fetch_end);
-                if let Some(action) = request_fetch(&mut self.request_handler, range) {
-                    return Some(action);
-                }
-            } else if let Some(first) = first_in_view
-                && visible_earliest < first
-                && visible_earliest > 0
-            {
-                let range = FetchRange::Kline(earliest, first);
-                if let Some(action) = request_fetch(&mut self.request_handler, range) {
-                    return Some(action);
-                }
-            } else {
-                let now_ms = exchange::clock::server_time_ms(Some(self.ticker_info.exchange()));
-                let target_latest = visible_latest.min(now_ms);
-                if target_latest > kline_latest.saturating_add(timeframe_ms / 2) {
-                    let fetch_start = kline_latest.saturating_sub(timeframe_ms);
-                    let fetch_end = target_latest.saturating_add(timeframe_ms * 5);
+                let fetch_end = fetch_start
+                    .saturating_add(1000 * timeframe_ms)
+                    .min(now_ms.saturating_add(timeframe_ms * 2));
+                if fetch_start < fetch_end {
                     let range = FetchRange::Kline(fetch_start, fetch_end);
                     if let Some(action) = request_fetch(&mut self.request_handler, range) {
                         return Some(action);
                     }
                 }
+            } else if let Some(first) = first_in_view
+                && visible_earliest < first
+                && visible_earliest > 0
+            {
+                if earliest < first {
+                    let range = FetchRange::Kline(earliest, first);
+                    if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                        return Some(action);
+                    }
+                }
+            } else {
+                let target_latest = visible_latest.min(now_ms);
+                if target_latest > kline_latest.saturating_add(timeframe_ms / 2) {
+                    let fetch_start = kline_latest.saturating_sub(timeframe_ms);
+                    let fetch_end = target_latest.saturating_add(timeframe_ms * 5);
+                    if fetch_start < fetch_end {
+                        let range = FetchRange::Kline(fetch_start, fetch_end);
+                        if let Some(action) = request_fetch(&mut self.request_handler, range) {
+                            return Some(action);
+                        }
+                    }
+                }
             }
-        } else if visible_earliest < kline_earliest && visible_earliest > 0 && kline_earliest > 0 {
+        } else if visible_earliest < kline_earliest
+            && visible_earliest > 0
+            && kline_earliest > 0
+            && earliest < kline_earliest
+        {
             let range = FetchRange::Kline(earliest, kline_earliest);
 
             if let Some(action) = request_fetch(&mut self.request_handler, range) {
@@ -4824,8 +4836,8 @@ impl canvas::Program<Message> for KlineChart {
                                 &self.raw_trades,
                                 earliest,
                                 latest,
-                                &interval_to_x,
-                                &price_to_y,
+                                interval_to_x,
+                                price_to_y,
                                 palette,
                                 &big_cfg,
                             );
@@ -11975,6 +11987,7 @@ mod tests {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         };
         chart.add_drawing(long_pos);
 
@@ -12003,6 +12016,7 @@ mod tests {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         };
         chart.add_drawing(short_pos);
 

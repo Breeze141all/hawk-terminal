@@ -3,6 +3,7 @@ pub mod global_settings;
 pub mod layout_manager;
 pub mod pane;
 pub mod theme_editor;
+pub mod updater;
 #[cfg(feature = "volume-search")]
 pub mod volume_search;
 

@@ -1386,7 +1386,10 @@ pub async fn fetch_klines(
     let mut url = format!("{base_url}?symbol={symbol_str}&interval={timeframe_str}");
 
     let limit_param = if let Some((start, end)) = range {
-        let interval_ms = timeframe.to_milliseconds();
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        let interval_ms = timeframe.to_milliseconds().max(1);
         let num_intervals = (((end.saturating_sub(start)) / interval_ms) + 5).clamp(10, 1000);
 
         if (end.saturating_sub(start)) / interval_ms < 3 {

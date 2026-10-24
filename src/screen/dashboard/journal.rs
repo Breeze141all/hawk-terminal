@@ -481,10 +481,10 @@ impl Journal {
                 self.viewing_image = None;
             }
             Message::AttachImageToTrade(id) => {
-                let task = Task::perform(
-                    crate::journal_media::pick_image_file_async(),
-                    move |res| Message::ImageFilePickedForTrade(id, res),
-                );
+                let task =
+                    Task::perform(crate::journal_media::pick_image_file_async(), move |res| {
+                        Message::ImageFilePickedForTrade(id, res)
+                    });
                 return (task, None);
             }
             Message::ImageFilePickedForTrade(id, Some(path)) => {

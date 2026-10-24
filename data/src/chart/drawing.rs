@@ -14,6 +14,8 @@ pub struct Drawing {
     pub is_synced: bool,
     #[serde(default)]
     pub pane_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub layout_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,6 +131,7 @@ impl Drawing {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         }
     }
 
@@ -142,6 +145,7 @@ impl Drawing {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         }
     }
 
@@ -155,6 +159,7 @@ impl Drawing {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         }
     }
 
@@ -168,6 +173,7 @@ impl Drawing {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         }
     }
 
@@ -181,6 +187,7 @@ impl Drawing {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         }
     }
 
@@ -209,7 +216,18 @@ impl Drawing {
             is_locked: false,
             is_synced: false,
             pane_id: None,
+            layout_id: None,
         }
+    }
+
+    pub fn with_layout_id(mut self, layout_id: uuid::Uuid) -> Self {
+        self.layout_id = Some(layout_id);
+        self
+    }
+
+    pub fn with_pane_id(mut self, pane_id: uuid::Uuid) -> Self {
+        self.pane_id = Some(pane_id);
+        self
     }
 
     /// Translates entire drawing in time (milliseconds) and price
@@ -328,10 +346,10 @@ impl Drawing {
     pub fn apply_template(&mut self, template: &DrawingTemplate) {
         self.color = template.color;
         self.width = template.width;
-        if let Some(pos_style) = template.position_style {
-            if let DrawingKind::Position { ref mut style, .. } = self.kind {
-                *style = Some(pos_style);
-            }
+        if let Some(pos_style) = template.position_style
+            && let DrawingKind::Position { ref mut style, .. } = self.kind
+        {
+            *style = Some(pos_style);
         }
     }
 }
@@ -343,6 +361,8 @@ use std::sync::{LazyLock, Mutex, RwLock};
 pub struct DrawingRecord {
     pub ticker_symbol: String,
     pub drawing: Drawing,
+    #[serde(default)]
+    pub layout_id: Option<uuid::Uuid>,
 }
 
 static GLOBAL_DRAWINGS: LazyLock<RwLock<Vec<DrawingRecord>>> =
@@ -407,15 +427,48 @@ impl DrawingStore {
             .collect()
     }
 
+    /// Retrieve drawings for a specific ticker symbol visible to a given layout and pane.
+    /// Returns drawings that are globally synced, or drawings matching this layout_id and pane_id.
+    pub fn for_symbol_layout_and_pane(
+        symbol: &str,
+        layout_id: uuid::Uuid,
+        pane_id: uuid::Uuid,
+    ) -> Vec<Drawing> {
+        read_drawings()
+            .iter()
+            .filter(|r| {
+                if r.ticker_symbol != symbol {
+                    return false;
+                }
+                if r.drawing.is_synced {
+                    return true;
+                }
+                let effective_layout = r.layout_id.or(r.drawing.layout_id);
+                let layout_matches = match effective_layout {
+                    Some(lid) => lid == layout_id,
+                    None => true,
+                };
+                let pane_matches = match r.drawing.pane_id {
+                    Some(pid) => pid == pane_id,
+                    None => true,
+                };
+                layout_matches && pane_matches
+            })
+            .map(|r| r.drawing.clone())
+            .collect()
+    }
+
     /// Add or update a drawing for a symbol and persist to disk asynchronously
     pub fn add(symbol: impl Into<String>, drawing: Drawing) {
         let snapshot = {
             let mut drawings = write_drawings();
             if let Some(existing) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
-                existing.drawing = drawing;
+                existing.drawing = drawing.clone();
+                existing.layout_id = drawing.layout_id;
             } else {
                 drawings.push(DrawingRecord {
                     ticker_symbol: symbol.into(),
+                    layout_id: drawing.layout_id,
                     drawing,
                 });
             }
@@ -429,11 +482,13 @@ impl DrawingStore {
         let snapshot = {
             let mut drawings = write_drawings();
             if let Some(record) = drawings.iter_mut().find(|r| r.drawing.id == drawing.id) {
-                record.drawing = drawing;
+                record.drawing = drawing.clone();
                 record.ticker_symbol = symbol.to_string();
+                record.layout_id = drawing.layout_id;
             } else {
                 drawings.push(DrawingRecord {
                     ticker_symbol: symbol.to_string(),
+                    layout_id: drawing.layout_id,
                     drawing,
                 });
             }
@@ -474,6 +529,40 @@ impl DrawingStore {
                 if !r.drawing.is_synced
                     && r.drawing.pane_id.is_some()
                     && r.drawing.pane_id != Some(pane_id)
+                {
+                    return true;
+                }
+                false
+            });
+            drawings.clone()
+        };
+        spawn_save_drawings(snapshot);
+    }
+
+    /// Clear unlocked drawings for a specific symbol visible to a given layout and pane.
+    /// Drawings belonging exclusively to another layout or pane remain untouched.
+    pub fn clear_for_symbol_layout_and_pane(
+        symbol: &str,
+        layout_id: uuid::Uuid,
+        pane_id: uuid::Uuid,
+    ) {
+        let snapshot = {
+            let mut drawings = write_drawings();
+            drawings.retain(|r| {
+                if r.ticker_symbol != symbol || r.drawing.is_locked {
+                    return true;
+                }
+                if r.drawing.is_synced {
+                    return false;
+                }
+                let effective_layout = r.layout_id.or(r.drawing.layout_id);
+                if let Some(lid) = effective_layout
+                    && lid != layout_id
+                {
+                    return true;
+                }
+                if let Some(pid) = r.drawing.pane_id
+                    && pid != pane_id
                 {
                     return true;
                 }
@@ -571,12 +660,16 @@ static TEMPLATE_LAST_WRITTEN_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
 fn read_templates() -> std::sync::RwLockReadGuard<'static, Vec<DrawingTemplate>> {
-    GLOBAL_DRAWING_TEMPLATES.read().unwrap_or_else(|p| p.into_inner())
+    GLOBAL_DRAWING_TEMPLATES
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 #[inline]
 fn write_templates() -> std::sync::RwLockWriteGuard<'static, Vec<DrawingTemplate>> {
-    GLOBAL_DRAWING_TEMPLATES.write().unwrap_or_else(|p| p.into_inner())
+    GLOBAL_DRAWING_TEMPLATES
+        .write()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 fn spawn_save_templates(snapshot: Vec<DrawingTemplate>) {
@@ -973,5 +1066,71 @@ mod tests {
         DrawingTemplateStore::remove(id1);
         let after_remove = DrawingTemplateStore::all();
         assert!(!after_remove.iter().any(|t| t.id == id1));
+    }
+
+    #[test]
+    fn test_dat17_drawing_isolation_per_layout() {
+        let sym_owned = format!("TEST_LAYOUT_ISO_{}", uuid::Uuid::new_v4());
+        let sym = sym_owned.as_str();
+
+        let layout_1 = uuid::Uuid::new_v4();
+        let layout_2 = uuid::Uuid::new_v4();
+
+        let pane_1 = uuid::Uuid::new_v4();
+        let pane_2 = uuid::Uuid::new_v4();
+
+        // 1. Add drawing local to layout 1
+        let mut d_layout1 = Drawing::horizontal(50000.0, [1.0, 0.0, 0.0, 1.0], 2.0);
+        d_layout1.layout_id = Some(layout_1);
+        d_layout1.pane_id = Some(pane_1);
+        let id_l1 = d_layout1.id;
+        DrawingStore::add(sym, d_layout1);
+
+        // 2. Add drawing local to layout 2
+        let mut d_layout2 = Drawing::horizontal(60000.0, [0.0, 1.0, 0.0, 1.0], 2.0);
+        d_layout2.layout_id = Some(layout_2);
+        d_layout2.pane_id = Some(pane_2);
+        let id_l2 = d_layout2.id;
+        DrawingStore::add(sym, d_layout2);
+
+        // 3. Add globally synced drawing
+        let mut d_synced = Drawing::horizontal(70000.0, [0.0, 0.0, 1.0, 1.0], 2.0);
+        d_synced.is_synced = true;
+        let id_synced = d_synced.id;
+        DrawingStore::add(sym, d_synced);
+
+        // Verify layout 1 sees d_layout1 and d_synced (2 total)
+        let l1_drawings = DrawingStore::for_symbol_layout_and_pane(sym, layout_1, pane_1);
+        assert_eq!(l1_drawings.len(), 2);
+        assert!(l1_drawings.iter().any(|d| d.id == id_l1));
+        assert!(l1_drawings.iter().any(|d| d.id == id_synced));
+        assert!(!l1_drawings.iter().any(|d| d.id == id_l2));
+
+        // Verify layout 2 sees d_layout2 and d_synced (2 total)
+        let l2_drawings = DrawingStore::for_symbol_layout_and_pane(sym, layout_2, pane_2);
+        assert_eq!(l2_drawings.len(), 2);
+        assert!(l2_drawings.iter().any(|d| d.id == id_l2));
+        assert!(l2_drawings.iter().any(|d| d.id == id_synced));
+        assert!(!l2_drawings.iter().any(|d| d.id == id_l1));
+
+        // Verify even with collision of pane_id across layouts, layout_id isolates them:
+        let l2_collision = DrawingStore::for_symbol_layout_and_pane(sym, layout_2, pane_1);
+        assert_eq!(l2_collision.len(), 1); // Only d_synced, d_layout1 is filtered out by layout_id
+        assert_eq!(l2_collision[0].id, id_synced);
+
+        // 4. Test clear_for_symbol_layout_and_pane in layout 1
+        DrawingStore::clear_for_symbol_layout_and_pane(sym, layout_1, pane_1);
+        let l1_after_clear = DrawingStore::for_symbol_layout_and_pane(sym, layout_1, pane_1);
+        assert_eq!(l1_after_clear.len(), 0);
+
+        // Layout 2 local drawing is preserved untouched!
+        let l2_after_clear = DrawingStore::for_symbol_layout_and_pane(sym, layout_2, pane_2);
+        assert_eq!(l2_after_clear.len(), 1);
+        assert_eq!(l2_after_clear[0].id, id_l2);
+
+        // Cleanup
+        DrawingStore::remove(id_l1);
+        DrawingStore::remove(id_l2);
+        DrawingStore::remove(id_synced);
     }
 }

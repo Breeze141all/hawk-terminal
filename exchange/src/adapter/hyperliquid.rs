@@ -762,6 +762,9 @@ pub async fn fetch_klines(
     let (symbol_str, _) = ticker.to_full_symbol_and_type();
 
     let (start_time, end_time) = if let Some((start, end)) = range {
+        if start >= end {
+            return Ok(Vec::new());
+        }
         (start, end)
     } else {
         let now = std::time::SystemTime::now()

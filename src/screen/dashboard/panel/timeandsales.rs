@@ -199,7 +199,7 @@ impl TimeAndSales {
             if target_trades.is_empty()
                 || target_trades
                     .back()
-                    .map_or(true, |last| last.trade.time <= trade.time)
+                    .is_none_or(|last| last.trade.time <= trade.time)
             {
                 target_trades.push_back(tape_trade);
             } else {
@@ -268,11 +268,7 @@ impl TimeAndSales {
 
         let now_ms = now_epoch_ms.unwrap_or_else(|| {
             let ts = chrono::Utc::now().timestamp_millis();
-            if ts < 0 {
-                0
-            } else {
-                ts as u64
-            }
+            if ts < 0 { 0 } else { ts as u64 }
         });
 
         let trade_retention_ms = self.config.trade_retention.as_millis() as u64;
@@ -356,11 +352,7 @@ impl TimeAndSales {
 
         let now_ms = now_epoch_ms.unwrap_or_else(|| {
             let ts = chrono::Utc::now().timestamp_millis();
-            if ts < 0 {
-                0
-            } else {
-                ts as u64
-            }
+            if ts < 0 { 0 } else { ts as u64 }
         });
 
         let low_cutoff = now_ms.saturating_sub(trade_retention_ms);
@@ -694,10 +686,7 @@ impl<'a> canvas::Program<Message> for TimeAndSalesView<'a> {
 
                 let formatted_time = self
                     .timezone
-                    .format_with_kind(
-                        trade.time as i64,
-                        TimeLabelKind::Custom("%M:%S.%3f"),
-                    )
+                    .format_with_kind(trade.time as i64, TimeLabelKind::Custom("%M:%S.%3f"))
                     .unwrap_or_else(|| "00:00.000".to_string());
 
                 let trade_time = create_text(

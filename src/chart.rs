@@ -9,9 +9,9 @@ use crate::style;
 use crate::widget::multi_split::{DRAG_SIZE, MultiSplit};
 use crate::widget::tooltip;
 use data::chart::{Autoscale, Basis, PlotData, ViewConfig, indicator::Indicator};
-use exchange::TickerInfo;
 use exchange::fetcher::{FetchRange, FetchRequests, FetchSpec, ReqError, RequestHandler};
 use exchange::util::{Price, PriceStep};
+use exchange::{TickerInfo, Timeframe};
 pub use ticks::PriceAxisBadge;
 use ticks::y::PriceInfoLabel;
 use ticks::{x::AxisLabelsX, y::AxisLabelsY};
@@ -821,7 +821,26 @@ impl ViewState {
     pub(crate) fn interval_to_x(&self, value: u64) -> f32 {
         match self.basis {
             Basis::Time(timeframe) => {
-                let interval = timeframe.to_milliseconds() as f64;
+                if timeframe == Timeframe::MN1
+                    && let (Some(dt_val), Some(dt_lat)) = (
+                        chrono::DateTime::from_timestamp_millis(value as i64),
+                        chrono::DateTime::from_timestamp_millis(self.latest_x as i64),
+                    )
+                {
+                    use chrono::Datelike;
+                    let months_diff = (dt_val.year() - dt_lat.year()) * 12
+                        + (dt_val.month() as i32 - dt_lat.month() as i32);
+                    let val_start = timeframe.bucket_start(value);
+                    let val_next = timeframe.next_bucket_start(val_start);
+                    let fraction = if val_next > val_start && value >= val_start {
+                        (value - val_start) as f64 / (val_next - val_start) as f64
+                    } else {
+                        0.0
+                    };
+                    let total_months = months_diff as f64 + fraction;
+                    return (total_months * f64::from(self.cell_width)) as f32;
+                }
+                let interval = timeframe.to_milliseconds().max(1) as f64;
                 let cell_width = f64::from(self.cell_width);
 
                 let diff = value as f64 - self.latest_x as f64;
@@ -834,7 +853,37 @@ impl ViewState {
     pub(crate) fn x_to_interval(&self, x: f32) -> u64 {
         match self.basis {
             Basis::Time(timeframe) => {
-                let interval = timeframe.to_milliseconds();
+                if timeframe == Timeframe::MN1 {
+                    let cell_w = self.cell_width.max(0.001);
+                    let months_offset = x / cell_w;
+                    let full_months = months_offset.floor() as i32;
+                    let frac = (months_offset - full_months as f32).clamp(0.0, 0.999_999) as f64;
+
+                    if let Some(dt_lat) =
+                        chrono::DateTime::from_timestamp_millis(self.latest_x as i64)
+                    {
+                        use chrono::Datelike;
+                        let mut total_month = dt_lat.month() as i32 + full_months;
+                        let mut year = dt_lat.year();
+                        while total_month < 1 {
+                            total_month += 12;
+                            year -= 1;
+                        }
+                        while total_month > 12 {
+                            total_month -= 12;
+                            year += 1;
+                        }
+                        let month_start =
+                            chrono::NaiveDate::from_ymd_opt(year, total_month as u32, 1)
+                                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                                .and_then(|t| t.and_utc().timestamp_millis().try_into().ok())
+                                .unwrap_or(self.latest_x);
+                        let next_month_start = timeframe.next_bucket_start(month_start);
+                        let dur = next_month_start.saturating_sub(month_start);
+                        return month_start.saturating_add((dur as f64 * frac) as u64);
+                    }
+                }
+                let interval = timeframe.to_milliseconds().max(1);
 
                 if x <= 0.0 {
                     let diff = (-x / self.cell_width * interval as f32) as u64;
@@ -1323,5 +1372,80 @@ mod tests {
             .unwrap_or((corners[0], 0));
 
         assert!(min_result.1 < 4);
+    }
+
+    #[test]
+    fn test_ter29_month_uniform_spacing_and_roundtrip() {
+        use chrono::{NaiveDate, TimeZone, Utc};
+
+        let jan_2024 = Utc
+            .from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .timestamp_millis() as u64;
+        let feb_2024 = Utc
+            .from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 2, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .timestamp_millis() as u64;
+        let mar_2024 = Utc
+            .from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 3, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .timestamp_millis() as u64;
+        let apr_2024 = Utc
+            .from_utc_datetime(
+                &NaiveDate::from_ymd_opt(2024, 4, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap(),
+            )
+            .timestamp_millis() as u64;
+
+        let mut view = ViewState::new(
+            Basis::Time(Timeframe::MN1),
+            PriceStep { units: 1 },
+            2,
+            TickerInfo::new(
+                exchange::Ticker::new("BTCUSDT", exchange::Exchange::BinanceLinear),
+                0.1,
+                0.001,
+                None,
+            ),
+            ViewConfig::default(),
+            20.0,
+            10.0,
+        );
+        view.latest_x = mar_2024;
+
+        // March (latest) is x = 0
+        assert_eq!(view.interval_to_x(mar_2024), 0.0);
+        // Feb 2024 is exactly 1 slot back (-20.0) despite having 29 days
+        assert_eq!(view.interval_to_x(feb_2024), -20.0);
+        // Jan 2024 is exactly 2 slots back (-40.0) despite Jan having 31 days
+        assert_eq!(view.interval_to_x(jan_2024), -40.0);
+        // Apr 2024 is exactly 1 slot forward (+20.0)
+        assert_eq!(view.interval_to_x(apr_2024), 20.0);
+
+        // Test x_to_interval roundtrip
+        assert_eq!(view.x_to_interval(0.0), mar_2024);
+        assert_eq!(view.x_to_interval(-20.0), feb_2024);
+        assert_eq!(view.x_to_interval(-40.0), jan_2024);
+        assert_eq!(view.x_to_interval(20.0), apr_2024);
+
+        // Mid-month February (leap year, 29 days)
+        let mid_feb = feb_2024 + 14 * 86_400_000;
+        let x_mid_feb = view.interval_to_x(mid_feb);
+        let recovered_mid_feb = view.x_to_interval(x_mid_feb);
+        assert!((recovered_mid_feb as i64 - mid_feb as i64).abs() < 1000);
     }
 }

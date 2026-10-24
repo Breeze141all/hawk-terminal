@@ -211,7 +211,9 @@ mod tests {
         assert!((vol_ratio - (2.5 / 4.0)).abs() < 1e-4);
 
         agg.remove(&t1);
-        let (buy_cnt_after, _, _) = agg.values_for(StackedBarRatio::Count).expect("after remove");
+        let (buy_cnt_after, _, _) = agg
+            .values_for(StackedBarRatio::Count)
+            .expect("after remove");
         assert_eq!(buy_cnt_after, 0.0);
     }
 

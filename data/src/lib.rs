@@ -116,7 +116,9 @@ pub use chart::drawing::{DrawingRecord, DrawingStore, DrawingTemplate, DrawingTe
 pub const DRAWINGS_PATH: &str = "drawings.json";
 pub const DRAWING_TEMPLATES_PATH: &str = "drawing-templates.json";
 
-pub fn save_drawing_templates(templates: &[chart::drawing::DrawingTemplate]) -> std::io::Result<()> {
+pub fn save_drawing_templates(
+    templates: &[chart::drawing::DrawingTemplate],
+) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(templates)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_json_to_file(&json, DRAWING_TEMPLATES_PATH)

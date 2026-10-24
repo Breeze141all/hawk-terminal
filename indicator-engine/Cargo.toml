@@ -14,5 +14,7 @@ path = "src/lib.rs"
 [dependencies]
 chrono.workspace = true
 serde = { workspace = true, features = ["derive", "std"] }
+serde_json.workspace = true
+ring = "0.17.14"
 thiserror.workspace = true
 url.workspace = true

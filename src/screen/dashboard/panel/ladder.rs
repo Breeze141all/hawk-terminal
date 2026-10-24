@@ -196,7 +196,9 @@ impl Ladder {
     }
 
     pub fn tick_size(&self) -> f32 {
-        self.tick_size.to_f32_lossy()
+        self.pending_tick_size
+            .unwrap_or(self.tick_size)
+            .to_f32_lossy()
     }
 
     fn format_price(&self, price: Price) -> String {

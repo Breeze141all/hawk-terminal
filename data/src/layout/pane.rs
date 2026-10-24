@@ -209,10 +209,9 @@ pub enum ContentKind {
 }
 
 impl ContentKind {
-    pub const ALL: [ContentKind; 9] = [
+    pub const ALL: [ContentKind; 8] = [
         ContentKind::Starter,
         ContentKind::HeatmapChart,
-        ContentKind::ShaderHeatmap,
         ContentKind::FootprintChart,
         ContentKind::CandlestickChart,
         ContentKind::ComparisonChart,
@@ -226,7 +225,7 @@ impl std::fmt::Display for ContentKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             ContentKind::Starter => "Starter Pane",
-            ContentKind::HeatmapChart => "Heatmap Chart (Legacy)",
+            ContentKind::HeatmapChart => "Heatmap Chart",
             ContentKind::ShaderHeatmap => "Heatmap Chart (WGPU)",
             ContentKind::FootprintChart => "Footprint Chart",
             ContentKind::CandlestickChart => "Candlestick Chart",
@@ -369,5 +368,22 @@ impl PaneSetup {
             depth_aggr,
             push_freq,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ter28_content_kind_defaults_and_deactivation() {
+        assert_eq!(ContentKind::HeatmapChart.to_string(), "Heatmap Chart");
+        assert_eq!(
+            ContentKind::ShaderHeatmap.to_string(),
+            "Heatmap Chart (WGPU)"
+        );
+        assert_eq!(ContentKind::ALL.len(), 8);
+        assert!(!ContentKind::ALL.contains(&ContentKind::ShaderHeatmap));
+        assert!(ContentKind::ALL.contains(&ContentKind::HeatmapChart));
     }
 }

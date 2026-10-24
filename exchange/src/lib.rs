@@ -41,7 +41,7 @@ pub enum SizeUnit {
     Quote = 1,
 }
 
-static SIZE_CALC_UNIT: AtomicU8 = AtomicU8::new(SizeUnit::Base as u8);
+static SIZE_CALC_UNIT: AtomicU8 = AtomicU8::new(SizeUnit::Quote as u8);
 
 pub fn set_preferred_currency(v: SizeUnit) {
     SIZE_CALC_UNIT.store(v as u8, Ordering::Relaxed);
@@ -51,7 +51,7 @@ pub fn volume_size_unit() -> SizeUnit {
     match SIZE_CALC_UNIT.load(Ordering::Relaxed) {
         0 => SizeUnit::Base,
         1 => SizeUnit::Quote,
-        _ => SizeUnit::Base,
+        _ => SizeUnit::default(),
     }
 }
 
@@ -197,6 +197,117 @@ impl Timeframe {
                 let minutes = self.to_minutes();
                 u64::from(minutes) * 60_000
             }
+        }
+    }
+
+    /// Returns the calendar-aligned starting timestamp (UTC) for the candle bucket containing `timestamp_ms`.
+    /// - For `W1`: aligns to Monday 00:00:00.000 UTC via `chrono::Datelike`.
+    /// - For `MN1`: aligns to 1st day of the calendar month 00:00:00.000 UTC.
+    /// - For intraday/daily: aligns to uniform integer multiples of duration.
+    pub fn bucket_start(self, timestamp_ms: u64) -> u64 {
+        match self {
+            Timeframe::W1 => {
+                if let Some(dt) = chrono::DateTime::from_timestamp_millis(timestamp_ms as i64) {
+                    use chrono::Datelike;
+                    let naive_date = dt.date_naive();
+                    let days_from_monday = naive_date.weekday().num_days_from_monday();
+                    let monday_date = naive_date - chrono::Duration::days(days_from_monday as i64);
+                    monday_date
+                        .and_hms_opt(0, 0, 0)
+                        .and_then(|t| t.and_utc().timestamp_millis().try_into().ok())
+                        .unwrap_or(0)
+                } else {
+                    let aggr = self.to_milliseconds().max(1);
+                    (timestamp_ms / aggr) * aggr
+                }
+            }
+            Timeframe::MN1 => {
+                if let Some(dt) = chrono::DateTime::from_timestamp_millis(timestamp_ms as i64) {
+                    use chrono::Datelike;
+                    let naive_date = dt.date_naive();
+                    let first_of_month = naive_date.with_day(1).unwrap_or(naive_date);
+                    first_of_month
+                        .and_hms_opt(0, 0, 0)
+                        .and_then(|t| t.and_utc().timestamp_millis().try_into().ok())
+                        .unwrap_or(0)
+                } else {
+                    let aggr = self.to_milliseconds().max(1);
+                    (timestamp_ms / aggr) * aggr
+                }
+            }
+            _ => {
+                let aggr = self.to_milliseconds().max(1);
+                (timestamp_ms / aggr) * aggr
+            }
+        }
+    }
+
+    /// Returns the calendar-aligned timestamp of the next candle bucket after `bucket_start_ms`.
+    pub fn next_bucket_start(self, bucket_start_ms: u64) -> u64 {
+        match self {
+            Timeframe::W1 => bucket_start_ms.saturating_add(7 * 86_400_000),
+            Timeframe::MN1 => {
+                if let Some(dt) = chrono::DateTime::from_timestamp_millis(bucket_start_ms as i64) {
+                    use chrono::Datelike;
+                    let year = dt.year();
+                    let month = dt.month();
+                    let (next_year, next_month) = if month == 12 {
+                        (year + 1, 1)
+                    } else {
+                        (year, month + 1)
+                    };
+                    chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        .and_then(|t| t.and_utc().timestamp_millis().try_into().ok())
+                        .unwrap_or_else(|| bucket_start_ms.saturating_add(self.to_milliseconds()))
+                } else {
+                    bucket_start_ms.saturating_add(self.to_milliseconds())
+                }
+            }
+            _ => {
+                let aggr = self.to_milliseconds().max(1);
+                bucket_start_ms.saturating_add(aggr)
+            }
+        }
+    }
+
+    /// Returns the calendar-aligned timestamp of the previous candle bucket before `bucket_start_ms`.
+    pub fn prev_bucket_start(self, bucket_start_ms: u64) -> u64 {
+        match self {
+            Timeframe::W1 => bucket_start_ms.saturating_sub(7 * 86_400_000),
+            Timeframe::MN1 => {
+                if let Some(dt) = chrono::DateTime::from_timestamp_millis(bucket_start_ms as i64) {
+                    use chrono::Datelike;
+                    let year = dt.year();
+                    let month = dt.month();
+                    let (prev_year, prev_month) = if month == 1 {
+                        (year - 1, 12)
+                    } else {
+                        (year, month - 1)
+                    };
+                    chrono::NaiveDate::from_ymd_opt(prev_year, prev_month, 1)
+                        .and_then(|d| d.and_hms_opt(0, 0, 0))
+                        .and_then(|t| t.and_utc().timestamp_millis().try_into().ok())
+                        .unwrap_or_else(|| bucket_start_ms.saturating_sub(self.to_milliseconds()))
+                } else {
+                    bucket_start_ms.saturating_sub(self.to_milliseconds())
+                }
+            }
+            _ => {
+                let aggr = self.to_milliseconds().max(1);
+                bucket_start_ms.saturating_sub(aggr)
+            }
+        }
+    }
+
+    /// Returns the exact duration in milliseconds of the candle starting at `bucket_start_ms`.
+    /// For `MN1`, this accounts for February (28/29 days) and 30/31-day months.
+    pub fn candle_duration_ms(self, bucket_start_ms: u64) -> u64 {
+        match self {
+            Timeframe::MN1 => self
+                .next_bucket_start(bucket_start_ms)
+                .saturating_sub(bucket_start_ms),
+            _ => self.to_milliseconds().max(1),
         }
     }
 }
@@ -812,44 +923,6 @@ impl TickMultiplier {
         PriceStep { units }
     }
 
-    /// Derives unscaled step from a grouped/scaled step. If the value is not exactly divisible,
-    /// rounds to nearest atomic unit.
-    pub fn unscale_step(&self, scaled_step: PriceStep) -> PriceStep {
-        let m = i64::from(self.0.max(1));
-        if m == 1 {
-            return scaled_step;
-        }
-
-        let q = scaled_step.units.div_euclid(m);
-        let r = scaled_step.units.rem_euclid(m);
-        let rounded = if r.saturating_mul(2) >= m { q + 1 } else { q };
-
-        PriceStep {
-            units: rounded.max(1),
-        }
-    }
-
-    /// Derives unscaled step from a grouped/scaled step; if it is not exactly divisible,
-    /// falls back to the ticker's declared minimum tick.
-    pub fn unscale_step_or_min_tick(
-        &self,
-        scaled_step: PriceStep,
-        min_tick: MinTicksize,
-    ) -> PriceStep {
-        let m = i64::from(self.0.max(1));
-        if m == 1 {
-            return scaled_step;
-        }
-
-        if scaled_step.units > 0 && scaled_step.units.rem_euclid(m) == 0 {
-            PriceStep {
-                units: scaled_step.units / m,
-            }
-        } else {
-            min_tick.into()
-        }
-    }
-
     /// Returns the final tick step after applying the user selected multiplier.
     pub fn multiply_with_min_tick_step(&self, ticker_info: TickerInfo) -> PriceStep {
         let min_step: PriceStep = ticker_info.min_ticksize.into();
@@ -1434,5 +1507,119 @@ mod tests {
         let (disp_usdc, kind_usdc) = btc_usdc.display_symbol_and_type();
         assert_eq!(disp_usdc, "BTCUSDC");
         assert_eq!(kind_usdc, MarketKind::LinearPerps);
+    }
+
+    #[test]
+    fn test_ter29_timeframe_calendar_alignment_and_bounds() {
+        use chrono::{TimeZone, Utc};
+
+        // 1. Weekly (W1) Alignment
+        // Wednesday 2026-10-21 14:30:00 UTC
+        let wed = Utc
+            .with_ymd_and_hms(2026, 10, 21, 14, 30, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let expected_monday = Utc
+            .with_ymd_and_hms(2026, 10, 19, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(Timeframe::W1.bucket_start(wed), expected_monday);
+
+        // Sunday 2026-10-25 23:59:59.999 UTC (end of the week)
+        let sun = Utc
+            .with_ymd_and_hms(2026, 10, 25, 23, 59, 59)
+            .unwrap()
+            .timestamp_millis() as u64
+            + 999;
+        assert_eq!(Timeframe::W1.bucket_start(sun), expected_monday);
+
+        // Next Monday 2026-10-26 00:00:00 UTC
+        let next_mon = Utc
+            .with_ymd_and_hms(2026, 10, 26, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(Timeframe::W1.bucket_start(next_mon), next_mon);
+        assert_eq!(Timeframe::W1.next_bucket_start(expected_monday), next_mon);
+        assert_eq!(Timeframe::W1.prev_bucket_start(next_mon), expected_monday);
+        assert_eq!(
+            Timeframe::W1.candle_duration_ms(expected_monday),
+            7 * 86_400_000
+        );
+
+        // 2. Monthly (MN1) Alignment
+        // 2026-10-24 20:00:00 UTC
+        let oct_mid = Utc
+            .with_ymd_and_hms(2026, 10, 24, 20, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let oct_start = Utc
+            .with_ymd_and_hms(2026, 10, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let nov_start = Utc
+            .with_ymd_and_hms(2026, 11, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let sep_start = Utc
+            .with_ymd_and_hms(2026, 9, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+
+        assert_eq!(Timeframe::MN1.bucket_start(oct_mid), oct_start);
+        assert_eq!(Timeframe::MN1.next_bucket_start(oct_start), nov_start);
+        assert_eq!(Timeframe::MN1.prev_bucket_start(oct_start), sep_start);
+
+        // October has 31 days
+        assert_eq!(
+            Timeframe::MN1.candle_duration_ms(oct_start),
+            31 * 86_400_000
+        );
+        // September has 30 days
+        assert_eq!(
+            Timeframe::MN1.candle_duration_ms(sep_start),
+            30 * 86_400_000
+        );
+
+        // Leap year February (2024 has 29 days)
+        let feb24_start = Utc
+            .with_ymd_and_hms(2024, 2, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let mar24_start = Utc
+            .with_ymd_and_hms(2024, 3, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(Timeframe::MN1.next_bucket_start(feb24_start), mar24_start);
+        assert_eq!(
+            Timeframe::MN1.candle_duration_ms(feb24_start),
+            29 * 86_400_000
+        );
+
+        // Non-leap year February (2025 has 28 days)
+        let feb25_start = Utc
+            .with_ymd_and_hms(2025, 2, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let mar25_start = Utc
+            .with_ymd_and_hms(2025, 3, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(Timeframe::MN1.next_bucket_start(feb25_start), mar25_start);
+        assert_eq!(
+            Timeframe::MN1.candle_duration_ms(feb25_start),
+            28 * 86_400_000
+        );
+
+        // Year boundary transition (Dec 2025 -> Jan 2026)
+        let dec25_start = Utc
+            .with_ymd_and_hms(2025, 12, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        let jan26_start = Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis() as u64;
+        assert_eq!(Timeframe::MN1.next_bucket_start(dec25_start), jan26_start);
+        assert_eq!(Timeframe::MN1.prev_bucket_start(jan26_start), dec25_start);
     }
 }

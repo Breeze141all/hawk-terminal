@@ -787,12 +787,10 @@ pub async fn fetch_klines(
     );
 
     if let Some((start, end)) = range {
-        let (s, e) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-        url.push_str(&format!("&before={s}&after={e}"));
+        if start >= end {
+            return Ok(Vec::new());
+        }
+        url.push_str(&format!("&before={start}&after={end}"));
     }
 
     let doc: Value = limiter::http_parse_with_limiter(&url, &OKEX_LIMITER, 1, None, None).await?;

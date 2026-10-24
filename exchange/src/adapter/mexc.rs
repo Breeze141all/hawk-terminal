@@ -545,6 +545,9 @@ pub async fn fetch_klines(
     };
 
     if let Some((start_ms, end_ms)) = range {
+        if start_ms >= end_ms {
+            return Ok(Vec::new());
+        }
         match market_type {
             MarketKind::Spot => {
                 url.push_str(&format!("&startTime={}&endTime={}", start_ms, end_ms));

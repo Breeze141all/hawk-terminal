@@ -189,7 +189,7 @@ pub enum Event {
 }
 
 pub struct State {
-    id: uuid::Uuid,
+    pub id: uuid::Uuid,
     pub modal: Option<Modal>,
     pub content: Content,
     pub settings: Settings,
@@ -206,6 +206,7 @@ pub struct State {
     pub footprint_notice_dismissed: Option<Exchange>,
     pub settings_category: modal::pane::settings::SettingsCategory,
     pub indicator_search_query: String,
+    pub layout_id: Option<uuid::Uuid>,
 }
 
 impl State {
@@ -617,6 +618,7 @@ impl State {
                         &self.settings,
                         derived_plan.tick_size,
                         self.id,
+                        self.layout_id,
                     );
 
                     let tf = match derived_plan.basis {
@@ -645,6 +647,7 @@ impl State {
                         &self.settings,
                         base_ticker.min_ticksize.into(),
                         self.id,
+                        self.layout_id,
                     );
 
                     let streams = by_basis_default(
@@ -674,6 +677,7 @@ impl State {
                         &self.settings,
                         base_ticker.min_ticksize.into(),
                         self.id,
+                        self.layout_id,
                     );
 
                     let tf = match derived_plan.basis {
@@ -909,6 +913,8 @@ impl State {
                     chart.alerts = data::AlertStore::for_symbol_and_pane(&symbol, self.id);
                     chart.drawings = if !existing_drawings.is_empty() {
                         existing_drawings
+                    } else if let Some(lid) = self.layout_id {
+                        data::DrawingStore::for_symbol_layout_and_pane(&symbol, lid, self.id)
                     } else {
                         data::DrawingStore::for_symbol_and_pane(&symbol, self.id)
                     };
@@ -1151,8 +1157,13 @@ impl State {
                         Message::PaneEvent(id, Event::PanelInteraction(message))
                     });
                     let trade_input = panel.size_filter_input();
-                    let settings_modal =
-                        || modal::pane::settings::timesales_cfg_view(panel.config.clone(), id, trade_input);
+                    let settings_modal = || {
+                        modal::pane::settings::timesales_cfg_view(
+                            panel.config.clone(),
+                            id,
+                            trade_input,
+                        )
+                    };
 
                     self.compose_stack_view(
                         base,
@@ -1804,7 +1815,13 @@ impl State {
                             ));
                         }
                         c.clear_drawings();
-                        data::DrawingStore::clear_for_symbol_and_pane(&symbol, self.id);
+                        if let Some(lid) = self.layout_id {
+                            data::DrawingStore::clear_for_symbol_layout_and_pane(
+                                &symbol, lid, self.id,
+                            );
+                        } else {
+                            data::DrawingStore::clear_for_symbol_and_pane(&symbol, self.id);
+                        }
                         self.selected_drawing_show_settings = false;
                         if !cleared_synced_ids.is_empty() {
                             return Some(Effect::ClearSyncedDrawings {
@@ -3135,117 +3152,7 @@ impl State {
 
         let on_blur = Message::PaneEvent(pane, Event::HideModal);
 
-        let mut view: Element<'a, Message> = match &self.modal {
-            Some(Modal::LinkGroup) => {
-                let content = link_group_modal(pane, self.link_group);
-
-                stack_modal(
-                    base,
-                    content,
-                    on_blur,
-                    padding::right(12).left(4),
-                    Alignment::Start,
-                )
-            }
-            Some(Modal::StreamModifier(modifier)) => stack_modal(
-                base,
-                modifier.view(self.stream_pair_kind()).map(move |message| {
-                    Message::PaneEvent(pane, Event::StreamModifierChanged(message))
-                }),
-                Message::PaneEvent(pane, Event::HideModal),
-                padding::right(12).left(48),
-                Alignment::Start,
-            ),
-            Some(Modal::MiniTickersList(panel)) => {
-                let mini_list = panel
-                    .view(tickers_table, selected_tickers, self.stream_pair())
-                    .map(move |msg| {
-                        Message::PaneEvent(pane, Event::MiniTickersListInteraction(msg))
-                    });
-
-                let content: Element<_> = container(mini_list)
-                    .max_width(260)
-                    .padding(16)
-                    .style(style::chart_modal)
-                    .into();
-
-                stack_modal(
-                    base,
-                    content,
-                    Message::PaneEvent(pane, Event::HideModal),
-                    padding::left(12),
-                    Alignment::Start,
-                )
-            }
-            Some(Modal::Alerts) => {
-                let current_price = if let Content::Kline { chart: Some(c), .. } = &self.content {
-                    c.current_price()
-                } else {
-                    None
-                };
-                let ticker_symbol = self
-                    .stream_pair()
-                    .map(|ti| ti.ticker.display_symbol_and_type().0)
-                    .unwrap_or_else(|| "Symbol".to_string());
-
-                let all_alerts = data::AlertStore::all();
-                let this_chart_alerts =
-                    data::AlertStore::for_symbol_and_pane(&ticker_symbol, self.id);
-
-                let content = crate::modal::pane::alerts::alerts_view(
-                    pane,
-                    &ticker_symbol,
-                    current_price,
-                    &this_chart_alerts,
-                    &all_alerts,
-                    self.alert_filter,
-                    &self.alert_price_input,
-                    self.alert_condition,
-                );
-
-                stack_modal(
-                    base,
-                    content,
-                    on_blur,
-                    padding::right(12).left(12),
-                    Alignment::End,
-                )
-            }
-            Some(Modal::Settings) => stack_modal(
-                base,
-                settings_modal(),
-                on_blur,
-                padding::right(12).left(12),
-                Alignment::End,
-            ),
-            Some(Modal::Indicators) => stack_modal(
-                base,
-                indicator_modal.unwrap_or_else(|| column![].into()),
-                on_blur,
-                padding::right(12).left(12),
-                Alignment::End,
-            ),
-            Some(Modal::Controls) => stack_modal(
-                base,
-                if let Some(controls) = compact_controls {
-                    controls
-                } else {
-                    column![].into()
-                },
-                on_blur,
-                padding::left(12),
-                Alignment::End,
-            ),
-            Some(Modal::ReplayDatePicker(picker_state)) => stack_modal_positioned(
-                base,
-                modal::pane::replay_calendar::view(pane, picker_state),
-                on_blur,
-                padding::bottom(50),
-                Alignment::Center,
-                Alignment::End,
-            ),
-            None => base,
-        };
+        let mut view: Element<'a, Message> = base;
 
         if show_toolbar && let Content::Kline { chart: Some(c), .. } = &self.content {
             let active_tool = c.active_drawing_tool();
@@ -3284,7 +3191,7 @@ impl State {
 
             let toolbar_pos = self
                 .drawing_toolbar_pos
-                .unwrap_or(iced::Point::new(16.0, 48.0));
+                .unwrap_or(iced::Point::new(16.0, 72.0));
             let draggable_toolbar =
                 widget::DraggableOverlay::new(toolbar, toolbar_pos, move |new_pos| {
                     Message::PaneEvent(pane, Event::DrawingToolbarMoved(new_pos))
@@ -3305,7 +3212,7 @@ impl State {
 
             let sel_toolbar_pos = self
                 .selected_drawing_toolbar_pos
-                .unwrap_or(iced::Point::new(260.0, 48.0));
+                .unwrap_or(iced::Point::new(260.0, 72.0));
             let draggable_sel_toolbar =
                 widget::DraggableOverlay::new(sel_toolbar, sel_toolbar_pos, move |new_pos| {
                     Message::PaneEvent(pane, Event::SelectedDrawingToolbarMoved(new_pos))
@@ -3470,9 +3377,121 @@ impl State {
                 .align_y(Alignment::End)
                 .padding(padding::bottom(10));
 
-            iced::widget::stack![view, dock].into()
-        } else {
-            view
+            view = iced::widget::stack![view, dock].into();
+        }
+
+        // Action modal dialogs are mounted LAST in the stack to guarantee
+        // that modals render above floating toolbars and intercept input cleanly.
+        match &self.modal {
+            Some(Modal::LinkGroup) => {
+                let content = link_group_modal(pane, self.link_group);
+
+                stack_modal(
+                    view,
+                    content,
+                    on_blur,
+                    padding::right(12).left(4),
+                    Alignment::Start,
+                )
+            }
+            Some(Modal::StreamModifier(modifier)) => stack_modal(
+                view,
+                modifier.view(self.stream_pair_kind()).map(move |message| {
+                    Message::PaneEvent(pane, Event::StreamModifierChanged(message))
+                }),
+                Message::PaneEvent(pane, Event::HideModal),
+                padding::right(12).left(48),
+                Alignment::Start,
+            ),
+            Some(Modal::MiniTickersList(panel)) => {
+                let mini_list = panel
+                    .view(tickers_table, selected_tickers, self.stream_pair())
+                    .map(move |msg| {
+                        Message::PaneEvent(pane, Event::MiniTickersListInteraction(msg))
+                    });
+
+                let content: Element<_> = container(mini_list)
+                    .max_width(260)
+                    .padding(16)
+                    .style(style::chart_modal)
+                    .into();
+
+                stack_modal(
+                    view,
+                    content,
+                    Message::PaneEvent(pane, Event::HideModal),
+                    padding::left(12),
+                    Alignment::Start,
+                )
+            }
+            Some(Modal::Alerts) => {
+                let current_price = if let Content::Kline { chart: Some(c), .. } = &self.content {
+                    c.current_price()
+                } else {
+                    None
+                };
+                let ticker_symbol = self
+                    .stream_pair()
+                    .map(|ti| ti.ticker.display_symbol_and_type().0)
+                    .unwrap_or_else(|| "Symbol".to_string());
+
+                let all_alerts = data::AlertStore::all();
+                let this_chart_alerts =
+                    data::AlertStore::for_symbol_and_pane(&ticker_symbol, self.id);
+
+                let content = crate::modal::pane::alerts::alerts_view(
+                    pane,
+                    &ticker_symbol,
+                    current_price,
+                    &this_chart_alerts,
+                    &all_alerts,
+                    self.alert_filter,
+                    &self.alert_price_input,
+                    self.alert_condition,
+                );
+
+                stack_modal(
+                    view,
+                    content,
+                    on_blur,
+                    padding::right(12).left(12),
+                    Alignment::End,
+                )
+            }
+            Some(Modal::Settings) => stack_modal(
+                view,
+                settings_modal(),
+                on_blur,
+                padding::right(12).left(12),
+                Alignment::End,
+            ),
+            Some(Modal::Indicators) => stack_modal(
+                view,
+                indicator_modal.unwrap_or_else(|| column![].into()),
+                on_blur,
+                padding::right(12).left(12),
+                Alignment::End,
+            ),
+            Some(Modal::Controls) => stack_modal(
+                view,
+                if let Some(controls) = compact_controls {
+                    controls
+                } else {
+                    column![].into()
+                },
+                on_blur,
+                padding::left(12),
+                Alignment::End,
+            ),
+            Some(Modal::ReplayDatePicker(picker_state)) => stack_modal_positioned(
+                view,
+                modal::pane::replay_calendar::view(pane, picker_state),
+                on_blur,
+                padding::bottom(50),
+                Alignment::Center,
+                Alignment::End,
+            ),
+            None => view,
         }
     }
 
@@ -3485,10 +3504,10 @@ impl State {
             return true;
         }
 
-        if let Content::TimeAndSales(Some(panel)) = &self.content {
-            if panel.matches_ticker(&stream.ticker_info()) {
-                return true;
-            }
+        if let Content::TimeAndSales(Some(panel)) = &self.content
+            && panel.matches_ticker(&stream.ticker_info())
+        {
+            return true;
         }
 
         if let Content::Kline { kind, chart, .. } = &self.content {
@@ -3791,6 +3810,7 @@ impl Default for State {
             footprint_notice_dismissed: None,
             settings_category: modal::pane::settings::SettingsCategory::default(),
             indicator_search_query: String::new(),
+            layout_id: None,
         }
     }
 }
@@ -3887,6 +3907,7 @@ impl Content {
         settings: &Settings,
         tick_size: f32,
         pane_id: uuid::Uuid,
+        layout_id: Option<uuid::Uuid>,
     ) -> Self {
         let (prev_indis, prev_layout, prev_kind_opt, prev_config) = if let Content::Kline {
             chart,
@@ -4011,7 +4032,11 @@ impl Content {
         );
         let symbol = ticker_info.ticker.display_symbol_and_type().0;
         chart.alerts = data::AlertStore::for_symbol_and_pane(&symbol, pane_id);
-        chart.drawings = data::DrawingStore::for_symbol_and_pane(&symbol, pane_id);
+        chart.drawings = if let Some(lid) = layout_id {
+            data::DrawingStore::for_symbol_layout_and_pane(&symbol, lid, pane_id)
+        } else {
+            data::DrawingStore::for_symbol_and_pane(&symbol, pane_id)
+        };
 
         Content::Kline {
             chart: Some(chart),
@@ -4939,5 +4964,38 @@ mod tests {
         } else {
             panic!("ShaderHeatmap chart not initialized");
         }
+    }
+
+    #[test]
+    fn test_ter30_overlay_z_index_and_default_coordinates() {
+        let mut state = State::default();
+        assert_eq!(state.drawing_toolbar_pos, None);
+        assert_eq!(state.selected_drawing_toolbar_pos, None);
+
+        // Verify position updates via events
+        state.update(Event::DrawingToolbarMoved(iced::Point::new(100.0, 150.0)));
+        assert_eq!(
+            state.drawing_toolbar_pos,
+            Some(iced::Point::new(100.0, 150.0))
+        );
+
+        state.update(Event::SelectedDrawingToolbarMoved(iced::Point::new(
+            300.0, 250.0,
+        )));
+        assert_eq!(
+            state.selected_drawing_toolbar_pos,
+            Some(iced::Point::new(300.0, 250.0))
+        );
+
+        // Verify default position fallback value (16.0, 72.0)
+        let default_pos = State::default()
+            .drawing_toolbar_pos
+            .unwrap_or(iced::Point::new(16.0, 72.0));
+        assert_eq!(default_pos, iced::Point::new(16.0, 72.0));
+
+        let default_sel_pos = State::default()
+            .selected_drawing_toolbar_pos
+            .unwrap_or(iced::Point::new(260.0, 72.0));
+        assert_eq!(default_sel_pos, iced::Point::new(260.0, 72.0));
     }
 }

@@ -62,6 +62,7 @@ pub fn global_settings_modal_view<'a>(
     cache_market_metadata: bool,
     is_metadata_loading: bool,
     last_metadata_update: Option<chrono::DateTime<chrono::Utc>>,
+    updater_status: &'a crate::updater::UpdateStatus,
 ) -> Element<'a, Message> {
     // Left Sidebar: Category navigation
     let mut sidebar_col = column![
@@ -534,10 +535,14 @@ pub fn global_settings_modal_view<'a>(
                 .spacing(6)
             };
 
+            let app_version_label = format!(
+                "• Hawk Terminal: v{} Native Desktop",
+                env!("CARGO_PKG_VERSION")
+            );
             let sys_info = column![
                 text("Application Information").size(13),
                 column![
-                    text("• Hawk Terminal: v0.9.4 Native Desktop").size(11),
+                    text(app_version_label).size(11),
                     text("• Cache Engine: LZ4 binary compressed footprint trade cache").size(11),
                     text("• UI Framework: Iced with GPU-accelerated canvas renderer").size(11),
                 ]
@@ -546,8 +551,88 @@ pub fn global_settings_modal_view<'a>(
             ]
             .spacing(6);
 
+            let update_section = {
+                let check_btn = button(text("Check for Updates").size(12))
+                    .padding([6, 12])
+                    .on_press(Message::CheckForUpdates);
+
+                let status_display = match updater_status {
+                    crate::updater::UpdateStatus::Idle => {
+                        row![check_btn].align_y(Alignment::Center).spacing(8)
+                    }
+                    crate::updater::UpdateStatus::Checking => {
+                        row![text("Checking for updates...").size(11)]
+                            .align_y(Alignment::Center)
+                            .spacing(8)
+                    }
+                    crate::updater::UpdateStatus::UpToDate => row![
+                        icon_text(Icon::Checkmark, 13),
+                        text("Latest version installed").size(11),
+                        check_btn,
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(8),
+                    crate::updater::UpdateStatus::Available(release) => {
+                        let open_btn =
+                            button(text(format!("Update to v{} now", release.version)).size(12))
+                                .padding([6, 12])
+                                .style(|theme, status| style::button::modifier(theme, status, true))
+                                .on_press(Message::OpenUpdateModal);
+
+                        row![
+                            icon_text(Icon::StarFilled, 13),
+                            text(format!("Update v{} available!", release.version)).size(11),
+                            open_btn,
+                        ]
+                        .align_y(Alignment::Center)
+                        .spacing(8)
+                    }
+                    crate::updater::UpdateStatus::Downloading { progress, .. } => {
+                        let open_btn = button(
+                            text(format!("Downloading ({:.0}%)...", progress * 100.0)).size(12),
+                        )
+                        .padding([6, 12])
+                        .style(|theme, status| style::button::modifier(theme, status, true))
+                        .on_press(Message::OpenUpdateModal);
+
+                        row![open_btn].align_y(Alignment::Center).spacing(8)
+                    }
+                    crate::updater::UpdateStatus::ReadyToInstall { release, .. } => {
+                        let open_btn = button(
+                            text(format!("Install v{} & Restart", release.version)).size(12),
+                        )
+                        .padding([6, 12])
+                        .style(|theme, status| style::button::modifier(theme, status, true))
+                        .on_press(Message::OpenUpdateModal);
+
+                        row![icon_text(Icon::Checkmark, 13), open_btn,]
+                            .align_y(Alignment::Center)
+                            .spacing(8)
+                    }
+                    crate::updater::UpdateStatus::Error(err) => row![
+                        icon_text(Icon::Close, 13),
+                        text(format!("Update error: {err}")).size(11),
+                        check_btn,
+                    ]
+                    .align_y(Alignment::Center)
+                    .spacing(8),
+                };
+
+                column![
+                    text("Software Updates").size(13),
+                    text("Check and install updates directly from the official repository")
+                        .size(11),
+                    status_display,
+                ]
+                .spacing(6)
+            };
+
             let mut col = column![
                 container(storage_section)
+                    .style(style::modal_container)
+                    .padding(8)
+                    .width(Length::Fill),
+                container(update_section)
                     .style(style::modal_container)
                     .padding(8)
                     .width(Length::Fill),

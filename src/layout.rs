@@ -129,11 +129,12 @@ impl From<&pane::State> for data::Pane {
                 indicators,
                 studies,
                 ..
-            } => data::Pane::ShaderHeatmap {
+            } => data::Pane::HeatmapChart {
+                layout: data::chart::ViewConfig::default(),
                 stream_type: streams,
-                studies: studies.clone(),
-                indicators: indicators.clone(),
                 settings: pane.settings.clone(),
+                indicators: indicators.clone(),
+                studies: studies.clone(),
                 link_group: pane.link_group,
             },
             pane::Content::Kline {
@@ -217,9 +218,11 @@ pub fn configuration(pane: data::Pane) -> Configuration<pane::State> {
             studies,
             link_group,
         } => {
-            let content = pane::Content::ShaderHeatmap {
+            // Transparent fallback of old saved WGPU ShaderHeatmap layouts to CPU Canvas HeatmapChart
+            let content = pane::Content::Heatmap {
                 chart: None,
                 indicators: indicators.clone(),
+                layout: data::chart::ViewConfig::default(),
                 studies,
             };
 
@@ -480,5 +483,30 @@ mod tests {
         assert_eq!(saved.layout_manager.layouts.len(), 1);
         let active = saved.layout_manager.active_layout_id().unwrap();
         assert_eq!(active.name, "CustomLayout");
+    }
+
+    #[test]
+    fn test_ter28_shader_heatmap_fallback_to_canvas_heatmap() {
+        let shader_pane = data::Pane::ShaderHeatmap {
+            studies: vec![],
+            stream_type: vec![],
+            settings: data::layout::pane::Settings::default(),
+            indicators: vec![],
+            link_group: None,
+        };
+
+        let config = configuration(shader_pane);
+        match config {
+            Configuration::Pane(state) => {
+                assert!(matches!(state.content, pane::Content::Heatmap { .. }));
+                assert_eq!(
+                    state.content.kind(),
+                    data::layout::pane::ContentKind::HeatmapChart
+                );
+                let saved_pane = data::Pane::from(&state);
+                assert!(matches!(saved_pane, data::Pane::HeatmapChart { .. }));
+            }
+            _ => panic!("Expected Pane configuration"),
+        }
     }
 }

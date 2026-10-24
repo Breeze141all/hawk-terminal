@@ -234,7 +234,6 @@ impl TimeSeries<KlineDataPoint> {
     }
 
     pub fn insert_klines(&mut self, klines: &[Kline]) {
-        let aggr_time = self.interval.to_milliseconds();
         let now_ms = exchange::clock::server_time_ms(self.exchange);
         let latest_kline_time = klines.iter().map(|k| k.time).max().unwrap_or(0);
         let effective_now_ms = now_ms.max(latest_kline_time);
@@ -251,11 +250,12 @@ impl TimeSeries<KlineDataPoint> {
 
             entry.kline = *kline;
 
-            let candle_end = kline.time.saturating_add(aggr_time);
+            let candle_end = self.interval.next_bucket_start(kline.time);
+            let candle_dur = self.interval.candle_duration_ms(kline.time);
             if candle_end <= effective_now_ms
                 && !entry.footprint.is_empty()
                 && entry.trades_fetched
-                && !entry.is_trades_coverage_complete(aggr_time, self.tick_size, effective_now_ms)
+                && !entry.is_trades_coverage_complete(candle_dur, self.tick_size, effective_now_ms)
             {
                 entry.trades_fetched = false;
             }
@@ -403,17 +403,13 @@ impl TimeSeries<KlineDataPoint> {
         if affected_buckets.is_empty() {
             return;
         }
-        let aggr_time = self.interval.to_milliseconds();
-        if aggr_time == 0 {
-            return;
-        }
-
         let now_ms = exchange::clock::server_time_ms(self.exchange);
         let latest_trade_time = raw_trades.last().map(|t| t.time).unwrap_or(0);
         let effective_now_ms = now_ms.max(latest_trade_time);
 
         for &bucket_time in affected_buckets {
-            let candle_end = bucket_time.saturating_add(aggr_time);
+            let candle_end = self.interval.next_bucket_start(bucket_time);
+            let candle_dur = self.interval.candle_duration_ms(bucket_time);
             let start_idx = raw_trades.partition_point(|t| t.time < bucket_time);
             let end_idx = raw_trades.partition_point(|t| t.time < candle_end);
             let trades = &raw_trades[start_idx..end_idx];
@@ -445,7 +441,7 @@ impl TimeSeries<KlineDataPoint> {
 
                 if candle_end <= effective_now_ms {
                     entry.trades_fetched = entry.is_trades_coverage_complete(
-                        aggr_time,
+                        candle_dur,
                         self.tick_size,
                         effective_now_ms,
                     );
@@ -482,20 +478,17 @@ impl TimeSeries<KlineDataPoint> {
         if from_time >= to_time {
             return;
         }
-        let aggr_time = self.interval.to_milliseconds();
-        if aggr_time == 0 {
-            return;
-        }
-        let rounded_from = (from_time / aggr_time) * aggr_time;
+        let rounded_from = self.interval.bucket_start(from_time);
         if rounded_from >= to_time {
             return;
         }
 
+        let aggr_time = self.interval.to_milliseconds().max(1);
         let now_ms = exchange::clock::server_time_ms(self.exchange);
         let tolerance = (aggr_time / 10).clamp(500, 120_000).min(aggr_time / 2);
 
         for (&time, dp) in self.datapoints.range_mut(rounded_from..to_time) {
-            let candle_end = time.saturating_add(aggr_time);
+            let candle_end = self.interval.next_bucket_start(time);
             if candle_end <= to_time.saturating_add(tolerance)
                 || (candle_end > now_ms && to_time >= now_ms.saturating_sub(120_000))
             {
@@ -523,12 +516,11 @@ impl TimeSeries<KlineDataPoint> {
         if buffer.is_empty() {
             return;
         }
-        let aggr_time = self.interval.to_milliseconds();
         let mut updated_times: FxHashSet<u64> = FxHashSet::default();
         let latest_ts = self.latest_timestamp();
 
         for trade in buffer {
-            let rounded_time = (trade.time / aggr_time) * aggr_time;
+            let rounded_time = self.interval.bucket_start(trade.time);
 
             if let Some(entry) = self.datapoints.get_mut(&rounded_time) {
                 updated_times.insert(rounded_time);
@@ -540,8 +532,9 @@ impl TimeSeries<KlineDataPoint> {
                 {
                     let now_ms = exchange::clock::server_time_ms(self.exchange);
                     let effective_now_ms = now_ms.max(trade.time);
+                    let prev_candle_dur = self.interval.candle_duration_ms(prev_latest);
                     prev_entry.trades_fetched = prev_entry.is_trades_coverage_complete(
-                        aggr_time,
+                        prev_candle_dur,
                         self.tick_size,
                         effective_now_ms,
                     );

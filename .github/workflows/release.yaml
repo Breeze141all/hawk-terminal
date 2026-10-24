@@ -130,3 +130,30 @@ jobs:
           prerelease: false
           files: |
             final-assets/*
+
+      - name: Update hawk-site version.json
+        if: env.SITE_DEPLOY_TOKEN != ''
+        env:
+          SITE_DEPLOY_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          DATE=$(date -u +%Y-%m-%d)
+          git clone https://x-access-token:${SITE_DEPLOY_TOKEN}@github.com/Breeze141all/hawk-site.git hawk-site-repo
+          cd hawk-site-repo
+          cat <<EOF > version.json
+          {
+            "version": "$VERSION",
+            "release_date": "$DATE",
+            "changelog": [
+              "Hawk Terminal $TAG release"
+            ],
+            "download_url": "https://github.com/Breeze141all/hawk-terminal/releases/download/$TAG/hawk-terminal-x86_64-setup.exe",
+            "direct_site_url": "https://breeze141all.github.io/hawk-site/hawk-terminal-setup.exe"
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "chore: bump version to $TAG in version.json" || true
+          git push origin main || true

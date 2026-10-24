@@ -12,6 +12,7 @@ mod notify;
 pub mod profile;
 mod screen;
 mod style;
+pub mod updater;
 mod widget;
 mod window;
 
@@ -79,6 +80,10 @@ struct HawkTerminal {
     global_settings_category: modal::GlobalSettingsCategory,
     #[cfg(feature = "volume-search")]
     volume_search_modal: modal::volume_search::VolumeSearchModal,
+    updater_status: updater::UpdateStatus,
+    is_update_modal_open: bool,
+    cancel_download_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    backup_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +123,19 @@ enum Message {
     VolumeSearch(modal::volume_search::Message),
     #[cfg(feature = "volume-search")]
     ToggleVolumeSearchSidebar(bool),
+    CheckForUpdates,
+    UpdateCheckFinished(Result<Option<updater::RemoteRelease>, String>),
+    OpenUpdateModal,
+    CloseUpdateModal,
+    StartDownloadUpdate,
+    UpdateDownloadProgress {
+        progress: f32,
+        bytes_downloaded: u64,
+        total_bytes: Option<u64>,
+    },
+    UpdateDownloadFinished(Result<std::path::PathBuf, String>),
+    CancelDownloadUpdate,
+    InstallUpdateAndRestart(std::path::PathBuf),
 }
 
 impl HawkTerminal {
@@ -170,6 +188,10 @@ impl HawkTerminal {
             global_settings_category: modal::GlobalSettingsCategory::default(),
             #[cfg(feature = "volume-search")]
             volume_search_modal: modal::volume_search::VolumeSearchModal::new(None, Vec::new()),
+            updater_status: updater::UpdateStatus::Idle,
+            is_update_modal_open: false,
+            cancel_download_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            backup_path: None,
         };
 
         let edit_layouts = std::env::var("HAWK_EDIT_LAYOUTS")
@@ -201,7 +223,11 @@ impl HawkTerminal {
                 .discard()
                 .chain(load_layout)
                 .chain(launch_sidebar.map(Message::Sidebar))
-                .chain(catch_up_offline_alerts_task()),
+                .chain(catch_up_offline_alerts_task())
+                .chain(Task::perform(
+                    updater::check_for_updates(),
+                    Message::UpdateCheckFinished,
+                )),
         )
     }
 
@@ -519,12 +545,35 @@ impl HawkTerminal {
                             )
                         });
 
-                        if let Some((name, old_id, ser_dashboard)) = source_data {
+                        if let Some((name, _old_id, mut ser_dashboard)) = source_data {
                             let new_uid = uuid::Uuid::new_v4();
                             let new_layout = LayoutId {
                                 unique: new_uid,
                                 name: manager.ensure_unique_name(&name, new_uid),
                             };
+
+                            fn reset_pane_ids(pane: &mut data::Pane) {
+                                match pane {
+                                    data::Pane::Split { a, b, .. } => {
+                                        reset_pane_ids(a);
+                                        reset_pane_ids(b);
+                                    }
+                                    data::Pane::KlineChart { settings, .. }
+                                    | data::Pane::HeatmapChart { settings, .. }
+                                    | data::Pane::ShaderHeatmap { settings, .. }
+                                    | data::Pane::ComparisonChart { settings, .. }
+                                    | data::Pane::TimeAndSales { settings, .. }
+                                    | data::Pane::Ladder { settings, .. } => {
+                                        settings.pane_id = Some(uuid::Uuid::new_v4());
+                                    }
+                                    data::Pane::Starter { .. } => {}
+                                }
+                            }
+
+                            reset_pane_ids(&mut ser_dashboard.pane);
+                            for (pane, _) in &mut ser_dashboard.popout {
+                                reset_pane_ids(pane);
+                            }
 
                             let mut popout_windows = Vec::new();
 
@@ -536,7 +585,7 @@ impl HawkTerminal {
                             let dashboard = Dashboard::from_config(
                                 configuration(ser_dashboard.pane.clone()),
                                 popout_windows,
-                                old_id,
+                                new_uid,
                             );
 
                             manager.insert_layout(new_layout.clone(), dashboard);
@@ -804,6 +853,143 @@ impl HawkTerminal {
                 }
                 return Task::none();
             }
+            Message::CheckForUpdates => {
+                self.updater_status = updater::UpdateStatus::Checking;
+                return Task::perform(updater::check_for_updates(), Message::UpdateCheckFinished);
+            }
+            Message::UpdateCheckFinished(result) => {
+                match result {
+                    Ok(Some(release)) => {
+                        self.updater_status = updater::UpdateStatus::Available(release.clone());
+                        self.notifications.push(Toast::custom(
+                            "Доступне оновлення",
+                            format!(
+                                "Доступна версія v{}. Відкрийте налаштування, щоб оновити.",
+                                release.version
+                            ),
+                            toast::Status::Primary,
+                        ));
+                    }
+                    Ok(None) => {
+                        self.updater_status = updater::UpdateStatus::UpToDate;
+                    }
+                    Err(err) => {
+                        log::warn!("Update check failed: {err}");
+                        if self.is_update_modal_open {
+                            self.updater_status = updater::UpdateStatus::Error(err);
+                        } else {
+                            self.updater_status = updater::UpdateStatus::Idle;
+                        }
+                    }
+                }
+                return Task::none();
+            }
+            Message::OpenUpdateModal => {
+                self.is_update_modal_open = true;
+                return Task::none();
+            }
+            Message::CloseUpdateModal => {
+                self.is_update_modal_open = false;
+                return Task::none();
+            }
+            Message::StartDownloadUpdate => {
+                if let updater::UpdateStatus::Available(release) = &self.updater_status {
+                    let backup = updater::create_user_data_backup().ok();
+                    self.backup_path = backup;
+                    self.cancel_download_flag
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
+                    let release_clone = release.clone();
+                    self.updater_status = updater::UpdateStatus::Downloading {
+                        release: release_clone.clone(),
+                        progress: 0.0,
+                        bytes_downloaded: 0,
+                        total_bytes: None,
+                    };
+                    let cancel_flag = self.cancel_download_flag.clone();
+                    return Task::run(
+                        iced::stream::channel(
+                            100,
+                            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                                use iced::futures::SinkExt;
+                                let output_progress = output.clone();
+                                let res = updater::download_installer_file(
+                                    release_clone,
+                                    move |progress, bytes_downloaded, total_bytes| {
+                                        let mut out = output_progress.clone();
+                                        let _ = out.try_send(Message::UpdateDownloadProgress {
+                                            progress,
+                                            bytes_downloaded,
+                                            total_bytes,
+                                        });
+                                    },
+                                    cancel_flag,
+                                )
+                                .await;
+
+                                let _ = output.send(Message::UpdateDownloadFinished(res)).await;
+                            },
+                        ),
+                        |msg| msg,
+                    );
+                }
+                return Task::none();
+            }
+            Message::UpdateDownloadProgress {
+                progress,
+                bytes_downloaded,
+                total_bytes,
+            } => {
+                if let updater::UpdateStatus::Downloading { ref release, .. } = self.updater_status
+                {
+                    self.updater_status = updater::UpdateStatus::Downloading {
+                        release: release.clone(),
+                        progress,
+                        bytes_downloaded,
+                        total_bytes,
+                    };
+                }
+                return Task::none();
+            }
+            Message::UpdateDownloadFinished(result) => {
+                match result {
+                    Ok(path) => {
+                        let release = match &self.updater_status {
+                            updater::UpdateStatus::Downloading { release, .. } => release.clone(),
+                            _ => updater::RemoteRelease {
+                                version: "new".to_string(),
+                                release_date: None,
+                                changelog: None,
+                                download_url: String::new(),
+                                direct_site_url: None,
+                                sha256: None,
+                            },
+                        };
+                        self.updater_status = updater::UpdateStatus::ReadyToInstall {
+                            release,
+                            installer_path: path,
+                            backup_path: self.backup_path.clone(),
+                        };
+                    }
+                    Err(err) => {
+                        self.updater_status = updater::UpdateStatus::Error(err);
+                    }
+                }
+                return Task::none();
+            }
+            Message::CancelDownloadUpdate => {
+                self.cancel_download_flag
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.updater_status = updater::UpdateStatus::Idle;
+                return Task::none();
+            }
+            Message::InstallUpdateAndRestart(path) => {
+                if let Err(e) = updater::execute_installer_and_exit(&path) {
+                    self.notifications
+                        .push(Toast::error(format!("Помилка запуску інсталятора: {e}")));
+                    self.updater_status = updater::UpdateStatus::Error(e);
+                }
+                return Task::none();
+            }
             Message::AutofillJournalFromActiveChart => {
                 let autofill = self.active_dashboard().find_active_position();
                 if let Some(autofill) = autofill {
@@ -976,6 +1162,19 @@ impl HawkTerminal {
                 base.into()
             };
 
+            let content_with_updater = if self.is_update_modal_open {
+                let update_modal = modal::updater::update_modal_view(
+                    &self.updater_status,
+                    Message::StartDownloadUpdate,
+                    Message::CancelDownloadUpdate,
+                    Message::InstallUpdateAndRestart,
+                    Message::CloseUpdateModal,
+                );
+                main_dialog_modal(content_with_menu, update_modal, Message::CloseUpdateModal)
+            } else {
+                content_with_menu
+            };
+
             if self.journal_mode == data::JournalMode::Basic
                 && self.sidebar.journal.is_shown
                 && self.sidebar.journal.is_image_modal_open()
@@ -986,9 +1185,9 @@ impl HawkTerminal {
                     .view_image_modal()
                     .map(dashboard::sidebar::Message::Journal)
                     .map(Message::Sidebar);
-                iced::widget::stack![content_with_menu, modal].into()
+                iced::widget::stack![content_with_updater, modal].into()
             } else {
-                content_with_menu
+                content_with_updater
             }
         } else if Some(id) == self.journal_window {
             container(
@@ -1345,6 +1544,7 @@ impl HawkTerminal {
                     self.sidebar.cache_enabled(),
                     self.sidebar.is_metadata_loading(),
                     self.sidebar.last_metadata_update(),
+                    &self.updater_status,
                 );
 
                 let (align_x, padding) = match sidebar_pos {

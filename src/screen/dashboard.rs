@@ -67,13 +67,18 @@ pub struct Dashboard {
 
 impl Default for Dashboard {
     fn default() -> Self {
+        let layout_id = uuid::Uuid::new_v4();
+        let mut panes = pane_grid::State::with_configuration(Self::default_pane_config());
+        for (_, p_state) in panes.iter_mut() {
+            p_state.layout_id = Some(layout_id);
+        }
         Self {
-            panes: pane_grid::State::with_configuration(Self::default_pane_config()),
+            panes,
             focus: None,
             last_focused_kline: None,
             streams: UniqueStreams::default(),
             popout: HashMap::new(),
-            layout_id: uuid::Uuid::new_v4(),
+            layout_id,
         }
     }
 }
@@ -124,16 +129,20 @@ impl Dashboard {
         popout_windows: Vec<(Configuration<pane::State>, WindowSpec)>,
         layout_id: uuid::Uuid,
     ) -> Self {
-        let panes = pane_grid::State::with_configuration(panes);
+        let mut panes = pane_grid::State::with_configuration(panes);
+        for (_, p_state) in panes.iter_mut() {
+            p_state.layout_id = Some(layout_id);
+        }
 
         let mut popout = HashMap::new();
 
         if window::MULTI_WINDOW_SUPPORTED {
             for (pane, specs) in popout_windows {
-                popout.insert(
-                    window::Id::unique(),
-                    (pane_grid::State::with_configuration(pane), specs),
-                );
+                let mut pop_panes = pane_grid::State::with_configuration(pane);
+                for (_, p_state) in pop_panes.iter_mut() {
+                    p_state.layout_id = Some(layout_id);
+                }
+                popout.insert(window::Id::unique(), (pop_panes, specs));
             }
         }
 
@@ -360,13 +369,15 @@ impl Dashboard {
                     }
                 }
                 pane::Message::SplitPane(axis, pane) => {
+                    let mut new_state = pane::State::new();
+                    new_state.layout_id = Some(self.layout_id);
                     let focus_pane = if window == main_window.id {
                         self.panes
-                            .split(axis, pane, pane::State::new())
+                            .split(axis, pane, new_state)
                             .map(|(new_pane, _)| new_pane)
                     } else if let Some((popout_panes, _)) = self.popout.get_mut(&window) {
                         popout_panes
-                            .split(axis, pane, pane::State::new())
+                            .split(axis, pane, new_state)
                             .map(|(new_pane, _)| new_pane)
                     } else {
                         None
@@ -787,7 +798,9 @@ impl Dashboard {
         if let Some((window, pane)) = self.focus
             && window == main_window.id
         {
-            let result = self.panes.split(axis, pane, pane::State::new());
+            let mut new_state = pane::State::new();
+            new_state.layout_id = Some(self.layout_id);
+            let result = self.panes.split(axis, pane, new_state);
 
             if let Some((pane, _)) = result {
                 return self.focus_pane(main_window.id, pane);
@@ -3246,5 +3259,56 @@ mod tests {
             p2_state.content.clusters(),
             Some(data::chart::kline::ClusterKind::DeltaProfile)
         );
+    }
+
+    #[test]
+    fn test_dat17_dashboard_layout_id_propagation_and_clone_isolation() {
+        let dash = Dashboard::default();
+        let original_layout_id = dash.layout_id;
+
+        // Verify layout_id is propagated to all default panes
+        for (_, pane_state) in dash.panes.iter() {
+            assert_eq!(pane_state.layout_id, Some(original_layout_id));
+        }
+
+        // Clone layout simulation as in src/main.rs
+        let mut ser_dashboard = data::Dashboard::from(&dash);
+
+        fn reset_pane_ids(pane: &mut data::Pane) {
+            match pane {
+                data::Pane::Split { a, b, .. } => {
+                    reset_pane_ids(a);
+                    reset_pane_ids(b);
+                }
+                data::Pane::KlineChart { settings, .. }
+                | data::Pane::HeatmapChart { settings, .. }
+                | data::Pane::ShaderHeatmap { settings, .. }
+                | data::Pane::ComparisonChart { settings, .. }
+                | data::Pane::TimeAndSales { settings, .. }
+                | data::Pane::Ladder { settings, .. } => {
+                    settings.pane_id = Some(uuid::Uuid::new_v4());
+                }
+                data::Pane::Starter { .. } => {}
+            }
+        }
+
+        reset_pane_ids(&mut ser_dashboard.pane);
+        let new_uid = uuid::Uuid::new_v4();
+        assert_ne!(new_uid, original_layout_id);
+
+        let cloned_dash = Dashboard::from_config(
+            crate::layout::configuration(ser_dashboard.pane),
+            vec![],
+            new_uid,
+        );
+
+        assert_eq!(cloned_dash.layout_id, new_uid);
+        for (_, p_state) in cloned_dash.panes.iter() {
+            assert_eq!(p_state.layout_id, Some(new_uid));
+            // Ensure no pane ID collision with original dashboard
+            for (_, orig_state) in dash.panes.iter() {
+                assert_ne!(p_state.id, orig_state.id);
+            }
+        }
     }
 }

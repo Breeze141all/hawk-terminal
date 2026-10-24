@@ -545,7 +545,7 @@
   },
   "trade_fetch_enabled": true,
   "trade_history_lookback_days": 90,
-  "size_in_quote_ccy": "Base",
+  "size_in_quote_ccy": "Quote",
   "journal_mode": "Basic",
   "default_kline_config": {
     "position_flow_colors": {
