@@ -253,9 +253,25 @@ pub fn execute_installer_and_exit(installer_path: &Path) -> Result<(), String> {
         std::process::exit(0);
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = open::that(installer_path);
+        let _ = std::process::Command::new("open")
+            .arg(installer_path)
+            .spawn();
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(installer_path)
+            .spawn();
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = installer_path;
         Ok(())
     }
 }

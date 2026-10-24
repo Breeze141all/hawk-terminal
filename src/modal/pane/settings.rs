@@ -2035,7 +2035,7 @@ pub mod study {
                             opacity,
                         })
                     })
-                    .step(10_000.0);
+                    .step(10_000.0_f32);
 
                     let radius_slider = slider(10.0..=50.0, max_radius, move |val| {
                         on_change(FootprintStudy::BigTrades {
@@ -2046,7 +2046,7 @@ pub mod study {
                             opacity,
                         })
                     })
-                    .step(2.0);
+                    .step(2.0_f32);
 
                     let opacity_slider = slider(0.1..=1.0, opacity, move |val| {
                         on_change(FootprintStudy::BigTrades {
@@ -2057,7 +2057,7 @@ pub mod study {
                             opacity: val,
                         })
                     })
-                    .step(0.05);
+                    .step(0.05_f32);
 
                     column![
                         row![
