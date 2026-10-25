@@ -12,7 +12,7 @@ pub mod util;
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use metadata::{MarketMetadata, MetadataSource};
 
@@ -302,6 +302,63 @@ pub fn open_exports_folder() -> Result<(), InternalError> {
     }
 }
 
+static MIGRATION_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn ensure_migration_from_legacy(hawk_dir: &Path, flowsurface_dir: &Path) {
+    if MIGRATION_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if !flowsurface_dir.exists() || !flowsurface_dir.is_dir() {
+        return;
+    }
+    let _ = std::fs::create_dir_all(hawk_dir);
+
+    let critical_files = [
+        "saved-state.json",
+        "drawings.json",
+        "alerts.json",
+        "drawing-templates.json",
+        "journal.json",
+        "metadata-cache.json",
+    ];
+
+    for file_name in critical_files {
+        let src = flowsurface_dir.join(file_name);
+        let dst = hawk_dir.join(file_name);
+        if src.exists() && src.is_file() {
+            let should_copy = match std::fs::metadata(&dst) {
+                Ok(m) => m.len() <= 2,
+                Err(_) => true,
+            };
+            if should_copy {
+                let _ = std::fs::copy(&src, &dst);
+            }
+        }
+    }
+
+    let src_journal = flowsurface_dir.join("journal_images");
+    let dst_journal = hawk_dir.join("journal_images");
+    if src_journal.exists() && !dst_journal.exists() {
+        let _ = copy_dir_all_recursive(&src_journal, &dst_journal);
+    }
+}
+
+fn copy_dir_all_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn data_path(path_name: Option<&str>) -> PathBuf {
     if let Ok(path) =
         std::env::var("HAWK_DATA_PATH").or_else(|_| std::env::var("FLOWSURFACE_DATA_PATH"))
@@ -310,10 +367,14 @@ pub fn data_path(path_name: Option<&str>) -> PathBuf {
     } else {
         let data_dir = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
         let hawk_dir = data_dir.join("hawk-terminal");
+        let flowsurface_dir = data_dir.join("flowsurface");
+
+        ensure_migration_from_legacy(&hawk_dir, &flowsurface_dir);
+
         let base_dir = if hawk_dir.exists() {
             hawk_dir
-        } else if data_dir.join("flowsurface").exists() {
-            data_dir.join("flowsurface")
+        } else if flowsurface_dir.exists() {
+            flowsurface_dir
         } else {
             hawk_dir
         };

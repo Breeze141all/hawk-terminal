@@ -176,6 +176,7 @@ pub enum Event {
     ReplaySetSpeed(u64),
     ToggleReplayDatePicker,
     ReplayDatePickerAction(modal::pane::replay_calendar::Action),
+    DrawingSettingsAction(modal::pane::drawing_settings::DrawingSettingsAction),
     ReplayAutoScrollToCutoff,
     /// Price Alerts
     AddPriceAlert(f32),
@@ -1848,6 +1849,16 @@ impl State {
                             &symbol,
                         );
                     }
+                    chart::Message::NudgeSelectedDrawings(time_delta, price_delta) => {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        return Self::apply_nudge_action(
+                            self.id,
+                            c,
+                            &symbol,
+                            *time_delta,
+                            *price_delta,
+                        );
+                    }
                     chart::Message::SelectDrawing(id) => {
                         c.set_selected_drawing(*id);
                         if id.is_none() {
@@ -2530,7 +2541,10 @@ impl State {
                     let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                     match action {
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleSettings => {
-                            self.selected_drawing_show_settings = !self.selected_drawing_show_settings;
+                            if let Some(d) = c.selected_drawing() {
+                                let st = modal::pane::drawing_settings::DrawingSettingsState::new(d);
+                                self.modal = Some(Modal::DrawingSettings(Box::new(st)));
+                            }
                         }
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleLock => {
                             let old = c.selected_drawing().cloned();
@@ -2789,6 +2803,196 @@ impl State {
                     self.modal = Some(Modal::ReplayDatePicker(state));
                 }
             }
+            Event::DrawingSettingsAction(action) => {
+                if let Some(Modal::DrawingSettings(ref mut st)) = self.modal {
+                    let mut needs_update = false;
+                    let mut close_after = false;
+                    match action {
+                        modal::pane::drawing_settings::DrawingSettingsAction::SelectTab(t) => {
+                            st.active_tab = t;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::HexChanged(h) => {
+                            st.hex_input = h;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ApplyHex => {
+                            if let Some(color) = data::chart::drawing::hex_to_color(&st.hex_input) {
+                                st.drawing.color = color;
+                                data::chart::drawing::push_recent_color(color);
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::RgbChanged(r, g, b) => {
+                            st.drawing.color[0] = r;
+                            st.drawing.color[1] = g;
+                            st.drawing.color[2] = b;
+                            st.hex_input = data::chart::drawing::color_to_hex(st.drawing.color);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SelectRecentColor(c_arr) => {
+                            st.drawing.color = c_arr;
+                            st.hex_input = data::chart::drawing::color_to_hex(c_arr);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetLineStyle(ls) => {
+                            st.drawing.line_style = ls;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetWidth(w) => {
+                            st.drawing.width = w;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetOpacity(a) => {
+                            st.drawing.color[3] = a.clamp(0.05, 1.0);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleExtendLeft => {
+                            st.drawing.extend_left = !st.drawing.extend_left;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleExtendRight => {
+                            st.drawing.extend_right = !st.drawing.extend_right;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleArrowLeft => {
+                            st.drawing.arrow_left = !st.drawing.arrow_left;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleArrowRight => {
+                            st.drawing.arrow_right = !st.drawing.arrow_right;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetFillOpacity(op) => {
+                            st.drawing.fill_opacity = Some(op.clamp(0.0, 1.0));
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::TextChanged(txt) => {
+                            st.text_input = txt.clone();
+                            let mut annot = st.drawing.annotation.clone().unwrap_or_default();
+                            annot.text = txt;
+                            st.drawing.annotation = Some(annot);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::TextHexChanged(th) => {
+                            st.text_hex_input = th;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ApplyTextHex => {
+                            if let Some(c_arr) = data::chart::drawing::hex_to_color(&st.text_hex_input) {
+                                let mut annot = st.drawing.annotation.clone().unwrap_or_default();
+                                annot.color = c_arr;
+                                st.drawing.annotation = Some(annot);
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetFontSize(sz) => {
+                            let mut annot = st.drawing.annotation.clone().unwrap_or_default();
+                            annot.font_size = sz;
+                            st.drawing.annotation = Some(annot);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetTextAlignH(ah) => {
+                            let mut annot = st.drawing.annotation.clone().unwrap_or_default();
+                            annot.align_h = ah;
+                            st.drawing.annotation = Some(annot);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetTextAlignV(av) => {
+                            let mut annot = st.drawing.annotation.clone().unwrap_or_default();
+                            annot.align_v = av;
+                            st.drawing.annotation = Some(annot);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::CoordP1Changed(p1_s) => {
+                            st.coord_p1 = p1_s.clone();
+                            if let Ok(price) = p1_s.trim().parse::<f32>() {
+                                match &mut st.drawing.kind {
+                                    data::chart::drawing::DrawingKind::HorizontalLine { price: p } => *p = price,
+                                    data::chart::drawing::DrawingKind::Trendline { p1, .. } => p1.1 = price,
+                                    data::chart::drawing::DrawingKind::Rectangle { p1, .. } => p1.1 = price,
+                                    _ => {}
+                                }
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::CoordP2Changed(p2_s) => {
+                            st.coord_p2 = p2_s.clone();
+                            if let Ok(price) = p2_s.trim().parse::<f32>() {
+                                match &mut st.drawing.kind {
+                                    data::chart::drawing::DrawingKind::Trendline { p2, .. } => p2.1 = price,
+                                    data::chart::drawing::DrawingKind::Rectangle { p2, .. } => p2.1 = price,
+                                    _ => {}
+                                }
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::CoordT1Changed(t1_s) => {
+                            st.coord_t1 = t1_s.clone();
+                            if let Ok(time_ms) = t1_s.trim().parse::<u64>() {
+                                match &mut st.drawing.kind {
+                                    data::chart::drawing::DrawingKind::Trendline { p1, .. } => p1.0 = time_ms,
+                                    data::chart::drawing::DrawingKind::Rectangle { p1, .. } => p1.0 = time_ms,
+                                    _ => {}
+                                }
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::CoordT2Changed(t2_s) => {
+                            st.coord_t2 = t2_s.clone();
+                            if let Ok(time_ms) = t2_s.trim().parse::<u64>() {
+                                match &mut st.drawing.kind {
+                                    data::chart::drawing::DrawingKind::Trendline { p2, .. } => p2.0 = time_ms,
+                                    data::chart::drawing::DrawingKind::Rectangle { p2, .. } => p2.0 = time_ms,
+                                    _ => {}
+                                }
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleVisibilitySeconds => {
+                            st.drawing.visibility.seconds = !st.drawing.visibility.seconds;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleVisibilityMinutes => {
+                            st.drawing.visibility.minutes = !st.drawing.visibility.minutes;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleVisibilityHours => {
+                            st.drawing.visibility.hours = !st.drawing.visibility.hours;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleVisibilityDays => {
+                            st.drawing.visibility.days = !st.drawing.visibility.days;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::ToggleVisibilityWeeks => {
+                            st.drawing.visibility.weeks = !st.drawing.visibility.weeks;
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::Close => {
+                            close_after = true;
+                        }
+                    }
+
+                    if close_after {
+                        self.modal = None;
+                        return None;
+                    }
+
+                    if needs_update && let Content::Kline { chart: Some(c), .. } = &mut self.content
+                    {
+                        let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                        let updated_drawing = st.drawing.clone();
+                        c.update_drawing(updated_drawing.clone());
+                        data::DrawingStore::update(&symbol, updated_drawing.clone());
+                        if updated_drawing.is_synced {
+                            return Some(Effect::SyncDrawing {
+                                symbol,
+                                drawing: updated_drawing,
+                                originating_pane_id: self.id,
+                            });
+                        }
+                    }
+                }
+            }
+
             Event::ReplayDatePickerAction(action) => {
                 use modal::pane::replay_calendar::Action;
                 match action {
@@ -3424,6 +3628,18 @@ impl State {
                     Alignment::Start,
                 )
             }
+            Some(Modal::DrawingSettings(settings_state)) => {
+                let content =
+                    modal::pane::drawing_settings::drawing_settings_view(pane, settings_state);
+                stack_modal_positioned(
+                    view,
+                    content,
+                    Message::PaneEvent(pane, Event::HideModal),
+                    padding::top(70).left(260),
+                    Alignment::Start,
+                    Alignment::Start,
+                )
+            }
             Some(Modal::Alerts) => {
                 let current_price = if let Content::Kline { chart: Some(c), .. } = &self.content {
                     c.current_price()
@@ -3570,6 +3786,22 @@ impl State {
                         });
                     }
                 }
+                crate::chart::kline::DrawingHistoryAction::BatchUpdate(pairs) => {
+                    let mut synced = Vec::new();
+                    for (old, new) in pairs {
+                        data::DrawingStore::update(symbol, old.clone());
+                        if old.is_synced || new.is_synced {
+                            synced.push(old);
+                        }
+                    }
+                    if !synced.is_empty() {
+                        return Some(Effect::SyncDrawings {
+                            symbol: symbol.to_string(),
+                            drawings: synced,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
                 crate::chart::kline::DrawingHistoryAction::Clear(drawings) => {
                     let mut synced = Vec::new();
                     for d in drawings {
@@ -3629,6 +3861,22 @@ impl State {
                         });
                     }
                 }
+                crate::chart::kline::DrawingHistoryAction::BatchUpdate(pairs) => {
+                    let mut synced = Vec::new();
+                    for (_, new) in pairs {
+                        data::DrawingStore::update(symbol, new.clone());
+                        if new.is_synced {
+                            synced.push(new);
+                        }
+                    }
+                    if !synced.is_empty() {
+                        return Some(Effect::SyncDrawings {
+                            symbol: symbol.to_string(),
+                            drawings: synced,
+                            originating_pane_id: pane_id,
+                        });
+                    }
+                }
                 crate::chart::kline::DrawingHistoryAction::Clear(drawings) => {
                     let mut synced_ids = Vec::new();
                     for d in &drawings {
@@ -3645,6 +3893,29 @@ impl State {
                         });
                     }
                 }
+            }
+        }
+        None
+    }
+
+    fn apply_nudge_action(
+        pane_id: uuid::Uuid,
+        c: &mut crate::chart::kline::KlineChart,
+        symbol: &str,
+        time_delta: i64,
+        price_delta: f32,
+    ) -> Option<Effect> {
+        let result = c.nudge_selected_drawings(time_delta, price_delta);
+        if let Some((updated_drawings, synced_drawings)) = result {
+            for d in updated_drawings {
+                data::DrawingStore::update(symbol, d);
+            }
+            if !synced_drawings.is_empty() {
+                return Some(Effect::SyncDrawings {
+                    symbol: symbol.to_string(),
+                    drawings: synced_drawings,
+                    originating_pane_id: pane_id,
+                });
             }
         }
         None

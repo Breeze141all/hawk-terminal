@@ -9,6 +9,8 @@ use exchange::{Kline, Timeframe, Trade};
 pub mod bar_analysis;
 pub mod bid_ask_ratio;
 pub mod cvd;
+pub mod cvd_divergence;
+pub mod depth_imbalance;
 pub mod liquidation_heatmap;
 pub mod market_pulse;
 pub mod net_oi;
@@ -66,6 +68,8 @@ pub trait KlineIndicatorImpl {
 
     fn on_net_oi_data(&mut self, _data: &[exchange::NetOiDataPoint]) {}
 
+    fn on_depth(&mut self, _time: u64, _depth: &exchange::depth::Depth) {}
+
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
     }
@@ -111,6 +115,12 @@ pub fn make_empty(which: KlineIndicator) -> Box<dyn KlineIndicatorImpl> {
         }
         KlineIndicator::LiquidationHeatmap => {
             Box::new(super::kline::liquidation_heatmap::LiquidationHeatmapIndicator::new())
+        }
+        KlineIndicator::DepthImbalance => {
+            Box::new(super::kline::depth_imbalance::DepthImbalanceIndicator::new())
+        }
+        KlineIndicator::CvdDivergence => {
+            Box::new(super::kline::cvd_divergence::CvdDivergenceIndicator::new())
         }
     }
 }

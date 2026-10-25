@@ -4,6 +4,7 @@ use iced::{
 };
 
 pub mod alerts;
+pub mod drawing_settings;
 pub mod indicators;
 pub mod mini_tickers_list;
 pub mod replay_calendar;
@@ -20,6 +21,7 @@ pub enum Modal {
     Controls,
     Alerts,
     ReplayDatePicker(replay_calendar::ReplayDatePickerState),
+    DrawingSettings(Box<drawing_settings::DrawingSettingsState>),
 }
 
 pub fn stack_modal<'a, Message>(

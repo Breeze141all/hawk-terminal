@@ -102,23 +102,34 @@ where
             n += 1;
         });
 
-        if n == 0 || (max_v <= 0.0 && matches!(self.baseline, Baseline::Zero)) {
+        if n == 0 {
             return None;
         }
 
-        let min_ext = match self.baseline {
-            Baseline::Zero => 0.0,
-            Baseline::Min => min_v,
-            Baseline::Fixed(v) => v,
+        let (lowest, highest) = match self.baseline {
+            Baseline::Zero => {
+                let low = min_v.min(0.0);
+                let high = max_v.max(0.0);
+                (low, high)
+            }
+            Baseline::Min => (min_v, max_v.max(min_v + f32::EPSILON)),
+            Baseline::Fixed(v) => (min_v.min(v), max_v.max(v + f32::EPSILON)),
         };
 
-        let lowest = min_ext;
-        let mut highest = max_v.max(min_ext + f32::EPSILON);
-        if highest > lowest && self.padding > 0.0 {
-            highest *= 1.0 + self.padding;
+        if lowest == highest {
+            if highest > 0.0 {
+                return Some((0.0, highest * (1.0 + self.padding)));
+            }
+            return None;
         }
 
-        Some((lowest, highest))
+        let pad = if self.padding > 0.0 {
+            (highest - lowest) * self.padding
+        } else {
+            0.0
+        };
+
+        Some((lowest - pad, highest + pad))
     }
 
     fn draw(
@@ -151,6 +162,10 @@ where
                 let y_total = scale.to_y(total);
                 let h = (y_base - y_total).max(0.0);
                 (y_total, h)
+            } else if rel < 0.0 {
+                let y_total = scale.to_y(total);
+                let h = (y_total - y_base).max(0.0);
+                (y_base, h)
             } else {
                 (y_base, 0.0)
             };

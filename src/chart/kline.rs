@@ -338,10 +338,12 @@ pub(crate) struct DrawingState {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum DrawingHistoryAction {
     Add(Drawing),
     Delete(Drawing),
     Update { old: Drawing, new: Drawing },
+    BatchUpdate(Vec<(Drawing, Drawing)>),
     Clear(Vec<Drawing>),
 }
 
@@ -379,6 +381,7 @@ pub struct KlineChart {
     pub expanded_indicator: Option<KlineIndicator>,
     pub(crate) history_lookback_input: String,
     pub is_user_panning: bool,
+    pub(crate) last_nudge: Option<(uuid::Uuid, Instant)>,
 }
 
 impl KlineChart {
@@ -583,6 +586,7 @@ impl KlineChart {
                     expanded_indicator: None,
                     history_lookback_input: history_lookback_input.clone(),
                     is_user_panning: false,
+                    last_nudge: None,
                 }
             }
             Basis::Tick(interval) => {
@@ -673,6 +677,7 @@ impl KlineChart {
                     expanded_indicator: None,
                     history_lookback_input,
                     is_user_panning: false,
+                    last_nudge: None,
                 }
             }
         }
@@ -1253,6 +1258,91 @@ impl KlineChart {
         !self.redo_stack.is_empty()
     }
 
+    pub fn nudge_selected_drawings(
+        &mut self,
+        time_delta: i64,
+        price_delta: f32,
+    ) -> Option<(Vec<Drawing>, Vec<Drawing>)> {
+        let now = Instant::now();
+        let selected_unlocked: Vec<usize> = self
+            .drawings
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                (self.drawing_state.borrow().selected_drawing == Some(d.id) || d.is_selected)
+                    && !d.is_locked
+            })
+            .map(|(idx, _)| idx)
+            .collect();
+
+        if selected_unlocked.is_empty() {
+            return None;
+        }
+
+        if selected_unlocked.len() == 1 {
+            let idx = selected_unlocked[0];
+            let id = self.drawings[idx].id;
+            let is_burst = self.last_nudge.is_some_and(|(prev_id, prev_t)| {
+                prev_id == id && now.duration_since(prev_t).as_millis() <= 500
+            });
+            self.last_nudge = Some((id, now));
+
+            if is_burst
+                && let Some(DrawingHistoryAction::Update { old: _, new }) =
+                    self.undo_stack.last_mut()
+                && new.id == id
+            {
+                self.drawings[idx].translate(time_delta, price_delta);
+                *new = self.drawings[idx].clone();
+                self.redo_stack.clear();
+            } else {
+                let old = self.drawings[idx].clone();
+                self.drawings[idx].translate(time_delta, price_delta);
+                let new = self.drawings[idx].clone();
+                self.push_undo(DrawingHistoryAction::Update { old, new });
+            }
+            let updated = self.drawings[idx].clone();
+            let synced = if updated.is_synced {
+                vec![updated.clone()]
+            } else {
+                Vec::new()
+            };
+            self.invalidate_all();
+            Some((vec![updated], synced))
+        } else {
+            let old_drawings: Vec<Drawing> = selected_unlocked
+                .iter()
+                .map(|&idx| self.drawings[idx].clone())
+                .collect();
+
+            for &idx in &selected_unlocked {
+                self.drawings[idx].translate(time_delta, price_delta);
+            }
+
+            let new_drawings: Vec<Drawing> = selected_unlocked
+                .iter()
+                .map(|&idx| self.drawings[idx].clone())
+                .collect();
+
+            let pairs: Vec<(Drawing, Drawing)> = old_drawings
+                .into_iter()
+                .zip(new_drawings.iter().cloned())
+                .collect();
+
+            self.push_undo(DrawingHistoryAction::BatchUpdate(pairs));
+            self.last_nudge = None;
+
+            let synced: Vec<Drawing> = new_drawings
+                .iter()
+                .filter(|d| d.is_synced)
+                .cloned()
+                .collect();
+
+            self.invalidate_all();
+            Some((new_drawings, synced))
+        }
+    }
+
     pub fn push_undo(&mut self, action: DrawingHistoryAction) {
         const MAX_UNDO_STACK: usize = 100;
         if self.undo_stack.len() >= MAX_UNDO_STACK {
@@ -1284,6 +1374,15 @@ impl KlineChart {
                     self.drawings.push(old.clone());
                 }
                 self.drawing_state.borrow_mut().selected_drawing = Some(old.id);
+            }
+            DrawingHistoryAction::BatchUpdate(pairs) => {
+                for (old, _) in pairs {
+                    if let Some(existing) = self.drawings.iter_mut().find(|d| d.id == old.id) {
+                        *existing = old.clone();
+                    } else {
+                        self.drawings.push(old.clone());
+                    }
+                }
             }
             DrawingHistoryAction::Clear(drawings) => {
                 for d in drawings {
@@ -1320,6 +1419,15 @@ impl KlineChart {
                     self.drawings.push(new.clone());
                 }
                 self.drawing_state.borrow_mut().selected_drawing = Some(new.id);
+            }
+            DrawingHistoryAction::BatchUpdate(pairs) => {
+                for (_, new) in pairs {
+                    if let Some(existing) = self.drawings.iter_mut().find(|d| d.id == new.id) {
+                        *existing = new.clone();
+                    } else {
+                        self.drawings.push(new.clone());
+                    }
+                }
             }
             DrawingHistoryAction::Clear(drawings) => {
                 let ids: Vec<_> = drawings.iter().map(|d| d.id).collect();
@@ -2960,6 +3068,9 @@ impl KlineChart {
         if let Some(indi) = self.indicators[KlineIndicator::MarketPulse].as_mut() {
             indi.on_spot_klines(klines);
         }
+        if let Some(indi) = self.indicators[KlineIndicator::CvdDivergence].as_mut() {
+            indi.on_spot_klines(klines);
+        }
     }
 
     pub fn insert_net_oi_data(
@@ -2978,6 +3089,12 @@ impl KlineChart {
 
         if let Some(indi) = self.indicators[KlineIndicator::NetOi].as_mut() {
             indi.on_net_oi_data(data);
+        }
+    }
+
+    pub fn insert_depth(&mut self, time: u64, depth: &exchange::depth::Depth) {
+        if let Some(indi) = self.indicators[KlineIndicator::DepthImbalance].as_mut() {
+            indi.on_depth(time, depth);
         }
     }
 
@@ -3610,6 +3727,55 @@ impl canvas::Program<Message> for KlineChart {
                         return Some(
                             canvas::Action::publish(Message::DeleteDrawing(id)).and_capture(),
                         );
+                    }
+
+                    // Arrow keys: micro-nudge selected drawing(s)
+                    if !modifiers.control() && !modifiers.command() && !modifiers.alt() {
+                        let has_selection = d_state.selected_drawing.is_some()
+                            || self.drawings.iter().any(|d| d.is_selected && !d.is_locked);
+
+                        if has_selection {
+                            let is_shift = modifiers.shift() || d_state.shift_pressed;
+                            let mult = if is_shift { 10.0 } else { 1.0 };
+                            let tick_size = f32::from(self.ticker_info.min_ticksize).max(0.0000001);
+                            let timeframe_ms = match &self.data_source {
+                                PlotData::TimeBased(ts) => ts.interval.to_milliseconds().max(1),
+                                PlotData::TickBased(_) => 1,
+                            };
+
+                            let nudge = match key.as_ref() {
+                                iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowUp) => {
+                                    Some((0i64, tick_size * mult))
+                                }
+                                iced::keyboard::Key::Named(
+                                    iced::keyboard::key::Named::ArrowDown,
+                                ) => Some((0i64, -tick_size * mult)),
+                                iced::keyboard::Key::Named(
+                                    iced::keyboard::key::Named::ArrowLeft,
+                                ) => Some((
+                                    -((timeframe_ms as f64 * mult as f64).round() as i64),
+                                    0.0,
+                                )),
+                                iced::keyboard::Key::Named(
+                                    iced::keyboard::key::Named::ArrowRight,
+                                ) => Some((
+                                    ((timeframe_ms as f64 * mult as f64).round() as i64),
+                                    0.0,
+                                )),
+                                _ => None,
+                            };
+
+                            if let Some((time_delta, price_delta)) = nudge {
+                                drop(d_state);
+                                return Some(
+                                    canvas::Action::publish(Message::NudgeSelectedDrawings(
+                                        time_delta,
+                                        price_delta,
+                                    ))
+                                    .and_capture(),
+                                );
+                            }
+                        }
                     }
 
                     // Tool shortcuts without modifiers: T (Trendline), H (HorizontalLine), B (Brush), R (Rectangle)
@@ -9011,17 +9177,43 @@ fn draw_chart_drawings(
         d
     });
 
+    let current_tf_ms = match data_source {
+        PlotData::TimeBased(ts) => Some(ts.interval.to_milliseconds()),
+        PlotData::TickBased(_) => None,
+    };
+
     for drawing in drawings_iter.chain(in_progress.iter()) {
         let is_selected = drawing.is_selected || selected_id == Some(drawing.id);
+        if let Some(tf_ms) = current_tf_ms
+            && !is_selected
+            && !drawing.is_visible_for_timeframe(tf_ms)
+        {
+            continue;
+        }
+
         let color = iced::Color::from_rgba(
             drawing.color[0],
             drawing.color[1],
             drawing.color[2],
             drawing.color[3],
         );
+
+        let line_dash = match drawing.line_style {
+            data::chart::drawing::LineStyle::Solid => canvas::stroke::LineDash::default(),
+            data::chart::drawing::LineStyle::Dashed => canvas::stroke::LineDash {
+                segments: &[8.0, 4.0],
+                offset: 0,
+            },
+            data::chart::drawing::LineStyle::Dotted => canvas::stroke::LineDash {
+                segments: &[2.0, 3.0],
+                offset: 0,
+            },
+        };
+
         let stroke = Stroke {
             style: canvas::Style::Solid(color),
             width: drawing.width,
+            line_dash,
             ..Default::default()
         };
 
@@ -9044,7 +9236,59 @@ fn draw_chart_drawings(
                 let y1 = chart.price_to_y(Price::from_f32(p1.1));
                 let x2 = chart.interval_to_x(p2.0);
                 let y2 = chart.price_to_y(Price::from_f32(p2.1));
-                frame.stroke(&Path::line(Point::new(x1, y1), Point::new(x2, y2)), stroke);
+
+                let mut start_pt = Point::new(x1, y1);
+                let mut end_pt = Point::new(x2, y2);
+                if (x2 - x1).abs() > 0.001 {
+                    let m = (y2 - y1) / (x2 - x1);
+                    if drawing.extend_left {
+                        let ext_x = region.x;
+                        let ext_y = y1 + m * (ext_x - x1);
+                        start_pt = Point::new(ext_x, ext_y);
+                    }
+                    if drawing.extend_right {
+                        let ext_x = region.x + region.width;
+                        let ext_y = y1 + m * (ext_x - x1);
+                        end_pt = Point::new(ext_x, ext_y);
+                    }
+                }
+
+                frame.stroke(&Path::line(start_pt, end_pt), stroke);
+
+                if drawing.arrow_left {
+                    let angle = (y1 - y2).atan2(x1 - x2);
+                    let arrow_len = 10.0 / chart.scaling;
+                    let arrow = Path::new(|builder| {
+                        builder.move_to(Point::new(
+                            x1 - arrow_len * (angle - 0.5).cos(),
+                            y1 - arrow_len * (angle - 0.5).sin(),
+                        ));
+                        builder.line_to(Point::new(x1, y1));
+                        builder.line_to(Point::new(
+                            x1 - arrow_len * (angle + 0.5).cos(),
+                            y1 - arrow_len * (angle + 0.5).sin(),
+                        ));
+                    });
+                    frame.stroke(&arrow, stroke);
+                }
+
+                if drawing.arrow_right {
+                    let angle = (y2 - y1).atan2(x2 - x1);
+                    let arrow_len = 10.0 / chart.scaling;
+                    let arrow = Path::new(|builder| {
+                        builder.move_to(Point::new(
+                            x2 - arrow_len * (angle - 0.5).cos(),
+                            y2 - arrow_len * (angle - 0.5).sin(),
+                        ));
+                        builder.line_to(Point::new(x2, y2));
+                        builder.line_to(Point::new(
+                            x2 - arrow_len * (angle + 0.5).cos(),
+                            y2 - arrow_len * (angle + 0.5).sin(),
+                        ));
+                    });
+                    frame.stroke(&arrow, stroke);
+                }
+
                 if is_selected {
                     draw_round_handle(frame, Point::new(x1, y1));
                     draw_round_handle(frame, Point::new(x2, y2));
@@ -9061,11 +9305,12 @@ fn draw_chart_drawings(
                 let w = (x1 - x2).abs();
                 let h = (y1 - y2).abs();
 
+                let opacity = drawing.fill_opacity.unwrap_or(0.25).clamp(0.0, 1.0);
                 let fill_color = iced::Color::from_rgba(
                     drawing.color[0],
                     drawing.color[1],
                     drawing.color[2],
-                    (drawing.color[3] * 0.25).max(0.08),
+                    drawing.color[3] * opacity,
                 );
                 frame.fill_rectangle(Point::new(min_x, min_y), Size::new(w, h), fill_color);
                 frame.stroke(
@@ -11988,6 +12233,7 @@ mod tests {
             is_synced: false,
             pane_id: None,
             layout_id: None,
+            ..Default::default()
         };
         chart.add_drawing(long_pos);
 
@@ -12017,6 +12263,7 @@ mod tests {
             is_synced: false,
             pane_id: None,
             layout_id: None,
+            ..Default::default()
         };
         chart.add_drawing(short_pos);
 
@@ -13446,5 +13693,163 @@ mod tests {
 
         assert_eq!(tick_scanned.len(), 51);
         assert_eq!(scanned, tick_scanned);
+    }
+
+    #[test]
+    fn test_nudge_arrow_up_down_ticksize() {
+        let mut chart = make_test_chart();
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        // Nudge up by 1 tick (tick_size = 0.1)
+        chart.nudge_selected_drawings(0, 0.1);
+        if let DrawingKind::HorizontalLine { price } = chart.selected_drawing().unwrap().kind {
+            assert!((price - 100.1).abs() < 1e-4);
+        } else {
+            panic!("Expected horizontal line");
+        }
+
+        // Nudge up by 10 ticks (Shift+ArrowUp: 1.0)
+        chart.nudge_selected_drawings(0, 1.0);
+        if let DrawingKind::HorizontalLine { price } = chart.selected_drawing().unwrap().kind {
+            assert!((price - 101.1).abs() < 1e-4);
+        } else {
+            panic!("Expected horizontal line");
+        }
+
+        // Nudge down by 1 tick (ArrowDown: -0.1)
+        chart.nudge_selected_drawings(0, -0.1);
+        if let DrawingKind::HorizontalLine { price } = chart.selected_drawing().unwrap().kind {
+            assert!((price - 101.0).abs() < 1e-4);
+        } else {
+            panic!("Expected horizontal line");
+        }
+    }
+
+    #[test]
+    fn test_nudge_arrow_left_right_timeframe() {
+        let mut chart = make_test_chart();
+        let tf_ms = 300_000i64; // M5
+        let d = Drawing::trendline(
+            (10_000_000, 100.0),
+            (20_000_000, 110.0),
+            [1.0, 1.0, 1.0, 1.0],
+            1.0,
+        );
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        // Nudge right by 1 timeframe
+        chart.nudge_selected_drawings(tf_ms, 0.0);
+        if let DrawingKind::Trendline { p1, p2 } = chart.selected_drawing().unwrap().kind {
+            assert_eq!(p1.0, 10_000_000 + 300_000);
+            assert_eq!(p2.0, 20_000_000 + 300_000);
+        } else {
+            panic!("Expected trendline");
+        }
+
+        // Nudge left by 10 timeframes (Shift+ArrowLeft)
+        chart.nudge_selected_drawings(-10 * tf_ms, 0.0);
+        if let DrawingKind::Trendline { p1, p2 } = chart.selected_drawing().unwrap().kind {
+            assert_eq!(p1.0, 10_000_000 + 300_000 - 3_000_000);
+            assert_eq!(p2.0, 20_000_000 + 300_000 - 3_000_000);
+        } else {
+            panic!("Expected trendline");
+        }
+    }
+
+    #[test]
+    fn test_nudge_locked_drawing_ignored() {
+        let mut chart = make_test_chart();
+        let mut d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d.is_locked = true;
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        let res = chart.nudge_selected_drawings(0, 1.0);
+        assert!(res.is_none(), "Locked drawing must not be nudged");
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert_eq!(price, 100.0);
+        }
+    }
+
+    #[test]
+    fn test_nudge_burst_coalescing_undo_redo() {
+        let mut chart = make_test_chart();
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        // 3 rapid nudges within burst window
+        chart.nudge_selected_drawings(0, 0.1);
+        chart.nudge_selected_drawings(0, 0.1);
+        chart.nudge_selected_drawings(0, 0.1);
+
+        assert_eq!(
+            chart.undo_stack.len(),
+            1,
+            "Burst nudges should coalesce into 1 undo action"
+        );
+        if let DrawingKind::HorizontalLine { price } = chart.selected_drawing().unwrap().kind {
+            assert!((price - 100.3).abs() < 1e-4);
+        }
+
+        // Single Undo should revert all 3 rapid nudges back to 100.0
+        let undone = chart.undo();
+        assert!(undone.is_some());
+        if let DrawingKind::HorizontalLine { price } = chart.selected_drawing().unwrap().kind {
+            assert!((price - 100.0).abs() < 1e-4);
+        }
+
+        // Redo should restore to final position 100.3
+        let redone = chart.redo();
+        assert!(redone.is_some());
+        if let DrawingKind::HorizontalLine { price } = chart.selected_drawing().unwrap().kind {
+            assert!((price - 100.3).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_nudge_batch_multi_selection() {
+        let mut chart = make_test_chart();
+        let mut d1 = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d1.is_selected = true;
+        let mut d2 = Drawing::horizontal(200.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d2.is_selected = true;
+        chart.add_drawing(d1);
+        chart.add_drawing(d2);
+
+        let res = chart.nudge_selected_drawings(0, 5.0);
+        assert!(res.is_some());
+
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert_eq!(price, 105.0);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert_eq!(price, 205.0);
+        }
+
+        // Undo batch
+        chart.undo();
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert_eq!(price, 100.0);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert_eq!(price, 200.0);
+        }
+
+        // Redo batch
+        chart.redo();
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert_eq!(price, 105.0);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert_eq!(price, 205.0);
+        }
     }
 }

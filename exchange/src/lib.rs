@@ -36,12 +36,12 @@ use std::{fmt, hash::Hash};
 #[repr(u8)]
 #[derive(Default, Copy, Clone, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub enum SizeUnit {
-    Base = 0,
     #[default]
+    Base = 0,
     Quote = 1,
 }
 
-static SIZE_CALC_UNIT: AtomicU8 = AtomicU8::new(SizeUnit::Quote as u8);
+static SIZE_CALC_UNIT: AtomicU8 = AtomicU8::new(SizeUnit::Base as u8);
 
 pub fn set_preferred_currency(v: SizeUnit) {
     SIZE_CALC_UNIT.store(v as u8, Ordering::Relaxed);

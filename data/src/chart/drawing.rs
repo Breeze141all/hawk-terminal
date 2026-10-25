@@ -1,5 +1,98 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum LineStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+impl std::fmt::Display for LineStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LineStyle::Solid => write!(f, "Solid"),
+            LineStyle::Dashed => write!(f, "Dashed"),
+            LineStyle::Dotted => write!(f, "Dotted"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextAlignH {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextAlignV {
+    #[default]
+    Top,
+    Center,
+    Bottom,
+}
+
+pub fn default_annotation_color() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 1.0]
+}
+
+pub fn default_annotation_size() -> f32 {
+    12.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawingAnnotation {
+    pub text: String,
+    #[serde(default = "default_annotation_color")]
+    pub color: [f32; 4],
+    #[serde(default = "default_annotation_size")]
+    pub font_size: f32,
+    #[serde(default)]
+    pub align_h: TextAlignH,
+    #[serde(default)]
+    pub align_v: TextAlignV,
+}
+
+impl Default for DrawingAnnotation {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            color: default_annotation_color(),
+            font_size: default_annotation_size(),
+            align_h: TextAlignH::default(),
+            align_v: TextAlignV::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DrawingVisibility {
+    #[serde(default = "default_true")]
+    pub seconds: bool,
+    #[serde(default = "default_true")]
+    pub minutes: bool,
+    #[serde(default = "default_true")]
+    pub hours: bool,
+    #[serde(default = "default_true")]
+    pub days: bool,
+    #[serde(default = "default_true")]
+    pub weeks: bool,
+}
+
+impl Default for DrawingVisibility {
+    fn default() -> Self {
+        Self {
+            seconds: true,
+            minutes: true,
+            hours: true,
+            days: true,
+            weeks: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Drawing {
     pub id: uuid::Uuid,
@@ -16,6 +109,46 @@ pub struct Drawing {
     pub pane_id: Option<uuid::Uuid>,
     #[serde(default)]
     pub layout_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub line_style: LineStyle,
+    #[serde(default)]
+    pub extend_left: bool,
+    #[serde(default)]
+    pub extend_right: bool,
+    #[serde(default)]
+    pub arrow_left: bool,
+    #[serde(default)]
+    pub arrow_right: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_opacity: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<DrawingAnnotation>,
+    #[serde(default)]
+    pub visibility: DrawingVisibility,
+}
+
+impl Default for Drawing {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            kind: DrawingKind::HorizontalLine { price: 0.0 },
+            color: [1.0, 1.0, 1.0, 1.0],
+            width: 1.0,
+            is_selected: false,
+            is_locked: false,
+            is_synced: false,
+            pane_id: None,
+            layout_id: None,
+            line_style: LineStyle::Solid,
+            extend_left: false,
+            extend_right: false,
+            arrow_left: false,
+            arrow_right: false,
+            fill_opacity: None,
+            annotation: None,
+            visibility: DrawingVisibility::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -127,11 +260,7 @@ impl Drawing {
             kind: DrawingKind::HorizontalLine { price },
             color,
             width,
-            is_selected: false,
-            is_locked: false,
-            is_synced: false,
-            pane_id: None,
-            layout_id: None,
+            ..Default::default()
         }
     }
 
@@ -141,11 +270,7 @@ impl Drawing {
             kind: DrawingKind::Trendline { p1, p2 },
             color,
             width,
-            is_selected: false,
-            is_locked: false,
-            is_synced: false,
-            pane_id: None,
-            layout_id: None,
+            ..Default::default()
         }
     }
 
@@ -155,11 +280,7 @@ impl Drawing {
             kind: DrawingKind::Rectangle { p1, p2 },
             color,
             width,
-            is_selected: false,
-            is_locked: false,
-            is_synced: false,
-            pane_id: None,
-            layout_id: None,
+            ..Default::default()
         }
     }
 
@@ -169,11 +290,7 @@ impl Drawing {
             kind: DrawingKind::Brush { points },
             color,
             width,
-            is_selected: false,
-            is_locked: false,
-            is_synced: false,
-            pane_id: None,
-            layout_id: None,
+            ..Default::default()
         }
     }
 
@@ -183,11 +300,7 @@ impl Drawing {
             kind: DrawingKind::Path { points },
             color,
             width,
-            is_selected: false,
-            is_locked: false,
-            is_synced: false,
-            pane_id: None,
-            layout_id: None,
+            ..Default::default()
         }
     }
 
@@ -212,11 +325,21 @@ impl Drawing {
             },
             color,
             width,
-            is_selected: false,
-            is_locked: false,
-            is_synced: false,
-            pane_id: None,
-            layout_id: None,
+            ..Default::default()
+        }
+    }
+
+    pub fn is_visible_for_timeframe(&self, timeframe_ms: u64) -> bool {
+        if timeframe_ms < 60_000 {
+            self.visibility.seconds
+        } else if timeframe_ms < 3_600_000 {
+            self.visibility.minutes
+        } else if timeframe_ms < 86_400_000 {
+            self.visibility.hours
+        } else if timeframe_ms < 7 * 86_400_000 {
+            self.visibility.days
+        } else {
+            self.visibility.weeks
         }
     }
 
@@ -748,6 +871,70 @@ impl DrawingTemplateStore {
     }
 }
 
+static RECENT_COLORS: LazyLock<RwLock<Vec<[f32; 4]>>> = LazyLock::new(|| {
+    RwLock::new(vec![
+        [1.0, 1.0, 1.0, 1.0],
+        [0.65, 0.65, 0.65, 1.0],
+        [0.94, 0.27, 0.24, 1.0],
+        [1.0, 0.60, 0.0, 1.0],
+        [1.0, 0.92, 0.23, 1.0],
+        [0.15, 0.68, 0.38, 1.0],
+        [0.16, 0.38, 1.0, 1.0],
+        [0.67, 0.28, 0.74, 1.0],
+    ])
+});
+
+pub fn get_recent_colors() -> Vec<[f32; 4]> {
+    RECENT_COLORS
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+pub fn push_recent_color(color: [f32; 4]) {
+    let mut colors = RECENT_COLORS.write().unwrap_or_else(|p| p.into_inner());
+    colors.retain(|c| {
+        (c[0] - color[0]).abs() > 0.01
+            || (c[1] - color[1]).abs() > 0.01
+            || (c[2] - color[2]).abs() > 0.01
+            || (c[3] - color[3]).abs() > 0.01
+    });
+    colors.insert(0, color);
+    if colors.len() > 16 {
+        colors.truncate(16);
+    }
+}
+
+pub fn color_to_hex(color: [f32; 4]) -> String {
+    let r = (color[0] * 255.0).round().clamp(0.0, 255.0) as u8;
+    let g = (color[1] * 255.0).round().clamp(0.0, 255.0) as u8;
+    let b = (color[2] * 255.0).round().clamp(0.0, 255.0) as u8;
+    let a = (color[3] * 255.0).round().clamp(0.0, 255.0) as u8;
+    if a == 255 {
+        format!("#{:02X}{:02X}{:02X}", r, g, b)
+    } else {
+        format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
+    }
+}
+
+pub fn hex_to_color(hex: &str) -> Option<[f32; 4]> {
+    let s = hex.trim().trim_start_matches('#');
+    if s.len() == 6 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()? as f32 / 255.0;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()? as f32 / 255.0;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()? as f32 / 255.0;
+        Some([r, g, b, 1.0])
+    } else if s.len() == 8 {
+        let r = u8::from_str_radix(&s[0..2], 16).ok()? as f32 / 255.0;
+        let g = u8::from_str_radix(&s[2..4], 16).ok()? as f32 / 255.0;
+        let b = u8::from_str_radix(&s[4..6], 16).ok()? as f32 / 255.0;
+        let a = u8::from_str_radix(&s[6..8], 16).ok()? as f32 / 255.0;
+        Some([r, g, b, a])
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1132,5 +1319,83 @@ mod tests {
         DrawingStore::remove(id_l1);
         DrawingStore::remove(id_l2);
         DrawingStore::remove(id_synced);
+    }
+
+    #[test]
+    fn test_ter36_advanced_drawing_properties_serialization_and_backward_compatibility() {
+        // 1. Serialization with all new properties
+        let mut d = Drawing::trendline((1000, 100.0), (2000, 200.0), [0.1, 0.2, 0.3, 0.9], 2.0);
+        d.line_style = LineStyle::Dashed;
+        d.extend_left = true;
+        d.extend_right = false;
+        d.arrow_left = false;
+        d.arrow_right = true;
+        d.fill_opacity = Some(0.4);
+        d.annotation = Some(DrawingAnnotation {
+            text: "Weekly Open".to_string(),
+            color: [1.0, 0.9, 0.8, 1.0],
+            font_size: 14.0,
+            align_h: TextAlignH::Center,
+            align_v: TextAlignV::Top,
+        });
+        d.visibility.seconds = false;
+        d.visibility.weeks = true;
+
+        let json = serde_json::to_string(&d).unwrap();
+        let deserialized: Drawing = serde_json::from_str(&json).unwrap();
+        assert_eq!(d, deserialized);
+        assert_eq!(deserialized.line_style, LineStyle::Dashed);
+        assert!(deserialized.extend_left);
+        assert!(!deserialized.extend_right);
+        assert!(deserialized.arrow_right);
+        assert_eq!(deserialized.fill_opacity, Some(0.4));
+        assert_eq!(
+            deserialized.annotation.as_ref().unwrap().text,
+            "Weekly Open"
+        );
+        assert!(!deserialized.is_visible_for_timeframe(1_000)); // seconds = false
+        assert!(deserialized.is_visible_for_timeframe(7 * 86_400_000)); // weeks = true
+
+        // 2. Backward compatibility: legacy JSON without new fields
+        let legacy_json = r#"{"id":"00000000-0000-0000-0000-000000000001","kind":{"HorizontalLine":{"price":50000.0}},"color":[1.0,0.5,0.0,1.0],"width":2.0,"is_selected":false,"is_locked":false}"#;
+        let leg_d: Drawing = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(leg_d.line_style, LineStyle::Solid);
+        assert!(!leg_d.extend_left);
+        assert!(!leg_d.extend_right);
+        assert!(!leg_d.arrow_left);
+        assert!(!leg_d.arrow_right);
+        assert_eq!(leg_d.fill_opacity, None);
+        assert_eq!(leg_d.annotation, None);
+        assert!(leg_d.visibility.seconds);
+        assert!(leg_d.visibility.minutes);
+        assert!(leg_d.visibility.hours);
+        assert!(leg_d.visibility.days);
+        assert!(leg_d.visibility.weeks);
+    }
+
+    #[test]
+    fn test_ter36_hex_color_conversion_and_recent_swatches() {
+        assert_eq!(color_to_hex([1.0, 1.0, 1.0, 1.0]), "#FFFFFF");
+        assert_eq!(color_to_hex([0.0, 0.0, 0.0, 1.0]), "#000000");
+        assert_eq!(color_to_hex([1.0, 0.0, 0.0, 0.5]), "#FF000080");
+
+        let c1 = hex_to_color("#FFFFFF").unwrap();
+        assert!((c1[0] - 1.0).abs() < 1e-3);
+        assert!((c1[1] - 1.0).abs() < 1e-3);
+        assert!((c1[2] - 1.0).abs() < 1e-3);
+        assert!((c1[3] - 1.0).abs() < 1e-3);
+
+        let c2 = hex_to_color("#123456").unwrap();
+        assert_eq!(color_to_hex(c2), "#123456");
+
+        let c3 = hex_to_color("12345678").unwrap();
+        assert_eq!(color_to_hex(c3), "#12345678");
+
+        assert!(hex_to_color("INVALID").is_none());
+
+        push_recent_color([0.2, 0.4, 0.6, 1.0]);
+        let recents = get_recent_colors();
+        assert!((recents[0][0] - 0.2).abs() < 1e-3);
+        assert!((recents[0][1] - 0.4).abs() < 1e-3);
     }
 }

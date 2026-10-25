@@ -1653,29 +1653,32 @@ impl Dashboard {
                         pane::Content::ShaderHeatmap { chart: Some(c), .. } if exact_match => {
                             c.insert_datapoint(trades_buffer, depth_update_t, depth);
                         }
-                        pane::Content::Kline { chart: Some(c), .. }
-                            if !trades_buffer.is_empty() =>
-                        {
-                            let prev_p = c.current_price();
-                            c.insert_trades_buffer(trades_buffer);
-                            let cur_p = c.current_price();
-                            if let (Some(prev), Some(cur)) = (prev_p, cur_p) {
-                                let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
-                                let mut min_p = prev.min(cur);
-                                let mut max_p = prev.max(cur);
-                                for t in trades_buffer {
-                                    let p = t.price.to_f32_lossy();
-                                    if p < min_p {
-                                        min_p = p;
+                        pane::Content::Kline { chart: Some(c), .. } => {
+                            if exact_match {
+                                c.insert_depth(depth_update_t, depth);
+                            }
+                            if !trades_buffer.is_empty() {
+                                let prev_p = c.current_price();
+                                c.insert_trades_buffer(trades_buffer);
+                                let cur_p = c.current_price();
+                                if let (Some(prev), Some(cur)) = (prev_p, cur_p) {
+                                    let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
+                                    let mut min_p = prev.min(cur);
+                                    let mut max_p = prev.max(cur);
+                                    for t in trades_buffer {
+                                        let p = t.price.to_f32_lossy();
+                                        if p < min_p {
+                                            min_p = p;
+                                        }
+                                        if p > max_p {
+                                            max_p = p;
+                                        }
                                     }
-                                    if p > max_p {
-                                        max_p = p;
-                                    }
+                                    let triggered = data::AlertStore::check_price_triggers_range(
+                                        &symbol, prev, min_p, max_p, cur,
+                                    );
+                                    all_triggered.extend(triggered);
                                 }
-                                let triggered = data::AlertStore::check_price_triggers_range(
-                                    &symbol, prev, min_p, max_p, cur,
-                                );
-                                all_triggered.extend(triggered);
                             }
                         }
                         pane::Content::TimeAndSales(Some(p)) if !trades_buffer.is_empty() => {

@@ -75,6 +75,7 @@ pub enum Message {
     UndoDrawing,
     RedoDrawing,
     PanReleased,
+    NudgeSelectedDrawings(i64, f32),
 }
 
 pub trait Chart: PlotConstants + canvas::Program<Message> {
@@ -543,7 +544,8 @@ pub fn update<T: Chart>(chart: &mut T, message: &Message) {
         | Message::AutofillPosition(_)
         | Message::UndoDrawing
         | Message::RedoDrawing
-        | Message::PanReleased => return,
+        | Message::PanReleased
+        | Message::NudgeSelectedDrawings(_, _) => return,
     }
     chart.invalidate_all();
 }

@@ -25,6 +25,8 @@ pub enum KlineIndicator {
     BidAskRatio,
     PositionFlow,
     LiquidationHeatmap,
+    DepthImbalance,
+    CvdDivergence,
 }
 
 impl Indicator for KlineIndicator {
@@ -40,7 +42,7 @@ impl KlineIndicator {
     // Indicator togglers on UI menus depend on these arrays.
     // Every variant needs to be in either SPOT, PERPS or both.
     /// Indicators that can be used with spot market tickers
-    const FOR_SPOT: [KlineIndicator; 9] = [
+    const FOR_SPOT: [KlineIndicator; 11] = [
         KlineIndicator::Volume,
         KlineIndicator::BarAnalysis,
         KlineIndicator::Vpin,
@@ -50,9 +52,11 @@ impl KlineIndicator {
         KlineIndicator::Cvd,
         KlineIndicator::BidAskRatio,
         KlineIndicator::PositionFlow,
+        KlineIndicator::DepthImbalance,
+        KlineIndicator::CvdDivergence,
     ];
     /// Indicators that can be used with perpetual swap market tickers
-    const FOR_PERPS: [KlineIndicator; 13] = [
+    const FOR_PERPS: [KlineIndicator; 15] = [
         KlineIndicator::Volume,
         KlineIndicator::BarAnalysis,
         KlineIndicator::OpenInterest,
@@ -66,6 +70,8 @@ impl KlineIndicator {
         KlineIndicator::BidAskRatio,
         KlineIndicator::PositionFlow,
         KlineIndicator::LiquidationHeatmap,
+        KlineIndicator::DepthImbalance,
+        KlineIndicator::CvdDivergence,
     ];
 
     /// Returns true if this indicator requires an independent sub-panel in the layout.
@@ -94,6 +100,8 @@ impl Display for KlineIndicator {
             KlineIndicator::BidAskRatio => write!(f, "Bid/Ask Ratio"),
             KlineIndicator::PositionFlow => write!(f, "Position Flow"),
             KlineIndicator::LiquidationHeatmap => write!(f, "Liquidation Heatmap"),
+            KlineIndicator::DepthImbalance => write!(f, "Depth Imbalance"),
+            KlineIndicator::CvdDivergence => write!(f, "CVD Divergence"),
         }
     }
 }
@@ -172,5 +180,32 @@ mod tests {
             KlineIndicator::LiquidationHeatmap.to_string(),
             "Liquidation Heatmap"
         );
+    }
+
+    #[test]
+    fn test_depth_imbalance_and_cvd_divergence_properties() {
+        assert!(KlineIndicator::DepthImbalance.is_panel());
+        assert!(KlineIndicator::CvdDivergence.is_panel());
+
+        assert!(
+            KlineIndicator::for_market(MarketKind::Spot).contains(&KlineIndicator::DepthImbalance)
+        );
+        assert!(
+            KlineIndicator::for_market(MarketKind::LinearPerps)
+                .contains(&KlineIndicator::DepthImbalance)
+        );
+        assert!(
+            KlineIndicator::for_market(MarketKind::Spot).contains(&KlineIndicator::CvdDivergence)
+        );
+        assert!(
+            KlineIndicator::for_market(MarketKind::LinearPerps)
+                .contains(&KlineIndicator::CvdDivergence)
+        );
+
+        assert_eq!(
+            KlineIndicator::DepthImbalance.to_string(),
+            "Depth Imbalance"
+        );
+        assert_eq!(KlineIndicator::CvdDivergence.to_string(), "CVD Divergence");
     }
 }
