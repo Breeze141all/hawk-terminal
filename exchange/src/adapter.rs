@@ -321,9 +321,14 @@ impl UniqueStreams {
         });
     }
 
+    /// Collects stream specs in a stable total order.
+    ///
+    /// Subscription::run_with hashes the chunked StreamConfig to identify a
+    /// stream, so the order must depend only on the set of streams.
     fn streams<T, F>(&self, exchange_filter: Option<Exchange>, stream_extractor: F) -> Vec<T>
     where
         F: Fn(Exchange, &StreamKind) -> Option<T>,
+        T: Ord,
     {
         let f = &stream_extractor;
 
@@ -335,10 +340,14 @@ impl UniqueStreams {
                 .filter_map(move |stream| f(exchange, stream))
         };
 
-        match exchange_filter {
+        let mut specs: Vec<T> = match exchange_filter {
             Some(exchange) => per_exchange(exchange).collect(),
             None => Exchange::ALL.into_iter().flat_map(per_exchange).collect(),
-        }
+        };
+
+        // Specs are unique, so the unstable sort is deterministic.
+        specs.sort_unstable();
+        specs
     }
 
     pub fn depth_streams(
@@ -432,7 +441,7 @@ impl PersistStreamKind {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
 pub enum StreamTicksize {
     ServerSide(TickMultiplier),
     #[default]
@@ -502,7 +511,7 @@ impl std::fmt::Display for ExchangeInclusive {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum, PartialOrd, Ord)]
 pub enum Exchange {
     BinanceLinear,
     BinanceInverse,
@@ -854,4 +863,59 @@ mod tests {
         };
         assert!(!resolved.matches_trades(&incoming_diff_ticker));
     }
+
+    #[test]
+    fn test_unique_streams_deterministic_specs_ordering() {
+        let t1 = Ticker::new("SOLUSDT", Exchange::BinanceLinear);
+        let ti1 = TickerInfo::new(t1, 0.01, 0.01, None);
+        let s1 = StreamKind::DepthAndTrades {
+            ticker_info: ti1,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        let t2 = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ti2 = TickerInfo::new(t2, 0.1, 0.001, None);
+        let s2 = StreamKind::DepthAndTrades {
+            ticker_info: ti2,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        let t3 = Ticker::new("ETHUSDT", Exchange::BinanceLinear);
+        let ti3 = TickerInfo::new(t3, 0.01, 0.001, None);
+        let s3 = StreamKind::DepthAndTrades {
+            ticker_info: ti3,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        // UniqueStreams with order: SOL, BTC, ETH
+        let mut u1 = UniqueStreams::default();
+        u1.add(s1);
+        u1.add(s2);
+        u1.add(s3);
+
+        // UniqueStreams with order: ETH, SOL, BTC
+        let mut u2 = UniqueStreams::default();
+        u2.add(s3);
+        u2.add(s1);
+        u2.add(s2);
+
+        // UniqueStreams with duplicate popout pane streams
+        let mut u3 = UniqueStreams::default();
+        u3.add(s2);
+        u3.add(s3);
+        u3.add(s1);
+        u3.add(s2);
+        u3.add(s1);
+
+        let d1 = u1.depth_streams(Some(Exchange::BinanceLinear));
+        let d2 = u2.depth_streams(Some(Exchange::BinanceLinear));
+        let d3 = u3.depth_streams(Some(Exchange::BinanceLinear));
+
+        assert_eq!(d1, d2, "Stream specs ordering must be deterministic regardless of insertion order");
+        assert_eq!(d1, d3, "Duplicate pane/popout specs must collapse and produce identical stable order");
+    }
 }
+

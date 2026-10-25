@@ -60,7 +60,7 @@ pub fn volume_size_unit() -> SizeUnit {
 /// Maps user-selected update intervals to exchange-specific depth levels.
 /// Used for some exchanges that determine push frequency based on subscribed depth level
 /// (e.g., Bybit pushes every 300ms for 1000-level depth, 100ms for 200-level).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
 pub enum PushFrequency {
     #[default]
     ServerDefault,
@@ -432,7 +432,7 @@ impl fmt::Display for SerTicker {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ticker {
     bytes: [u8; Ticker::MAX_LEN as usize],
     pub exchange: Exchange,
@@ -670,7 +670,7 @@ pub enum StreamPairKind {
     MultiSource(Vec<TickerInfo>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize, Hash, Eq, PartialOrd, Ord)]
 pub struct TickerInfo {
     pub ticker: Ticker,
     #[serde(rename = "tickSize")]
@@ -881,7 +881,7 @@ fn str_f32_parse(s: &str) -> f32 {
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Hash, PartialOrd, Ord)]
 pub struct TickMultiplier(pub u16);
 
 impl std::fmt::Display for TickMultiplier {
