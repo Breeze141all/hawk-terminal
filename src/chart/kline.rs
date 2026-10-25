@@ -936,6 +936,7 @@ impl KlineChart {
                     exchange::adapter::Exchange::MexcSpot
                     | exchange::adapter::Exchange::MexcLinear
                     | exchange::adapter::Exchange::MexcInverse => "mexc",
+                    exchange::adapter::Exchange::CoinbaseSpot => "coinbase",
                 };
                 let trades_data_path =
                     data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -2470,6 +2471,7 @@ impl KlineChart {
                 exchange::adapter::Exchange::MexcSpot
                 | exchange::adapter::Exchange::MexcLinear
                 | exchange::adapter::Exchange::MexcInverse => "mexc",
+                exchange::adapter::Exchange::CoinbaseSpot => "coinbase",
             };
             let trades_data_path =
                 data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -2845,6 +2847,7 @@ impl KlineChart {
                     exchange::adapter::Exchange::MexcSpot
                     | exchange::adapter::Exchange::MexcLinear
                     | exchange::adapter::Exchange::MexcInverse => "mexc",
+                    exchange::adapter::Exchange::CoinbaseSpot => "coinbase",
                 };
                 let trades_data_path =
                     data::data_path(Some(&format!("market_data/{exchange_folder}/")));

@@ -22,7 +22,7 @@ use exchange::{
     Kline, PushFrequency, StreamPairKind, TickMultiplier, TickerInfo, Timeframe, Trade,
     adapter::{
         self, AdapterError, Exchange, PersistStreamKind, ResolvedStream, StreamConfig, StreamKind,
-        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, hyperliquid, mexc, okex,
+        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, coinbase, hyperliquid, mexc, okex,
     },
     depth::Depth,
     fetcher::{FetchRange, FetchedData, NetOiInterval},
@@ -1999,6 +1999,7 @@ fn request_fetch(
                     Exchange::OkexSpot | Exchange::OkexLinear | Exchange::OkexInverse => "okex",
                     Exchange::HyperliquidSpot | Exchange::HyperliquidLinear => "hyperliquid",
                     Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => "mexc",
+                    Exchange::CoinbaseSpot => "coinbase",
                 };
                 let data_path = data::data_path(Some(&format!("market_data/{exchange_folder}/")));
 
@@ -2398,6 +2399,12 @@ pub fn depth_subscription(
                 |cfg: &StreamConfig<TickerInfo>| mexc::connect_market_stream(cfg.id, cfg.push_freq);
             Subscription::run_with(config, builder)
         }
+        Exchange::CoinbaseSpot => {
+            let builder = |cfg: &StreamConfig<TickerInfo>| {
+                coinbase::connect_market_stream(cfg.id, cfg.push_freq)
+            };
+            Subscription::run_with(config, builder)
+        }
     }
 }
 
@@ -2434,6 +2441,12 @@ pub fn kline_subscription(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             let builder = |cfg: &StreamConfig<Vec<(TickerInfo, Timeframe)>>| {
                 mexc::connect_kline_stream(cfg.id.clone(), cfg.market_type)
+            };
+            Subscription::run_with(config, builder)
+        }
+        Exchange::CoinbaseSpot => {
+            let builder = |cfg: &StreamConfig<Vec<(TickerInfo, Timeframe)>>| {
+                coinbase::connect_kline_stream(cfg.id.clone(), cfg.market_type)
             };
             Subscription::run_with(config, builder)
         }

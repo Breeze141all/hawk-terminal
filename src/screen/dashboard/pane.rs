@@ -293,7 +293,10 @@ impl State {
                     );
                 }
             }
-            Exchange::BinanceLinear | Exchange::BinanceInverse | Exchange::BinanceSpot => {
+            Exchange::BinanceLinear
+            | Exchange::BinanceInverse
+            | Exchange::BinanceSpot
+            | Exchange::CoinbaseSpot => {
                 self.notifications
                     .retain(|t| !t.title.contains("Footprint"));
             }

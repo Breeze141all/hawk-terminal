@@ -371,6 +371,7 @@ impl SerTicker {
             Exchange::MexcLinear => "MexcLinear",
             Exchange::MexcInverse => "MexcInverse",
             Exchange::MexcSpot => "MexcSpot",
+            Exchange::CoinbaseSpot => "CoinbaseSpot",
         }
     }
 
@@ -390,6 +391,7 @@ impl SerTicker {
             "MexcLinear" => Ok(Exchange::MexcLinear),
             "MexcInverse" => Ok(Exchange::MexcInverse),
             "MexcSpot" => Ok(Exchange::MexcSpot),
+            "CoinbaseSpot" => Ok(Exchange::CoinbaseSpot),
             _ => Err(format!("Unknown exchange: {}", s)),
         }
     }

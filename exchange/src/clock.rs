@@ -126,6 +126,11 @@ pub fn parse_server_time_from_response(
                     return Some(ts);
                 }
             }
+            Exchange::CoinbaseSpot => {
+                if let Some(epoch) = val.get("epoch").and_then(Value::as_f64) {
+                    return Some((epoch * 1000.0) as u64);
+                }
+            }
         }
     }
 
@@ -163,6 +168,7 @@ pub async fn ping_server_time(exchange: Exchange) -> Result<i64, AdapterError> {
             false,
             None,
         ),
+        Exchange::CoinbaseSpot => ("https://api.exchange.coinbase.com/time", false, None),
     };
 
     let client = reqwest::Client::builder()

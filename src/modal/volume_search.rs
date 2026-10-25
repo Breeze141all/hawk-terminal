@@ -93,6 +93,7 @@ impl std::fmt::Display for TickerDisplayWrapper {
             ExchangeInclusive::Hyperliquid => "Hyperliquid",
             ExchangeInclusive::Okex => "OKX",
             ExchangeInclusive::Mexc => "MEXC",
+            ExchangeInclusive::Coinbase => "Coinbase",
         };
         write!(f, "{ex}: {sym}")
     }
@@ -854,6 +855,7 @@ impl VolumeSearchModal {
             (ExchangeInclusive::Bybit, "Bybit"),
             (ExchangeInclusive::Okex, "OKX"),
             (ExchangeInclusive::Hyperliquid, "Hyperliquid"),
+            (ExchangeInclusive::Coinbase, "Coinbase"),
         ] {
             let is_selected = self.selected_exchange_filter == Some(ex_inc);
             exchange_pills = exchange_pills.push(
@@ -1704,6 +1706,7 @@ pub fn exchange_data_folder(exchange: exchange::adapter::Exchange) -> &'static s
         Exchange::OkexSpot | Exchange::OkexLinear | Exchange::OkexInverse => "okex",
         Exchange::HyperliquidSpot | Exchange::HyperliquidLinear => "hyperliquid",
         Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => "mexc",
+        Exchange::CoinbaseSpot => "coinbase",
     }
 }
 
@@ -2060,6 +2063,9 @@ mod tests {
                 }
                 Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
                     assert_eq!(inclusive, ExchangeInclusive::Mexc);
+                }
+                Exchange::CoinbaseSpot => {
+                    assert_eq!(inclusive, ExchangeInclusive::Coinbase);
                 }
             }
         }

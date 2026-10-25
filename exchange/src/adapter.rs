@@ -12,6 +12,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 pub mod binance;
 pub mod bitcoincounterflow;
 pub mod bybit;
+pub mod coinbase;
 pub mod hyperliquid;
 pub mod mexc;
 pub mod okex;
@@ -469,17 +470,19 @@ pub enum ExchangeInclusive {
     Hyperliquid,
     Okex,
     Mexc,
+    Coinbase,
 }
 
 pub type Venue = ExchangeInclusive;
 
 impl ExchangeInclusive {
-    pub const ALL: [ExchangeInclusive; 5] = [
+    pub const ALL: [ExchangeInclusive; 6] = [
         ExchangeInclusive::Bybit,
         ExchangeInclusive::Binance,
         ExchangeInclusive::Hyperliquid,
         ExchangeInclusive::Okex,
         ExchangeInclusive::Mexc,
+        ExchangeInclusive::Coinbase,
     ];
 
     pub fn of(ex: Exchange) -> Self {
@@ -491,6 +494,7 @@ impl ExchangeInclusive {
             Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => Self::Hyperliquid,
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Self::Okex,
             Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => Self::Mexc,
+            Exchange::CoinbaseSpot => Self::Coinbase,
         }
     }
 }
@@ -506,6 +510,7 @@ impl std::fmt::Display for ExchangeInclusive {
                 ExchangeInclusive::Hyperliquid => "Hyperliquid",
                 ExchangeInclusive::Okex => "Okex",
                 ExchangeInclusive::Mexc => "MEXC",
+                ExchangeInclusive::Coinbase => "Coinbase",
             }
         )
     }
@@ -527,6 +532,7 @@ pub enum Exchange {
     MexcLinear,
     MexcInverse,
     MexcSpot,
+    CoinbaseSpot,
 }
 
 impl std::fmt::Display for Exchange {
@@ -549,6 +555,7 @@ impl std::fmt::Display for Exchange {
                 Exchange::MexcLinear => "Mexc Linear",
                 Exchange::MexcInverse => "Mexc Inverse",
                 Exchange::MexcSpot => "Mexc Spot",
+                Exchange::CoinbaseSpot => "Coinbase Spot",
             }
         )
     }
@@ -573,13 +580,14 @@ impl FromStr for Exchange {
             "Mexc Linear" => Ok(Exchange::MexcLinear),
             "Mexc Inverse" => Ok(Exchange::MexcInverse),
             "Mexc Spot" => Ok(Exchange::MexcSpot),
+            "Coinbase Spot" => Ok(Exchange::CoinbaseSpot),
             _ => Err(format!("Invalid exchange: {}", s)),
         }
     }
 }
 
 impl Exchange {
-    pub const ALL: [Exchange; 14] = [
+    pub const ALL: [Exchange; 15] = [
         Exchange::BinanceLinear,
         Exchange::BinanceInverse,
         Exchange::BinanceSpot,
@@ -594,6 +602,7 @@ impl Exchange {
         Exchange::MexcLinear,
         Exchange::MexcInverse,
         Exchange::MexcSpot,
+        Exchange::CoinbaseSpot,
     ];
 
     pub fn venue(&self) -> Venue {
@@ -615,7 +624,8 @@ impl Exchange {
             | Exchange::BybitSpot
             | Exchange::HyperliquidSpot
             | Exchange::OkexSpot
-            | Exchange::MexcSpot => MarketKind::Spot,
+            | Exchange::MexcSpot
+            | Exchange::CoinbaseSpot => MarketKind::Spot,
         }
     }
 
@@ -665,7 +675,7 @@ impl Exchange {
 
     pub fn supports_kline_timeframe(&self, tf: Timeframe) -> bool {
         match self.venue() {
-            Venue::Binance | Venue::Bybit | Venue::Hyperliquid | Venue::Okex => {
+            Venue::Binance | Venue::Bybit | Venue::Hyperliquid | Venue::Okex | Venue::Coinbase => {
                 Timeframe::KLINE.contains(&tf)
             }
             Venue::Mexc => {
@@ -757,6 +767,9 @@ pub async fn fetch_ticker_info(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_ticksize(market_type).await
         }
+        Exchange::CoinbaseSpot => {
+            coinbase::fetch_ticksize(market_type).await
+        }
     }
 }
 
@@ -781,6 +794,9 @@ pub async fn fetch_ticker_prices(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_ticker_prices(market_type).await
         }
+        Exchange::CoinbaseSpot => {
+            coinbase::fetch_ticker_prices(market_type).await
+        }
     }
 }
 
@@ -804,6 +820,9 @@ pub async fn fetch_klines(
         }
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_klines(ticker_info, timeframe, range).await
+        }
+        Exchange::CoinbaseSpot => {
+            coinbase::fetch_klines(ticker_info, timeframe, range).await
         }
     }
 }

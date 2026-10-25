@@ -141,6 +141,7 @@ pub fn raw_trade_subpath(ticker_info: &TickerInfo) -> String {
         Exchange::MexcSpot => format!("data/spot/daily/trades/{symbol_upper}"),
         Exchange::MexcLinear => format!("data/linear/daily/trades/{symbol_upper}"),
         Exchange::MexcInverse => format!("data/inverse/daily/trades/{symbol_upper}"),
+        Exchange::CoinbaseSpot => format!("data/spot/daily/trades/{symbol_upper}"),
     }
 }
 

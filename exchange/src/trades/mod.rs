@@ -26,6 +26,9 @@ pub async fn dispatch_fetch_trades(
         Exchange::MexcSpot | Exchange::MexcLinear | Exchange::MexcInverse => {
             crate::adapter::mexc::fetch_trades(ticker_info, from_time, data_path).await
         }
+        Exchange::CoinbaseSpot => {
+            crate::adapter::coinbase::fetch_trades(ticker_info, from_time, data_path).await
+        }
     }
 }
 
