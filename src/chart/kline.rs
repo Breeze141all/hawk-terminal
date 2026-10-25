@@ -5359,13 +5359,22 @@ impl canvas::Program<Message> for KlineChart {
         }
 
         if self.drawing_state.borrow().active_tool != DrawingTool::None {
-            return mouse::Interaction::Crosshair;
+            return mouse::Interaction::Pointer;
         }
+
+        if self.drawing_state.borrow().drag.is_some() {
+            return mouse::Interaction::Grabbing;
+        }
+
         match interaction {
             Interaction::Panning { .. } => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
             Interaction::None | Interaction::Ruler { .. } => {
-                if cursor.is_over(bounds) {
+                let has_selected_drawing = self.drawing_state.borrow().selected_drawing.is_some()
+                    || self.drawings.iter().any(|d| d.is_selected);
+                if has_selected_drawing && cursor.is_over(bounds) {
+                    mouse::Interaction::default()
+                } else if cursor.is_over(bounds) {
                     mouse::Interaction::Crosshair
                 } else {
                     mouse::Interaction::default()
@@ -14025,5 +14034,65 @@ mod tests {
         let right_key = make_arrow(iced::keyboard::key::Named::ArrowRight, iced::keyboard::key::Code::ArrowRight, false);
         let action_right = chart.update(&mut interaction, &right_key, bounds, cursor);
         assert!(action_right.is_some());
+    }
+
+    #[test]
+    fn test_ter35_contextual_mouse_interaction_for_drawing_tools_and_selection() {
+        use iced::widget::canvas::Program;
+        let mut chart = make_test_chart();
+        let interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor_over = mouse::Cursor::Available(Point::new(200.0, 200.0));
+        let cursor_outside = mouse::Cursor::Available(Point::new(900.0, 700.0));
+
+        // 1. Neutral state: crosshair inside bounds, default outside bounds
+        let ic_neutral = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_neutral, mouse::Interaction::Crosshair);
+        let ic_out = chart.mouse_interaction(&interaction, bounds, cursor_outside);
+        assert_eq!(ic_out, mouse::Interaction::default());
+
+        // 2. Armed drawing tool (Trendline) switches cursor to Pointer
+        chart.set_active_drawing_tool(DrawingTool::Trendline);
+        let ic_armed = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_armed, mouse::Interaction::Pointer);
+
+        // 3. Armed drawing tool (Rectangle) switches cursor to Pointer
+        chart.set_active_drawing_tool(DrawingTool::Rectangle);
+        let ic_rect = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_rect, mouse::Interaction::Pointer);
+
+        // 4. Disarming drawing tool restores neutral Crosshair
+        chart.set_active_drawing_tool(DrawingTool::None);
+        let ic_disarmed = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_disarmed, mouse::Interaction::Crosshair);
+
+        // 5. Selected drawing present switches cursor to system Arrow (default) instead of Crosshair
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        let ic_selected = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_selected, mouse::Interaction::default());
+
+        // 6. Active drag switches cursor to Grabbing
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingDrawing {
+            start_time: 0,
+            start_price: 100.0,
+            initial_drawing: chart.drawings[0].clone(),
+            current_drawing: chart.drawings[0].clone(),
+        });
+        let ic_drag = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_drag, mouse::Interaction::Grabbing);
+
+        chart.drawing_state.borrow_mut().drag = None;
+
+        // 7. Panning interaction takes precedence
+        let pan_interaction = Interaction::Panning {
+            translation: iced::Vector::ZERO,
+            start: Point::new(10.0, 10.0),
+        };
+        let ic_pan = chart.mouse_interaction(&pan_interaction, bounds, cursor_over);
+        assert_eq!(ic_pan, mouse::Interaction::Grabbing);
     }
 }
