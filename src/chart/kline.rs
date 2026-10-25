@@ -381,7 +381,7 @@ pub struct KlineChart {
     pub expanded_indicator: Option<KlineIndicator>,
     pub(crate) history_lookback_input: String,
     pub is_user_panning: bool,
-    pub(crate) last_nudge: Option<(uuid::Uuid, Instant)>,
+    pub(crate) last_nudge: Option<(Vec<uuid::Uuid>, Instant)>,
 }
 
 impl KlineChart {
@@ -1279,13 +1279,18 @@ impl KlineChart {
             return None;
         }
 
+        let current_ids: Vec<uuid::Uuid> = selected_unlocked
+            .iter()
+            .map(|&idx| self.drawings[idx].id)
+            .collect();
+
         if selected_unlocked.len() == 1 {
             let idx = selected_unlocked[0];
             let id = self.drawings[idx].id;
-            let is_burst = self.last_nudge.is_some_and(|(prev_id, prev_t)| {
-                prev_id == id && now.duration_since(prev_t).as_millis() <= 500
+            let is_burst = self.last_nudge.as_ref().is_some_and(|(prev_ids, prev_t)| {
+                prev_ids.len() == 1 && prev_ids[0] == id && now.duration_since(*prev_t).as_millis() <= 500
             });
-            self.last_nudge = Some((id, now));
+            self.last_nudge = Some((vec![id], now));
 
             if is_burst
                 && let Some(DrawingHistoryAction::Update { old: _, new }) =
@@ -1310,27 +1315,49 @@ impl KlineChart {
             self.invalidate_all();
             Some((vec![updated], synced))
         } else {
-            let old_drawings: Vec<Drawing> = selected_unlocked
-                .iter()
-                .map(|&idx| self.drawings[idx].clone())
-                .collect();
+            let is_burst = self.last_nudge.as_ref().is_some_and(|(prev_ids, prev_t)| {
+                prev_ids == &current_ids && now.duration_since(*prev_t).as_millis() <= 500
+            });
+            self.last_nudge = Some((current_ids, now));
 
-            for &idx in &selected_unlocked {
-                self.drawings[idx].translate(time_delta, price_delta);
+            if is_burst
+                && let Some(DrawingHistoryAction::BatchUpdate(pairs)) = self.undo_stack.last_mut()
+                && pairs.len() == selected_unlocked.len()
+            {
+                for &idx in &selected_unlocked {
+                    self.drawings[idx].translate(time_delta, price_delta);
+                }
+                for (pair, &idx) in pairs.iter_mut().zip(&selected_unlocked) {
+                    pair.1 = self.drawings[idx].clone();
+                }
+                self.redo_stack.clear();
+            } else {
+                let old_drawings: Vec<Drawing> = selected_unlocked
+                    .iter()
+                    .map(|&idx| self.drawings[idx].clone())
+                    .collect();
+
+                for &idx in &selected_unlocked {
+                    self.drawings[idx].translate(time_delta, price_delta);
+                }
+
+                let new_drawings: Vec<Drawing> = selected_unlocked
+                    .iter()
+                    .map(|&idx| self.drawings[idx].clone())
+                    .collect();
+
+                let pairs: Vec<(Drawing, Drawing)> = old_drawings
+                    .into_iter()
+                    .zip(new_drawings.iter().cloned())
+                    .collect();
+
+                self.push_undo(DrawingHistoryAction::BatchUpdate(pairs));
             }
 
             let new_drawings: Vec<Drawing> = selected_unlocked
                 .iter()
                 .map(|&idx| self.drawings[idx].clone())
                 .collect();
-
-            let pairs: Vec<(Drawing, Drawing)> = old_drawings
-                .into_iter()
-                .zip(new_drawings.iter().cloned())
-                .collect();
-
-            self.push_undo(DrawingHistoryAction::BatchUpdate(pairs));
-            self.last_nudge = None;
 
             let synced: Vec<Drawing> = new_drawings
                 .iter()
@@ -9546,7 +9573,7 @@ fn draw_chart_drawings(
                     let exit_x = chart.interval_to_x(outcome.exit_time).clamp(entry_x, end_x);
                     let exit_y = chart.price_to_y(Price::from_f32(outcome.exit_price));
 
-                    // Dynamic active profit/loss highlight zone ("воно більш зеленим стає")
+                    // Dynamic active profit/loss highlight zone matching position color
                     let active_w = (exit_x - entry_x).max(0.0);
                     let active_min_y = entry_y.min(exit_y);
                     let active_h = (entry_y - exit_y).abs();
@@ -9554,13 +9581,13 @@ fn draw_chart_drawings(
                         let active_fill = if outcome.is_profit {
                             iced::Color::from_rgba(
                                 p_col[0],
-                                (p_col[1] * 1.25).min(1.0),
+                                p_col[1],
                                 p_col[2],
                                 (p_col[3] * 1.8).clamp(0.25, 0.65),
                             )
                         } else {
                             iced::Color::from_rgba(
-                                (s_col[0] * 1.25).min(1.0),
+                                s_col[0],
                                 s_col[1],
                                 s_col[2],
                                 (s_col[3] * 1.8).clamp(0.25, 0.65),
@@ -9573,12 +9600,22 @@ fn draw_chart_drawings(
                         );
                     }
 
-                    // Tracking dashed line from entry to exit
+                    // Tracking dashed line from entry to exit matching position color
                     if pos_style.show_price_path && active_w > 0.5 {
                         let line_color = if outcome.is_profit {
-                            iced::Color::from_rgba(0.4, 0.95, 0.6, 0.85)
+                            iced::Color::from_rgba(
+                                p_col[0],
+                                p_col[1],
+                                p_col[2],
+                                (p_col[3] * 3.0).clamp(0.75, 0.95),
+                            )
                         } else {
-                            iced::Color::from_rgba(0.95, 0.45, 0.45, 0.85)
+                            iced::Color::from_rgba(
+                                s_col[0],
+                                s_col[1],
+                                s_col[2],
+                                (s_col[3] * 3.0).clamp(0.75, 0.95),
+                            )
                         };
                         let dash_stroke = Stroke {
                             style: canvas::Style::Solid(line_color),
@@ -9596,9 +9633,9 @@ fn draw_chart_drawings(
 
                         if outcome.is_closed {
                             let dot_color = if outcome.is_profit {
-                                iced::Color::from_rgb(0.2, 0.9, 0.4)
+                                iced::Color::from_rgb(p_col[0], p_col[1], p_col[2])
                             } else {
-                                iced::Color::from_rgb(0.9, 0.25, 0.25)
+                                iced::Color::from_rgb(s_col[0], s_col[1], s_col[2])
                             };
                             frame.fill(
                                 &Path::circle(Point::new(exit_x, exit_y), 3.0 / chart.scaling),
@@ -12440,11 +12477,41 @@ mod tests {
     }
 
     #[test]
+    fn test_position_active_fill_color_matches_custom_style() {
+        let gray_profit = [0.65f32, 0.65, 0.65, 0.2];
+        let p_col = gray_profit;
+        let is_profit = true;
+
+        let active_fill = if is_profit {
+            iced::Color::from_rgba(
+                p_col[0],
+                p_col[1],
+                p_col[2],
+                (p_col[3] * 1.8).clamp(0.25, 0.65),
+            )
+        } else {
+            iced::Color::from_rgba(
+                p_col[0],
+                p_col[1],
+                p_col[2],
+                (p_col[3] * 1.8).clamp(0.25, 0.65),
+            )
+        };
+
+        // Assert RGB channels match exact position color without green bias
+        assert_eq!(active_fill.r, 0.65);
+        assert_eq!(active_fill.g, 0.65);
+        assert_eq!(active_fill.b, 0.65);
+        assert!((active_fill.a - 0.36).abs() < 1e-4);
+    }
+
+    #[test]
     fn test_position_shift_g_keyboard_shortcut() {
         use iced::widget::canvas::Program;
         let mut chart = make_test_chart();
         let mut interaction = Interaction::None;
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        chart.chart.bounds = bounds;
         let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
 
         let pos = Drawing::position(
@@ -13851,5 +13918,112 @@ mod tests {
         if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
             assert_eq!(price, 205.0);
         }
+    }
+
+    #[test]
+    fn test_nudge_batch_burst_coalescing_undo_redo() {
+        let mut chart = make_test_chart();
+        let mut d1 = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d1.is_selected = true;
+        let mut d2 = Drawing::horizontal(200.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d2.is_selected = true;
+        chart.add_drawing(d1);
+        chart.add_drawing(d2);
+
+        // 3 rapid batch nudges
+        chart.nudge_selected_drawings(0, 0.5);
+        chart.nudge_selected_drawings(0, 0.5);
+        chart.nudge_selected_drawings(0, 0.5);
+
+        assert_eq!(
+            chart.undo_stack.len(),
+            1,
+            "Burst batch nudges should coalesce into a single undo action"
+        );
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert!((price - 101.5).abs() < 1e-4);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert!((price - 201.5).abs() < 1e-4);
+        }
+
+        // Single undo reverts both drawings
+        chart.undo();
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert!((price - 100.0).abs() < 1e-4);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert!((price - 200.0).abs() < 1e-4);
+        }
+
+        // Single redo restores both drawings
+        chart.redo();
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert!((price - 101.5).abs() < 1e-4);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert!((price - 201.5).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_nudge_keyboard_arrow_events() {
+        use iced::widget::canvas::Program;
+        let mut chart = make_test_chart();
+        let mut interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        chart.chart.bounds = bounds;
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+
+        let make_arrow = |named: iced::keyboard::key::Named, code: iced::keyboard::key::Code, shift: bool| {
+            let mut modifiers = iced::keyboard::Modifiers::default();
+            if shift {
+                modifiers |= iced::keyboard::Modifiers::SHIFT;
+            }
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key: iced::keyboard::Key::Named(named),
+                location: iced::keyboard::Location::Standard,
+                modifiers,
+                repeat: false,
+                text: None,
+                physical_key: iced::keyboard::key::Physical::Code(code),
+                modified_key: iced::keyboard::Key::Named(named),
+            })
+        };
+
+        // Without any selection, arrow keys should not produce an action
+        let up_key = make_arrow(iced::keyboard::key::Named::ArrowUp, iced::keyboard::key::Code::ArrowUp, false);
+        let action = chart.update(&mut interaction, &up_key, bounds, cursor);
+        assert!(action.is_none());
+
+        // Add drawing and select it
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        // ArrowUp publishes action
+        let action_up = chart.update(&mut interaction, &up_key, bounds, cursor);
+        assert!(action_up.is_some());
+
+        // Shift+ArrowUp publishes action
+        let shift_up_key = make_arrow(iced::keyboard::key::Named::ArrowUp, iced::keyboard::key::Code::ArrowUp, true);
+        let action_shift_up = chart.update(&mut interaction, &shift_up_key, bounds, cursor);
+        assert!(action_shift_up.is_some());
+
+        // ArrowDown publishes action
+        let down_key = make_arrow(iced::keyboard::key::Named::ArrowDown, iced::keyboard::key::Code::ArrowDown, false);
+        let action_down = chart.update(&mut interaction, &down_key, bounds, cursor);
+        assert!(action_down.is_some());
+
+        // ArrowLeft publishes action
+        let left_key = make_arrow(iced::keyboard::key::Named::ArrowLeft, iced::keyboard::key::Code::ArrowLeft, false);
+        let action_left = chart.update(&mut interaction, &left_key, bounds, cursor);
+        assert!(action_left.is_some());
+
+        // ArrowRight publishes action
+        let right_key = make_arrow(iced::keyboard::key::Named::ArrowRight, iced::keyboard::key::Code::ArrowRight, false);
+        let action_right = chart.update(&mut interaction, &right_key, bounds, cursor);
+        assert!(action_right.is_some());
     }
 }

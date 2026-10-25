@@ -10,6 +10,7 @@ use iced::{Alignment, Color, Element, Length, Theme, border, padding};
 #[derive(Debug, Clone)]
 pub enum SelectionToolbarAction {
     ToggleSettings,
+    OpenAdvancedSettings,
     ToggleLock,
     ToggleSync,
     Delete,
@@ -67,6 +68,18 @@ pub fn view<'a, Message: 'a + Clone>(
     let tip_settings = tooltip(
         settings_btn,
         Some("Settings"),
+        iced::widget::tooltip::Position::Top,
+    );
+
+    // 3b. Advanced Properties button (Edit)
+    let advanced_icon = icon_text(Icon::Edit, 14);
+    let advanced_btn = button(advanced_icon)
+        .padding(4)
+        .style(|theme: &Theme, status| toolbar_button_style(theme, status, false))
+        .on_press(on_action(SelectionToolbarAction::OpenAdvancedSettings));
+    let tip_advanced = tooltip(
+        advanced_btn,
+        Some("Advanced Properties"),
         iced::widget::tooltip::Position::Top,
     );
 
@@ -197,6 +210,7 @@ pub fn view<'a, Message: 'a + Clone>(
             r = r.push(jb);
         }
         r.push(tip_settings)
+            .push(tip_advanced)
             .push(tip_lock)
             .push(tip_sync)
             .push(tip_delete)
@@ -208,6 +222,7 @@ pub fn view<'a, Message: 'a + Clone>(
             r = r.push(jb);
         }
         r.push(tip_settings)
+            .push(tip_advanced)
             .push(tip_lock)
             .push(tip_sync)
             .push(tip_delete)
@@ -418,7 +433,19 @@ fn view_settings<'a, Message: 'a + Clone>(
             }
         });
 
-    column![separator, preset_row, color_row, width_row, opacity_row,]
+    let advanced_btn = button(
+        row![
+            icon_text(Icon::Edit, 10),
+            text("Advanced Properties...").size(9).font(style::AZERET_MONO),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding(padding::top(2).bottom(2).left(6).right(6))
+    .style(|theme, status| toolbar_button_style(theme, status, false))
+    .on_press(on_action(SelectionToolbarAction::OpenAdvancedSettings));
+
+    column![separator, preset_row, color_row, width_row, opacity_row, advanced_btn]
         .spacing(6)
         .padding(padding::top(4).bottom(2).left(2).right(2))
         .into()
@@ -793,6 +820,18 @@ fn view_position_settings<'a, Message: 'a + Clone>(
     .spacing(4)
     .align_y(Alignment::Center);
 
+    let advanced_btn = button(
+        row![
+            icon_text(Icon::Edit, 10),
+            text("Advanced Properties...").size(9).font(style::AZERET_MONO),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding(padding::top(2).bottom(2).left(6).right(6))
+    .style(|theme, status| toolbar_button_style(theme, status, false))
+    .on_press(on_action(SelectionToolbarAction::OpenAdvancedSettings));
+
     column![
         separator(),
         preset_row,
@@ -806,6 +845,8 @@ fn view_position_settings<'a, Message: 'a + Clone>(
         entry_color_row,
         width_row,
         path_row,
+        separator(),
+        advanced_btn,
     ]
     .spacing(5)
     .padding(padding::top(4).bottom(2).left(2).right(2))
