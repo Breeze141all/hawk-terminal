@@ -12,6 +12,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 pub mod binance;
 pub mod bitcoincounterflow;
 pub mod bybit;
+pub mod coinbase;
 pub mod hyperliquid;
 pub mod mexc;
 pub mod okex;
@@ -321,9 +322,14 @@ impl UniqueStreams {
         });
     }
 
+    /// Collects stream specs in a stable total order.
+    ///
+    /// Subscription::run_with hashes the chunked StreamConfig to identify a
+    /// stream, so the order must depend only on the set of streams.
     fn streams<T, F>(&self, exchange_filter: Option<Exchange>, stream_extractor: F) -> Vec<T>
     where
         F: Fn(Exchange, &StreamKind) -> Option<T>,
+        T: Ord,
     {
         let f = &stream_extractor;
 
@@ -335,10 +341,14 @@ impl UniqueStreams {
                 .filter_map(move |stream| f(exchange, stream))
         };
 
-        match exchange_filter {
+        let mut specs: Vec<T> = match exchange_filter {
             Some(exchange) => per_exchange(exchange).collect(),
             None => Exchange::ALL.into_iter().flat_map(per_exchange).collect(),
-        }
+        };
+
+        // Specs are unique, so the unstable sort is deterministic.
+        specs.sort_unstable();
+        specs
     }
 
     pub fn depth_streams(
@@ -432,7 +442,9 @@ impl PersistStreamKind {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord,
+)]
 pub enum StreamTicksize {
     ServerSide(TickMultiplier),
     #[default]
@@ -460,17 +472,19 @@ pub enum ExchangeInclusive {
     Hyperliquid,
     Okex,
     Mexc,
+    Coinbase,
 }
 
 pub type Venue = ExchangeInclusive;
 
 impl ExchangeInclusive {
-    pub const ALL: [ExchangeInclusive; 5] = [
+    pub const ALL: [ExchangeInclusive; 6] = [
         ExchangeInclusive::Bybit,
         ExchangeInclusive::Binance,
         ExchangeInclusive::Hyperliquid,
         ExchangeInclusive::Okex,
         ExchangeInclusive::Mexc,
+        ExchangeInclusive::Coinbase,
     ];
 
     pub fn of(ex: Exchange) -> Self {
@@ -482,6 +496,7 @@ impl ExchangeInclusive {
             Exchange::HyperliquidLinear | Exchange::HyperliquidSpot => Self::Hyperliquid,
             Exchange::OkexLinear | Exchange::OkexInverse | Exchange::OkexSpot => Self::Okex,
             Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => Self::Mexc,
+            Exchange::CoinbaseSpot => Self::Coinbase,
         }
     }
 }
@@ -497,12 +512,15 @@ impl std::fmt::Display for ExchangeInclusive {
                 ExchangeInclusive::Hyperliquid => "Hyperliquid",
                 ExchangeInclusive::Okex => "Okex",
                 ExchangeInclusive::Mexc => "MEXC",
+                ExchangeInclusive::Coinbase => "Coinbase",
             }
         )
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum, PartialOrd, Ord,
+)]
 pub enum Exchange {
     BinanceLinear,
     BinanceInverse,
@@ -518,6 +536,7 @@ pub enum Exchange {
     MexcLinear,
     MexcInverse,
     MexcSpot,
+    CoinbaseSpot,
 }
 
 impl std::fmt::Display for Exchange {
@@ -540,6 +559,7 @@ impl std::fmt::Display for Exchange {
                 Exchange::MexcLinear => "Mexc Linear",
                 Exchange::MexcInverse => "Mexc Inverse",
                 Exchange::MexcSpot => "Mexc Spot",
+                Exchange::CoinbaseSpot => "Coinbase Spot",
             }
         )
     }
@@ -564,13 +584,14 @@ impl FromStr for Exchange {
             "Mexc Linear" => Ok(Exchange::MexcLinear),
             "Mexc Inverse" => Ok(Exchange::MexcInverse),
             "Mexc Spot" => Ok(Exchange::MexcSpot),
+            "Coinbase Spot" => Ok(Exchange::CoinbaseSpot),
             _ => Err(format!("Invalid exchange: {}", s)),
         }
     }
 }
 
 impl Exchange {
-    pub const ALL: [Exchange; 14] = [
+    pub const ALL: [Exchange; 15] = [
         Exchange::BinanceLinear,
         Exchange::BinanceInverse,
         Exchange::BinanceSpot,
@@ -585,6 +606,7 @@ impl Exchange {
         Exchange::MexcLinear,
         Exchange::MexcInverse,
         Exchange::MexcSpot,
+        Exchange::CoinbaseSpot,
     ];
 
     pub fn venue(&self) -> Venue {
@@ -606,7 +628,8 @@ impl Exchange {
             | Exchange::BybitSpot
             | Exchange::HyperliquidSpot
             | Exchange::OkexSpot
-            | Exchange::MexcSpot => MarketKind::Spot,
+            | Exchange::MexcSpot
+            | Exchange::CoinbaseSpot => MarketKind::Spot,
         }
     }
 
@@ -656,7 +679,7 @@ impl Exchange {
 
     pub fn supports_kline_timeframe(&self, tf: Timeframe) -> bool {
         match self.venue() {
-            Venue::Binance | Venue::Bybit | Venue::Hyperliquid | Venue::Okex => {
+            Venue::Binance | Venue::Bybit | Venue::Hyperliquid | Venue::Okex | Venue::Coinbase => {
                 Timeframe::KLINE.contains(&tf)
             }
             Venue::Mexc => {
@@ -748,6 +771,7 @@ pub async fn fetch_ticker_info(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_ticksize(market_type).await
         }
+        Exchange::CoinbaseSpot => coinbase::fetch_ticksize(market_type).await,
     }
 }
 
@@ -772,6 +796,7 @@ pub async fn fetch_ticker_prices(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_ticker_prices(market_type).await
         }
+        Exchange::CoinbaseSpot => coinbase::fetch_ticker_prices(market_type).await,
     }
 }
 
@@ -796,6 +821,7 @@ pub async fn fetch_klines(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_klines(ticker_info, timeframe, range).await
         }
+        Exchange::CoinbaseSpot => coinbase::fetch_klines(ticker_info, timeframe, range).await,
     }
 }
 
@@ -853,5 +879,65 @@ mod tests {
             push_freq: PushFrequency::ServerDefault,
         };
         assert!(!resolved.matches_trades(&incoming_diff_ticker));
+    }
+
+    #[test]
+    fn test_unique_streams_deterministic_specs_ordering() {
+        let t1 = Ticker::new("SOLUSDT", Exchange::BinanceLinear);
+        let ti1 = TickerInfo::new(t1, 0.01, 0.01, None);
+        let s1 = StreamKind::DepthAndTrades {
+            ticker_info: ti1,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        let t2 = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
+        let ti2 = TickerInfo::new(t2, 0.1, 0.001, None);
+        let s2 = StreamKind::DepthAndTrades {
+            ticker_info: ti2,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        let t3 = Ticker::new("ETHUSDT", Exchange::BinanceLinear);
+        let ti3 = TickerInfo::new(t3, 0.01, 0.001, None);
+        let s3 = StreamKind::DepthAndTrades {
+            ticker_info: ti3,
+            depth_aggr: StreamTicksize::Client,
+            push_freq: PushFrequency::ServerDefault,
+        };
+
+        // UniqueStreams with order: SOL, BTC, ETH
+        let mut u1 = UniqueStreams::default();
+        u1.add(s1);
+        u1.add(s2);
+        u1.add(s3);
+
+        // UniqueStreams with order: ETH, SOL, BTC
+        let mut u2 = UniqueStreams::default();
+        u2.add(s3);
+        u2.add(s1);
+        u2.add(s2);
+
+        // UniqueStreams with duplicate popout pane streams
+        let mut u3 = UniqueStreams::default();
+        u3.add(s2);
+        u3.add(s3);
+        u3.add(s1);
+        u3.add(s2);
+        u3.add(s1);
+
+        let d1 = u1.depth_streams(Some(Exchange::BinanceLinear));
+        let d2 = u2.depth_streams(Some(Exchange::BinanceLinear));
+        let d3 = u3.depth_streams(Some(Exchange::BinanceLinear));
+
+        assert_eq!(
+            d1, d2,
+            "Stream specs ordering must be deterministic regardless of insertion order"
+        );
+        assert_eq!(
+            d1, d3,
+            "Duplicate pane/popout specs must collapse and produce identical stable order"
+        );
     }
 }

@@ -293,7 +293,10 @@ impl State {
                     );
                 }
             }
-            Exchange::BinanceLinear | Exchange::BinanceInverse | Exchange::BinanceSpot => {
+            Exchange::BinanceLinear
+            | Exchange::BinanceInverse
+            | Exchange::BinanceSpot
+            | Exchange::CoinbaseSpot => {
                 self.notifications
                     .retain(|t| !t.title.contains("Footprint"));
             }
@@ -2541,6 +2544,9 @@ impl State {
                     let symbol = c.ticker_info.ticker.display_symbol_and_type().0;
                     match action {
                         widget::chart::drawing_selection_toolbar::SelectionToolbarAction::ToggleSettings => {
+                            self.selected_drawing_show_settings = !self.selected_drawing_show_settings;
+                        }
+                        widget::chart::drawing_selection_toolbar::SelectionToolbarAction::OpenAdvancedSettings => {
                             if let Some(d) = c.selected_drawing() {
                                 let st = modal::pane::drawing_settings::DrawingSettingsState::new(d);
                                 self.modal = Some(Modal::DrawingSettings(Box::new(st)));
@@ -2865,6 +2871,23 @@ impl State {
                             st.drawing.fill_opacity = Some(op.clamp(0.0, 1.0));
                             needs_update = true;
                         }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetPositionProfitColor(color) => {
+                            st.drawing.set_position_profit_color(color);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetPositionStopColor(color) => {
+                            st.drawing.set_position_stop_color(color);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::SetPositionEntryColor(color) => {
+                            st.drawing.set_position_entry_color(color);
+                            needs_update = true;
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::TogglePositionPricePath => {
+                            let cur = st.drawing.position_style().show_price_path;
+                            st.drawing.set_position_show_price_path(!cur);
+                            needs_update = true;
+                        }
                         modal::pane::drawing_settings::DrawingSettingsAction::TextChanged(txt) => {
                             st.text_input = txt.clone();
                             let mut annot = st.drawing.annotation.clone().unwrap_or_default();
@@ -2908,6 +2931,7 @@ impl State {
                                     data::chart::drawing::DrawingKind::HorizontalLine { price: p } => *p = price,
                                     data::chart::drawing::DrawingKind::Trendline { p1, .. } => p1.1 = price,
                                     data::chart::drawing::DrawingKind::Rectangle { p1, .. } => p1.1 = price,
+                                    data::chart::drawing::DrawingKind::Position { entry, .. } => entry.1 = price,
                                     _ => {}
                                 }
                                 needs_update = true;
@@ -2919,8 +2943,18 @@ impl State {
                                 match &mut st.drawing.kind {
                                     data::chart::drawing::DrawingKind::Trendline { p2, .. } => p2.1 = price,
                                     data::chart::drawing::DrawingKind::Rectangle { p2, .. } => p2.1 = price,
+                                    data::chart::drawing::DrawingKind::Position { stop_price, .. } => *stop_price = price,
                                     _ => {}
                                 }
+                                needs_update = true;
+                            }
+                        }
+                        modal::pane::drawing_settings::DrawingSettingsAction::CoordTargetPriceChanged(tp_s) => {
+                            st.coord_target_price = tp_s.clone();
+                            if let Ok(price) = tp_s.trim().parse::<f32>()
+                                && let data::chart::drawing::DrawingKind::Position { ref mut target_price, .. } = st.drawing.kind
+                            {
+                                *target_price = price;
                                 needs_update = true;
                             }
                         }
@@ -2930,6 +2964,7 @@ impl State {
                                 match &mut st.drawing.kind {
                                     data::chart::drawing::DrawingKind::Trendline { p1, .. } => p1.0 = time_ms,
                                     data::chart::drawing::DrawingKind::Rectangle { p1, .. } => p1.0 = time_ms,
+                                    data::chart::drawing::DrawingKind::Position { entry, .. } => entry.0 = time_ms,
                                     _ => {}
                                 }
                                 needs_update = true;
@@ -2941,6 +2976,7 @@ impl State {
                                 match &mut st.drawing.kind {
                                     data::chart::drawing::DrawingKind::Trendline { p2, .. } => p2.0 = time_ms,
                                     data::chart::drawing::DrawingKind::Rectangle { p2, .. } => p2.0 = time_ms,
+                                    data::chart::drawing::DrawingKind::Position { end_time, .. } => *end_time = Some(time_ms),
                                     _ => {}
                                 }
                                 needs_update = true;

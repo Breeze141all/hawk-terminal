@@ -20,7 +20,7 @@ A sovereign, native desktop charting and order flow intelligence platform for cr
   - Bybit (Linear Perpetuals & Spot)
   - Hyperliquid (Perpetuals L1/L2)
   - OKX (Swap & Futures)
-- **Zero-Telemetry Security**: All API keys, layouts, and journal notes stay 100% encrypted on local disk.
+- **Local-First, No Analytics**: Layouts, drawings, alerts, and journal notes are stored only on your disk (plain files, not encrypted). Exchange API keys used for trade import are kept in memory only and are never written to disk. The only network traffic is exchange market data, optional trade import, and an update check against the project site.
 
 ---
 

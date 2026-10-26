@@ -3,9 +3,9 @@
 Guidance and architectural constraints for AI Coding Agents (Antigravity, Claude, Codex, Cursor) working with Hawk Terminal.
 
 Please refer to and strictly follow the invariants defined in:
-- [GEMINI.md](file:///c:/Users/Breeze/Documents/hawk-workspace/hawk-client/GEMINI.md)
-- [CLAUDE.md](file:///c:/Users/Breeze/Documents/hawk-workspace/hawk-client/CLAUDE.md)
-- [ROADMAP.md](file:///c:/Users/Breeze/Documents/hawk-workspace/hawk-client/ROADMAP.md)
+- [GEMINI.md](GEMINI.md)
+- [CLAUDE.md](CLAUDE.md)
+- [ROADMAP.md](ROADMAP.md)
 
 ## Core Invariants Summary
 

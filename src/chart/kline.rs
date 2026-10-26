@@ -381,7 +381,7 @@ pub struct KlineChart {
     pub expanded_indicator: Option<KlineIndicator>,
     pub(crate) history_lookback_input: String,
     pub is_user_panning: bool,
-    pub(crate) last_nudge: Option<(uuid::Uuid, Instant)>,
+    pub(crate) last_nudge: Option<(Vec<uuid::Uuid>, Instant)>,
 }
 
 impl KlineChart {
@@ -936,6 +936,7 @@ impl KlineChart {
                     exchange::adapter::Exchange::MexcSpot
                     | exchange::adapter::Exchange::MexcLinear
                     | exchange::adapter::Exchange::MexcInverse => "mexc",
+                    exchange::adapter::Exchange::CoinbaseSpot => "coinbase",
                 };
                 let trades_data_path =
                     data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -1279,13 +1280,20 @@ impl KlineChart {
             return None;
         }
 
+        let current_ids: Vec<uuid::Uuid> = selected_unlocked
+            .iter()
+            .map(|&idx| self.drawings[idx].id)
+            .collect();
+
         if selected_unlocked.len() == 1 {
             let idx = selected_unlocked[0];
             let id = self.drawings[idx].id;
-            let is_burst = self.last_nudge.is_some_and(|(prev_id, prev_t)| {
-                prev_id == id && now.duration_since(prev_t).as_millis() <= 500
+            let is_burst = self.last_nudge.as_ref().is_some_and(|(prev_ids, prev_t)| {
+                prev_ids.len() == 1
+                    && prev_ids[0] == id
+                    && now.duration_since(*prev_t).as_millis() <= 500
             });
-            self.last_nudge = Some((id, now));
+            self.last_nudge = Some((vec![id], now));
 
             if is_burst
                 && let Some(DrawingHistoryAction::Update { old: _, new }) =
@@ -1310,27 +1318,49 @@ impl KlineChart {
             self.invalidate_all();
             Some((vec![updated], synced))
         } else {
-            let old_drawings: Vec<Drawing> = selected_unlocked
-                .iter()
-                .map(|&idx| self.drawings[idx].clone())
-                .collect();
+            let is_burst = self.last_nudge.as_ref().is_some_and(|(prev_ids, prev_t)| {
+                prev_ids == &current_ids && now.duration_since(*prev_t).as_millis() <= 500
+            });
+            self.last_nudge = Some((current_ids, now));
 
-            for &idx in &selected_unlocked {
-                self.drawings[idx].translate(time_delta, price_delta);
+            if is_burst
+                && let Some(DrawingHistoryAction::BatchUpdate(pairs)) = self.undo_stack.last_mut()
+                && pairs.len() == selected_unlocked.len()
+            {
+                for &idx in &selected_unlocked {
+                    self.drawings[idx].translate(time_delta, price_delta);
+                }
+                for (pair, &idx) in pairs.iter_mut().zip(&selected_unlocked) {
+                    pair.1 = self.drawings[idx].clone();
+                }
+                self.redo_stack.clear();
+            } else {
+                let old_drawings: Vec<Drawing> = selected_unlocked
+                    .iter()
+                    .map(|&idx| self.drawings[idx].clone())
+                    .collect();
+
+                for &idx in &selected_unlocked {
+                    self.drawings[idx].translate(time_delta, price_delta);
+                }
+
+                let new_drawings: Vec<Drawing> = selected_unlocked
+                    .iter()
+                    .map(|&idx| self.drawings[idx].clone())
+                    .collect();
+
+                let pairs: Vec<(Drawing, Drawing)> = old_drawings
+                    .into_iter()
+                    .zip(new_drawings.iter().cloned())
+                    .collect();
+
+                self.push_undo(DrawingHistoryAction::BatchUpdate(pairs));
             }
 
             let new_drawings: Vec<Drawing> = selected_unlocked
                 .iter()
                 .map(|&idx| self.drawings[idx].clone())
                 .collect();
-
-            let pairs: Vec<(Drawing, Drawing)> = old_drawings
-                .into_iter()
-                .zip(new_drawings.iter().cloned())
-                .collect();
-
-            self.push_undo(DrawingHistoryAction::BatchUpdate(pairs));
-            self.last_nudge = None;
 
             let synced: Vec<Drawing> = new_drawings
                 .iter()
@@ -2443,6 +2473,7 @@ impl KlineChart {
                 exchange::adapter::Exchange::MexcSpot
                 | exchange::adapter::Exchange::MexcLinear
                 | exchange::adapter::Exchange::MexcInverse => "mexc",
+                exchange::adapter::Exchange::CoinbaseSpot => "coinbase",
             };
             let trades_data_path =
                 data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -2818,6 +2849,7 @@ impl KlineChart {
                     exchange::adapter::Exchange::MexcSpot
                     | exchange::adapter::Exchange::MexcLinear
                     | exchange::adapter::Exchange::MexcInverse => "mexc",
+                    exchange::adapter::Exchange::CoinbaseSpot => "coinbase",
                 };
                 let trades_data_path =
                     data::data_path(Some(&format!("market_data/{exchange_folder}/")));
@@ -5332,13 +5364,22 @@ impl canvas::Program<Message> for KlineChart {
         }
 
         if self.drawing_state.borrow().active_tool != DrawingTool::None {
-            return mouse::Interaction::Crosshair;
+            return mouse::Interaction::Pointer;
         }
+
+        if self.drawing_state.borrow().drag.is_some() {
+            return mouse::Interaction::Grabbing;
+        }
+
         match interaction {
             Interaction::Panning { .. } => mouse::Interaction::Grabbing,
             Interaction::Zoomin { .. } => mouse::Interaction::ZoomIn,
             Interaction::None | Interaction::Ruler { .. } => {
-                if cursor.is_over(bounds) {
+                let has_selected_drawing = self.drawing_state.borrow().selected_drawing.is_some()
+                    || self.drawings.iter().any(|d| d.is_selected);
+                if has_selected_drawing && cursor.is_over(bounds) {
+                    mouse::Interaction::default()
+                } else if cursor.is_over(bounds) {
                     mouse::Interaction::Crosshair
                 } else {
                     mouse::Interaction::default()
@@ -9122,6 +9163,13 @@ pub(crate) fn evaluate_position_outcome(
     }
 }
 
+/// Fill for the highlighted zone between a position's entry and its current/exit price:
+/// the profit color when in profit, the stop color otherwise, with boosted (clamped) alpha.
+fn position_active_fill(is_profit: bool, profit_color: [f32; 4], stop_color: [f32; 4]) -> Color {
+    let [r, g, b, a] = if is_profit { profit_color } else { stop_color };
+    Color::from_rgba(r, g, b, (a * 1.8).clamp(0.25, 0.65))
+}
+
 fn draw_chart_drawings(
     frame: &mut canvas::Frame,
     drawings: &[Drawing],
@@ -9546,26 +9594,12 @@ fn draw_chart_drawings(
                     let exit_x = chart.interval_to_x(outcome.exit_time).clamp(entry_x, end_x);
                     let exit_y = chart.price_to_y(Price::from_f32(outcome.exit_price));
 
-                    // Dynamic active profit/loss highlight zone ("воно більш зеленим стає")
+                    // Dynamic active profit/loss highlight zone matching position color
                     let active_w = (exit_x - entry_x).max(0.0);
                     let active_min_y = entry_y.min(exit_y);
                     let active_h = (entry_y - exit_y).abs();
                     if active_w > 0.0 && active_h > 0.5 {
-                        let active_fill = if outcome.is_profit {
-                            iced::Color::from_rgba(
-                                p_col[0],
-                                (p_col[1] * 1.25).min(1.0),
-                                p_col[2],
-                                (p_col[3] * 1.8).clamp(0.25, 0.65),
-                            )
-                        } else {
-                            iced::Color::from_rgba(
-                                (s_col[0] * 1.25).min(1.0),
-                                s_col[1],
-                                s_col[2],
-                                (s_col[3] * 1.8).clamp(0.25, 0.65),
-                            )
-                        };
+                        let active_fill = position_active_fill(outcome.is_profit, p_col, s_col);
                         frame.fill_rectangle(
                             Point::new(entry_x, active_min_y),
                             Size::new(active_w, active_h),
@@ -9573,12 +9607,22 @@ fn draw_chart_drawings(
                         );
                     }
 
-                    // Tracking dashed line from entry to exit
+                    // Tracking dashed line from entry to exit matching position color
                     if pos_style.show_price_path && active_w > 0.5 {
                         let line_color = if outcome.is_profit {
-                            iced::Color::from_rgba(0.4, 0.95, 0.6, 0.85)
+                            iced::Color::from_rgba(
+                                p_col[0],
+                                p_col[1],
+                                p_col[2],
+                                (p_col[3] * 3.0).clamp(0.75, 0.95),
+                            )
                         } else {
-                            iced::Color::from_rgba(0.95, 0.45, 0.45, 0.85)
+                            iced::Color::from_rgba(
+                                s_col[0],
+                                s_col[1],
+                                s_col[2],
+                                (s_col[3] * 3.0).clamp(0.75, 0.95),
+                            )
                         };
                         let dash_stroke = Stroke {
                             style: canvas::Style::Solid(line_color),
@@ -9596,9 +9640,9 @@ fn draw_chart_drawings(
 
                         if outcome.is_closed {
                             let dot_color = if outcome.is_profit {
-                                iced::Color::from_rgb(0.2, 0.9, 0.4)
+                                iced::Color::from_rgb(p_col[0], p_col[1], p_col[2])
                             } else {
-                                iced::Color::from_rgb(0.9, 0.25, 0.25)
+                                iced::Color::from_rgb(s_col[0], s_col[1], s_col[2])
                             };
                             frame.fill(
                                 &Path::circle(Point::new(exit_x, exit_y), 3.0 / chart.scaling),
@@ -12440,11 +12484,43 @@ mod tests {
     }
 
     #[test]
+    fn test_position_active_fill_color_matches_custom_style() {
+        let gray_profit = [0.65f32, 0.65, 0.65, 0.2];
+        let red_stop = [0.9f32, 0.1, 0.2, 0.2];
+
+        // Assert RGB channels match exact position color without green bias
+        let profit_fill = position_active_fill(true, gray_profit, red_stop);
+        assert_eq!(profit_fill.r, 0.65);
+        assert_eq!(profit_fill.g, 0.65);
+        assert_eq!(profit_fill.b, 0.65);
+        assert!((profit_fill.a - 0.36).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_position_active_fill_uses_stop_color_when_not_in_profit() {
+        let green_profit = [0.1f32, 0.8, 0.2, 0.2];
+        let red_stop = [0.9f32, 0.1, 0.2, 0.2];
+
+        let loss_fill = position_active_fill(false, green_profit, red_stop);
+        assert_eq!((loss_fill.r, loss_fill.g, loss_fill.b), (0.9, 0.1, 0.2));
+    }
+
+    #[test]
+    fn test_position_active_fill_alpha_is_clamped() {
+        let transparent = [0.5f32, 0.5, 0.5, 0.0];
+        let opaque = [0.5f32, 0.5, 0.5, 1.0];
+
+        assert_eq!(position_active_fill(true, transparent, opaque).a, 0.25);
+        assert_eq!(position_active_fill(false, transparent, opaque).a, 0.65);
+    }
+
+    #[test]
     fn test_position_shift_g_keyboard_shortcut() {
         use iced::widget::canvas::Program;
         let mut chart = make_test_chart();
         let mut interaction = Interaction::None;
         let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        chart.chart.bounds = bounds;
         let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
 
         let pos = Drawing::position(
@@ -13851,5 +13927,193 @@ mod tests {
         if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
             assert_eq!(price, 205.0);
         }
+    }
+
+    #[test]
+    fn test_nudge_batch_burst_coalescing_undo_redo() {
+        let mut chart = make_test_chart();
+        let mut d1 = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d1.is_selected = true;
+        let mut d2 = Drawing::horizontal(200.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        d2.is_selected = true;
+        chart.add_drawing(d1);
+        chart.add_drawing(d2);
+
+        // 3 rapid batch nudges
+        chart.nudge_selected_drawings(0, 0.5);
+        chart.nudge_selected_drawings(0, 0.5);
+        chart.nudge_selected_drawings(0, 0.5);
+
+        assert_eq!(
+            chart.undo_stack.len(),
+            1,
+            "Burst batch nudges should coalesce into a single undo action"
+        );
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert!((price - 101.5).abs() < 1e-4);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert!((price - 201.5).abs() < 1e-4);
+        }
+
+        // Single undo reverts both drawings
+        chart.undo();
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert!((price - 100.0).abs() < 1e-4);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert!((price - 200.0).abs() < 1e-4);
+        }
+
+        // Single redo restores both drawings
+        chart.redo();
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[0].kind {
+            assert!((price - 101.5).abs() < 1e-4);
+        }
+        if let DrawingKind::HorizontalLine { price } = chart.drawings[1].kind {
+            assert!((price - 201.5).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn test_nudge_keyboard_arrow_events() {
+        use iced::widget::canvas::Program;
+        let mut chart = make_test_chart();
+        let mut interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        chart.chart.bounds = bounds;
+        let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
+
+        let make_arrow =
+            |named: iced::keyboard::key::Named, code: iced::keyboard::key::Code, shift: bool| {
+                let mut modifiers = iced::keyboard::Modifiers::default();
+                if shift {
+                    modifiers |= iced::keyboard::Modifiers::SHIFT;
+                }
+                Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(named),
+                    location: iced::keyboard::Location::Standard,
+                    modifiers,
+                    repeat: false,
+                    text: None,
+                    physical_key: iced::keyboard::key::Physical::Code(code),
+                    modified_key: iced::keyboard::Key::Named(named),
+                })
+            };
+
+        // Without any selection, arrow keys should not produce an action
+        let up_key = make_arrow(
+            iced::keyboard::key::Named::ArrowUp,
+            iced::keyboard::key::Code::ArrowUp,
+            false,
+        );
+        let action = chart.update(&mut interaction, &up_key, bounds, cursor);
+        assert!(action.is_none());
+
+        // Add drawing and select it
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        // ArrowUp publishes action
+        let action_up = chart.update(&mut interaction, &up_key, bounds, cursor);
+        assert!(action_up.is_some());
+
+        // Shift+ArrowUp publishes action
+        let shift_up_key = make_arrow(
+            iced::keyboard::key::Named::ArrowUp,
+            iced::keyboard::key::Code::ArrowUp,
+            true,
+        );
+        let action_shift_up = chart.update(&mut interaction, &shift_up_key, bounds, cursor);
+        assert!(action_shift_up.is_some());
+
+        // ArrowDown publishes action
+        let down_key = make_arrow(
+            iced::keyboard::key::Named::ArrowDown,
+            iced::keyboard::key::Code::ArrowDown,
+            false,
+        );
+        let action_down = chart.update(&mut interaction, &down_key, bounds, cursor);
+        assert!(action_down.is_some());
+
+        // ArrowLeft publishes action
+        let left_key = make_arrow(
+            iced::keyboard::key::Named::ArrowLeft,
+            iced::keyboard::key::Code::ArrowLeft,
+            false,
+        );
+        let action_left = chart.update(&mut interaction, &left_key, bounds, cursor);
+        assert!(action_left.is_some());
+
+        // ArrowRight publishes action
+        let right_key = make_arrow(
+            iced::keyboard::key::Named::ArrowRight,
+            iced::keyboard::key::Code::ArrowRight,
+            false,
+        );
+        let action_right = chart.update(&mut interaction, &right_key, bounds, cursor);
+        assert!(action_right.is_some());
+    }
+
+    #[test]
+    fn test_ter35_contextual_mouse_interaction_for_drawing_tools_and_selection() {
+        use iced::widget::canvas::Program;
+        let mut chart = make_test_chart();
+        let interaction = Interaction::None;
+        let bounds = Rectangle::new(Point::ORIGIN, Size::new(800.0, 600.0));
+        let cursor_over = mouse::Cursor::Available(Point::new(200.0, 200.0));
+        let cursor_outside = mouse::Cursor::Available(Point::new(900.0, 700.0));
+
+        // 1. Neutral state: crosshair inside bounds, default outside bounds
+        let ic_neutral = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_neutral, mouse::Interaction::Crosshair);
+        let ic_out = chart.mouse_interaction(&interaction, bounds, cursor_outside);
+        assert_eq!(ic_out, mouse::Interaction::default());
+
+        // 2. Armed drawing tool (Trendline) switches cursor to Pointer
+        chart.set_active_drawing_tool(DrawingTool::Trendline);
+        let ic_armed = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_armed, mouse::Interaction::Pointer);
+
+        // 3. Armed drawing tool (Rectangle) switches cursor to Pointer
+        chart.set_active_drawing_tool(DrawingTool::Rectangle);
+        let ic_rect = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_rect, mouse::Interaction::Pointer);
+
+        // 4. Disarming drawing tool restores neutral Crosshair
+        chart.set_active_drawing_tool(DrawingTool::None);
+        let ic_disarmed = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_disarmed, mouse::Interaction::Crosshair);
+
+        // 5. Selected drawing present switches cursor to system Arrow (default) instead of Crosshair
+        let d = Drawing::horizontal(100.0, [1.0, 1.0, 1.0, 1.0], 1.0);
+        let id = d.id;
+        chart.add_drawing(d);
+        chart.set_selected_drawing(Some(id));
+
+        let ic_selected = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_selected, mouse::Interaction::default());
+
+        // 6. Active drag switches cursor to Grabbing
+        chart.drawing_state.borrow_mut().drag = Some(DrawingDrag::MovingDrawing {
+            start_time: 0,
+            start_price: 100.0,
+            initial_drawing: chart.drawings[0].clone(),
+            current_drawing: chart.drawings[0].clone(),
+        });
+        let ic_drag = chart.mouse_interaction(&interaction, bounds, cursor_over);
+        assert_eq!(ic_drag, mouse::Interaction::Grabbing);
+
+        chart.drawing_state.borrow_mut().drag = None;
+
+        // 7. Panning interaction takes precedence
+        let pan_interaction = Interaction::Panning {
+            translation: iced::Vector::ZERO,
+            start: Point::new(10.0, 10.0),
+        };
+        let ic_pan = chart.mouse_interaction(&pan_interaction, bounds, cursor_over);
+        assert_eq!(ic_pan, mouse::Interaction::Grabbing);
     }
 }

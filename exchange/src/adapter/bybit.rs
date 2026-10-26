@@ -207,7 +207,11 @@ fn feed_de(
                 }
             }
         } else if k == "type" {
-            v.as_str().unwrap().clone_into(&mut data_type);
+            v.as_str()
+                .ok_or_else(|| {
+                    AdapterError::ParseError("Bybit `type` field is not a string".into())
+                })?
+                .clone_into(&mut data_type);
         } else if k == "data" {
             match stream_type {
                 Some(StreamWrapper::Trade) => {
@@ -1502,5 +1506,29 @@ mod tests {
         assert_eq!(string_to_timeframe("W"), Some(Timeframe::W1));
         assert_eq!(string_to_timeframe("M"), Some(Timeframe::MN1));
         assert_eq!(string_to_timeframe("invalid"), None);
+    }
+
+    #[test]
+    fn test_bybit_feed_de_non_string_type_returns_error_instead_of_panicking() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BybitLinear);
+        for payload in [
+            r#"{"topic":"publicTrade.BTCUSDT","type":123,"data":[]}"#,
+            r#"{"topic":"publicTrade.BTCUSDT","type":null,"data":[]}"#,
+            r#"{"type":{"nested":true}}"#,
+        ] {
+            let result = feed_de(payload.as_bytes(), Some(ticker), MarketKind::LinearPerps);
+            assert!(
+                matches!(result, Err(AdapterError::ParseError(_))),
+                "payload {payload} must yield ParseError"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bybit_feed_de_valid_type_still_parses_trades() {
+        let ticker = Ticker::new("BTCUSDT", Exchange::BybitLinear);
+        let payload = r#"{"topic":"publicTrade.BTCUSDT","type":"snapshot","ts":1,"data":[{"T":1700000000000,"s":"BTCUSDT","S":"Buy","v":"0.5","p":"30000.5","i":"x","BT":false}]}"#;
+        let result = feed_de(payload.as_bytes(), Some(ticker), MarketKind::LinearPerps);
+        assert!(matches!(result, Ok(StreamData::Trade(ref v)) if v.len() == 1));
     }
 }

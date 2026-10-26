@@ -8,6 +8,11 @@ pub const BINARY_CACHE_MAGIC: &[u8; 4] = b"FST1";
 pub const TRADE_RECORD_SIZE: usize = 24;
 pub const INTRADAY_MAX_GAP_MS: u64 = 60_000;
 
+/// Hard cap on the decompressed size a cache file may claim in its LZ4 size prefix.
+const MAX_DECOMPRESSED_CACHE_BYTES: usize = 1 << 30;
+/// LZ4 cannot expand data by more than ~255x, so a larger claim is necessarily bogus.
+const LZ4_MAX_EXPANSION: usize = 255;
+
 pub fn find_gap_index(trades: &[Trade], from_idx: usize, max_gap_ms: u64) -> Option<usize> {
     if trades.is_empty() || from_idx >= trades.len() - 1 {
         return None;
@@ -73,6 +78,18 @@ pub fn encode_trades_binary(trades: &[Trade]) -> Vec<u8> {
 }
 
 pub fn decode_trades_binary(compressed_bytes: &[u8]) -> Result<Vec<Trade>, AdapterError> {
+    let claimed_size = compressed_bytes
+        .first_chunk::<4>()
+        .map(|b| u32::from_le_bytes(*b) as usize)
+        .ok_or_else(|| AdapterError::ParseError("Binary cache is too short".into()))?;
+    if claimed_size > MAX_DECOMPRESSED_CACHE_BYTES
+        || claimed_size > compressed_bytes.len().saturating_mul(LZ4_MAX_EXPANSION)
+    {
+        return Err(AdapterError::ParseError(format!(
+            "Binary cache claims implausible decompressed size: {claimed_size} bytes"
+        )));
+    }
+
     let decompressed = lz4_flex::decompress_size_prepended(compressed_bytes)
         .map_err(|e| AdapterError::ParseError(format!("Failed to decompress binary cache: {e}")))?;
 
@@ -141,6 +158,7 @@ pub fn raw_trade_subpath(ticker_info: &TickerInfo) -> String {
         Exchange::MexcSpot => format!("data/spot/daily/trades/{symbol_upper}"),
         Exchange::MexcLinear => format!("data/linear/daily/trades/{symbol_upper}"),
         Exchange::MexcInverse => format!("data/inverse/daily/trades/{symbol_upper}"),
+        Exchange::CoinbaseSpot => format!("data/spot/daily/trades/{symbol_upper}"),
     }
 }
 
@@ -784,5 +802,56 @@ mod tests {
         assert_eq!(loaded.unwrap().len(), 2);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_decode_trades_binary_roundtrip() {
+        let trades = vec![
+            Trade {
+                time: 1_700_000_000_000,
+                is_sell: false,
+                price: Price {
+                    units: 3_000_050_000_000,
+                },
+                qty: 0.5,
+            },
+            Trade {
+                time: 1_700_000_000_250,
+                is_sell: true,
+                price: Price {
+                    units: 3_000_040_000_000,
+                },
+                qty: 1.25,
+            },
+        ];
+        let decoded = decode_trades_binary(&encode_trades_binary(&trades)).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[1].time, 1_700_000_000_250);
+        assert!(decoded[1].is_sell);
+        assert_eq!(decoded[1].price.units, 3_000_040_000_000);
+        assert_eq!(decoded[1].qty, 1.25);
+    }
+
+    #[test]
+    fn test_decode_trades_binary_rejects_huge_claimed_size_without_allocating() {
+        // 4 GiB claimed by a 10-byte file; must fail fast instead of attempting the allocation.
+        let mut bogus = u32::MAX.to_le_bytes().to_vec();
+        bogus.extend_from_slice(&[0u8; 6]);
+        let err = decode_trades_binary(&bogus).unwrap_err();
+        assert!(err.to_string().contains("implausible"), "{err}");
+    }
+
+    #[test]
+    fn test_decode_trades_binary_rejects_size_beyond_lz4_expansion_limit() {
+        // 1 MiB claimed from 100 bytes is impossible for LZ4 (max ~255x).
+        let mut bogus = (1u32 << 20).to_le_bytes().to_vec();
+        bogus.extend_from_slice(&[0u8; 96]);
+        assert!(decode_trades_binary(&bogus).is_err());
+    }
+
+    #[test]
+    fn test_decode_trades_binary_rejects_truncated_input() {
+        assert!(decode_trades_binary(&[]).is_err());
+        assert!(decode_trades_binary(&[1, 2, 3]).is_err());
     }
 }

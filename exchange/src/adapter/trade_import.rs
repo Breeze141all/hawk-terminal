@@ -99,7 +99,7 @@ impl std::fmt::Display for ImportExchangeKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ImportCredentials {
     pub exchange: ImportExchangeKind,
     pub key_or_address: String,
@@ -107,6 +107,20 @@ pub struct ImportCredentials {
     pub passphrase: String,
     pub symbol: Option<String>,
     pub limit: Option<usize>,
+}
+
+/// Manual impl so API keys, secrets and passphrases never end up in logs via `{:?}`.
+impl std::fmt::Debug for ImportCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImportCredentials")
+            .field("exchange", &self.exchange)
+            .field("key_or_address", &"<redacted>")
+            .field("api_secret", &"<redacted>")
+            .field("passphrase", &"<redacted>")
+            .field("symbol", &self.symbol)
+            .field("limit", &self.limit)
+            .finish()
+    }
 }
 
 impl Default for ImportCredentials {
@@ -742,6 +756,24 @@ pub async fn fetch_exchange_trades(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_import_credentials_debug_redacts_secrets() {
+        let creds = ImportCredentials {
+            exchange: ImportExchangeKind::OkexSwap,
+            key_or_address: "AKIA-KEY-123".into(),
+            api_secret: "SUPER-SECRET-456".into(),
+            passphrase: "PASSPHRASE-789".into(),
+            symbol: Some("BTC-USDT-SWAP".into()),
+            limit: Some(50),
+        };
+        let rendered = format!("{creds:?} {creds:#?}");
+        for secret in ["AKIA-KEY-123", "SUPER-SECRET-456", "PASSPHRASE-789"] {
+            assert!(!rendered.contains(secret), "Debug output leaked {secret}");
+        }
+        assert!(rendered.contains("BTC-USDT-SWAP"));
+        assert!(rendered.contains("<redacted>"));
+    }
 
     #[test]
     fn test_fifo_single_long_trade() {

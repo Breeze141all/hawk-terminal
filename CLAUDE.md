@@ -15,6 +15,9 @@ cargo run --release
 cargo build --features debug
 cargo run --features debug
 
+# Tests (use --no-fail-fast to see every failing suite, not just the first)
+cargo test --workspace --no-fail-fast
+
 # Lint (must pass with no warnings)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 
@@ -37,9 +40,10 @@ Hawk Terminal is a desktop crypto charting application built with Rust and the I
 
 ### Workspace Structure
 
-- **hawk-terminal** (main): GUI application using Iced - handles windows, panes, user interaction
+- **hawk-terminal** (main): GUI application using Iced - handles windows, panes, user interaction, in-app updater (`src/updater.rs`)
 - **data** (`hawk-data`): Data structures, state management, configuration, layout persistence
-- **exchange** (`hawk-exchange`): Exchange adapters for Binance, Bybit, Hyperliquid, OKX
+- **exchange** (`hawk-exchange`): Exchange adapters for Binance, Bybit, Hyperliquid, OKX, MEXC, Coinbase (plus the Bitcoin Counterflow open-interest source and API trade-history import)
+- **indicator-engine**: Scripted indicator language (parser, compiler, runtime), CLI tools and the deterministic `catalog.json` generator
 
 ### Key Patterns
 
@@ -56,3 +60,20 @@ Hawk Terminal is a desktop crypto charting application built with Rust and the I
 - Line width: 100 characters (rustfmt.toml)
 - Clippy thresholds: 16 function args, 5 enum variants (clippy.toml)
 - Uses `rustc-hash` (FxHashMap) and `sonic-rs` for performance
+
+## Critical Invariants (DO NOT VIOLATE)
+
+1. **Trade cache currency**: `SizeUnit::Base = 0`. Tick caches (`.bin`, `.fst`), footprints and CVD are stored and computed in Base units (coin count). Never serialize `qty * price`; convert to Quote only at the presentation layer.
+2. **Installer isolation**: `installer.iss` must never write into `{userappdata}` (`saved-state.json`, `drawings.json`, `alerts.json`, ...).
+3. **Legacy migration**: keep `ensure_migration_from_legacy` in `data/src/lib.rs` (migrates `%APPDATA%\flowsurface` to `hawk-terminal`).
+4. **Heatmap renderer**: the CPU Canvas heatmap is the default; the experimental WGPU `ShaderHeatmap` stays hidden.
+5. **Updater trust**: `updater::download_installer_file` must keep refusing releases without a valid `sha256`, URLs outside the project's GitHub release/site paths, and checksum mismatches. `release.yaml` must keep writing `sha256` into `version.json`.
+6. **Secrets**: exchange API keys/secrets for trade import live in memory only. Never persist or log them; `ImportCredentials` has a redacting `Debug` impl, keep it.
+
+## Conventions
+
+- Persist JSON through `data::write_json_to_file` (atomic, fsynced). Load lists through `load_json_list`: unparsable files are moved to `*_corrupt_<ts>` rather than silently replaced by defaults.
+- Do not `unwrap()` on data from the network or disk; return `AdapterError::ParseError` (the stream loops ignore `Err`).
+- Tests must not depend on the current date or hardcode "today"; test production functions, not copies of their logic.
+- Some files use CRLF line endings (e.g. `src/modal/volume_search.rs`). Preserve each file's existing endings so diffs stay small.
+- `cargo fmt --check` is not clean on `main` today (pre-existing); format only the files you touch.

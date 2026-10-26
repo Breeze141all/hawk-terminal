@@ -657,6 +657,7 @@ impl<'a> canvas::Program<Message> for TimeAndSalesView<'a> {
                         exchange::Venue::Okex => "OKX",
                         exchange::Venue::Hyperliquid => "HL",
                         exchange::Venue::Mexc => "MEXC",
+                        exchange::Venue::Coinbase => "CB",
                     };
 
                     let badge_color = match entry.ticker_index % 6 {

@@ -30,13 +30,15 @@ pub struct DrawingSettingsState {
     pub coord_p2: String,
     pub coord_t1: String,
     pub coord_t2: String,
+    pub coord_target_price: String,
 }
 
 impl DrawingSettingsState {
     pub fn new(drawing: &Drawing) -> Self {
-        let (p1, p2, t1, t2) = match &drawing.kind {
+        let (p1, p2, t1, t2, target_p) = match &drawing.kind {
             DrawingKind::HorizontalLine { price } => (
                 price.to_string(),
+                String::new(),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -46,12 +48,14 @@ impl DrawingSettingsState {
                 p2.1.to_string(),
                 p1.0.to_string(),
                 p2.0.to_string(),
+                String::new(),
             ),
             DrawingKind::Rectangle { p1, p2 } => (
                 p1.1.to_string(),
                 p2.1.to_string(),
                 p1.0.to_string(),
                 p2.0.to_string(),
+                String::new(),
             ),
             DrawingKind::Position {
                 entry,
@@ -63,11 +67,16 @@ impl DrawingSettingsState {
                 entry.1.to_string(),
                 stop_price.to_string(),
                 entry.0.to_string(),
-                end_time
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| target_price.to_string()),
+                end_time.map(|t| t.to_string()).unwrap_or_default(),
+                target_price.to_string(),
             ),
-            _ => (String::new(), String::new(), String::new(), String::new()),
+            _ => (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
         };
 
         let hex = color_to_hex(drawing.color);
@@ -93,6 +102,7 @@ impl DrawingSettingsState {
             coord_p2: p2,
             coord_t1: t1,
             coord_t2: t2,
+            coord_target_price: target_p,
         }
     }
 }
@@ -112,6 +122,11 @@ pub enum DrawingSettingsAction {
     ToggleArrowLeft,
     ToggleArrowRight,
     SetFillOpacity(f32),
+    // Position style actions
+    SetPositionProfitColor(Option<[f32; 4]>),
+    SetPositionStopColor(Option<[f32; 4]>),
+    SetPositionEntryColor([f32; 4]),
+    TogglePositionPricePath,
     // Text Tab
     TextChanged(String),
     TextHexChanged(String),
@@ -124,6 +139,7 @@ pub enum DrawingSettingsAction {
     CoordP2Changed(String),
     CoordT1Changed(String),
     CoordT2Changed(String),
+    CoordTargetPriceChanged(String),
     // Visibility Tab
     ToggleVisibilitySeconds,
     ToggleVisibilityMinutes,
@@ -228,6 +244,10 @@ fn view_style_tab<'a>(
     pane: pane_grid::Pane,
     state: &'a DrawingSettingsState,
 ) -> Element<'a, Message> {
+    if matches!(state.drawing.kind, DrawingKind::Position { .. }) {
+        return view_position_style_tab(pane, state);
+    }
+
     let d = &state.drawing;
     let current_color = d.color;
     let r_byte = (current_color[0] * 255.0).round() as u8;
@@ -537,6 +557,305 @@ fn view_style_tab<'a>(
     col.into()
 }
 
+fn view_position_style_tab<'a>(
+    pane: pane_grid::Pane,
+    state: &'a DrawingSettingsState,
+) -> Element<'a, Message> {
+    let d = &state.drawing;
+    let pos_style = d.position_style();
+    let current_width = d.width;
+
+    let preset_colors: [([f32; 3], &'static str); 8] = [
+        ([1.0, 1.0, 1.0], "White"),
+        ([0.65, 0.65, 0.65], "Gray"),
+        ([0.94, 0.27, 0.24], "Red"),
+        ([1.0, 0.60, 0.0], "Orange"),
+        ([1.0, 0.92, 0.23], "Yellow"),
+        ([0.15, 0.68, 0.38], "Green"),
+        ([0.16, 0.38, 1.0], "Blue"),
+        ([0.67, 0.28, 0.74], "Purple"),
+    ];
+
+    // --- Take Profit Section ---
+    let tp_is_auto = pos_style.profit_color.is_none();
+    let tp_col = pos_style
+        .profit_color
+        .unwrap_or(data::chart::drawing::default_profit_color());
+    let tp_rgb = [tp_col[0], tp_col[1], tp_col[2]];
+    let tp_alpha = tp_col[3];
+    let tp_alpha_pct = (tp_alpha * 100.0).round() as u8;
+
+    let tp_auto_btn = button(
+        text("Auto")
+            .size(9)
+            .font(style::AZERET_MONO)
+            .align_x(iced::alignment::Horizontal::Center),
+    )
+    .padding([2, 5])
+    .style(move |theme: &Theme, status| style::button::modifier(theme, status, tp_is_auto))
+    .on_press(Message::PaneEvent(
+        pane,
+        Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(None)),
+    ));
+
+    let mut tp_swatches = row![tp_auto_btn].spacing(4).align_y(Alignment::Center);
+    for (rgb, _label) in preset_colors {
+        let is_selected = !tp_is_auto
+            && (tp_rgb[0] - rgb[0]).abs() < 0.05
+            && (tp_rgb[1] - rgb[1]).abs() < 0.05
+            && (tp_rgb[2] - rgb[2]).abs() < 0.05;
+
+        let swatch_color = Color::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let swatch_box = container("")
+            .width(16)
+            .height(16)
+            .style(move |_| container::Style {
+                background: Some(swatch_color.into()),
+                border: border::rounded(3)
+                    .width(if is_selected { 2 } else { 1 })
+                    .color(if is_selected {
+                        Color::WHITE
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.4)
+                    }),
+                ..Default::default()
+            });
+
+        let btn = button(swatch_box)
+            .padding(1)
+            .style(move |theme, status| style::button::transparent(theme, status, is_selected))
+            .on_press(Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(Some(
+                    [rgb[0], rgb[1], rgb[2], tp_alpha],
+                ))),
+            ));
+
+        tp_swatches = tp_swatches.push(btn);
+    }
+
+    let tp_color_row = row![
+        container(text("Take Profit:").size(11).font(style::AZERET_MONO)).width(75),
+        tp_swatches,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    let tp_opacity_slider =
+        slider(0..=100, tp_alpha_pct, move |new_pct| {
+            Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(Some(
+                    [tp_rgb[0], tp_rgb[1], tp_rgb[2], new_pct as f32 / 100.0],
+                ))),
+            )
+        })
+        .step(5u8)
+        .width(Length::Fixed(180.0));
+
+    let tp_opacity_row = row![
+        container(text("TP Opacity:").size(11).font(style::AZERET_MONO)).width(75),
+        tp_opacity_slider,
+        text(format!("{}%", tp_alpha_pct))
+            .size(10)
+            .font(style::AZERET_MONO),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    // --- Stop Loss Section ---
+    let sl_is_auto = pos_style.stop_color.is_none();
+    let sl_col = pos_style
+        .stop_color
+        .unwrap_or(data::chart::drawing::default_stop_color());
+    let sl_rgb = [sl_col[0], sl_col[1], sl_col[2]];
+    let sl_alpha = sl_col[3];
+    let sl_alpha_pct = (sl_alpha * 100.0).round() as u8;
+
+    let sl_auto_btn = button(
+        text("Auto")
+            .size(9)
+            .font(style::AZERET_MONO)
+            .align_x(iced::alignment::Horizontal::Center),
+    )
+    .padding([2, 5])
+    .style(move |theme: &Theme, status| style::button::modifier(theme, status, sl_is_auto))
+    .on_press(Message::PaneEvent(
+        pane,
+        Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionStopColor(None)),
+    ));
+
+    let mut sl_swatches = row![sl_auto_btn].spacing(4).align_y(Alignment::Center);
+    for (rgb, _label) in preset_colors {
+        let is_selected = !sl_is_auto
+            && (sl_rgb[0] - rgb[0]).abs() < 0.05
+            && (sl_rgb[1] - rgb[1]).abs() < 0.05
+            && (sl_rgb[2] - rgb[2]).abs() < 0.05;
+
+        let swatch_color = Color::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let swatch_box = container("")
+            .width(16)
+            .height(16)
+            .style(move |_| container::Style {
+                background: Some(swatch_color.into()),
+                border: border::rounded(3)
+                    .width(if is_selected { 2 } else { 1 })
+                    .color(if is_selected {
+                        Color::WHITE
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.4)
+                    }),
+                ..Default::default()
+            });
+
+        let btn = button(swatch_box)
+            .padding(1)
+            .style(move |theme, status| style::button::transparent(theme, status, is_selected))
+            .on_press(Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionStopColor(Some([
+                    rgb[0], rgb[1], rgb[2], sl_alpha,
+                ]))),
+            ));
+
+        sl_swatches = sl_swatches.push(btn);
+    }
+
+    let sl_color_row = row![
+        container(text("Stop Loss:").size(11).font(style::AZERET_MONO)).width(75),
+        sl_swatches,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    let sl_opacity_slider = slider(0..=100, sl_alpha_pct, move |new_pct| {
+        Message::PaneEvent(
+            pane,
+            Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionStopColor(Some([
+                sl_rgb[0],
+                sl_rgb[1],
+                sl_rgb[2],
+                new_pct as f32 / 100.0,
+            ]))),
+        )
+    })
+    .step(5u8)
+    .width(Length::Fixed(180.0));
+
+    let sl_opacity_row = row![
+        container(text("SL Opacity:").size(11).font(style::AZERET_MONO)).width(75),
+        sl_opacity_slider,
+        text(format!("{}%", sl_alpha_pct))
+            .size(10)
+            .font(style::AZERET_MONO),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    // --- Entry Line Section ---
+    let entry_rgb = [
+        pos_style.entry_color[0],
+        pos_style.entry_color[1],
+        pos_style.entry_color[2],
+    ];
+    let mut entry_swatches = row![].spacing(4).align_y(Alignment::Center);
+    for (rgb, _label) in preset_colors {
+        let is_selected = (entry_rgb[0] - rgb[0]).abs() < 0.05
+            && (entry_rgb[1] - rgb[1]).abs() < 0.05
+            && (entry_rgb[2] - rgb[2]).abs() < 0.05;
+
+        let swatch_color = Color::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let swatch_box = container("")
+            .width(16)
+            .height(16)
+            .style(move |_| container::Style {
+                background: Some(swatch_color.into()),
+                border: border::rounded(3)
+                    .width(if is_selected { 2 } else { 1 })
+                    .color(if is_selected {
+                        Color::WHITE
+                    } else {
+                        Color::from_rgba(0.0, 0.0, 0.0, 0.4)
+                    }),
+                ..Default::default()
+            });
+
+        let btn = button(swatch_box)
+            .padding(1)
+            .style(move |theme, status| style::button::transparent(theme, status, is_selected))
+            .on_press(Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionEntryColor([
+                    rgb[0],
+                    rgb[1],
+                    rgb[2],
+                    pos_style.entry_color[3],
+                ])),
+            ));
+
+        entry_swatches = entry_swatches.push(btn);
+    }
+
+    let entry_color_row = row![
+        container(text("Entry:").size(11).font(style::AZERET_MONO)).width(75),
+        entry_swatches,
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    // --- Line Width ---
+    let width_btn = |w: f32, label: &'static str| {
+        let is_active = (current_width - w).abs() < 0.4;
+        button(text(label).size(10).font(style::AZERET_MONO))
+            .padding([3, 7])
+            .style(move |theme, status| style::button::modifier(theme, status, is_active))
+            .on_press(Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetWidth(w)),
+            ))
+    };
+
+    let width_row = row![
+        container(text("Width:").size(11).font(style::AZERET_MONO)).width(75),
+        width_btn(1.0, "1px"),
+        width_btn(2.0, "2px"),
+        width_btn(3.0, "3px"),
+        width_btn(4.0, "4px"),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+
+    // --- Price Path Checkbox ---
+    let path_row = row![
+        checkbox(pos_style.show_price_path).on_toggle(move |_| {
+            Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::TogglePositionPricePath),
+            )
+        }),
+        text("Show Price Path (Trajectory)")
+            .size(11)
+            .font(style::AZERET_MONO),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+
+    column![
+        tp_color_row,
+        tp_opacity_row,
+        rule::horizontal(1),
+        sl_color_row,
+        sl_opacity_row,
+        rule::horizontal(1),
+        entry_color_row,
+        width_row,
+        rule::horizontal(1),
+        path_row,
+    ]
+    .spacing(8)
+    .into()
+}
+
 fn view_text_tab<'a>(
     pane: pane_grid::Pane,
     state: &'a DrawingSettingsState,
@@ -775,6 +1094,106 @@ fn view_coordinates_tab<'a>(
                     .align_y(Alignment::Center),
                 );
         }
+        DrawingKind::Position { .. } => {
+            let entry_input = text_input("Entry Price", &state.coord_p1)
+                .on_input(move |v| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::DrawingSettingsAction(DrawingSettingsAction::CoordP1Changed(v)),
+                    )
+                })
+                .width(Length::Fixed(160.0))
+                .padding(5)
+                .style(|theme, status| style::validated_text_input(theme, status, true));
+
+            let tp_input = text_input("Take Profit Price", &state.coord_target_price)
+                .on_input(move |v| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::DrawingSettingsAction(
+                            DrawingSettingsAction::CoordTargetPriceChanged(v),
+                        ),
+                    )
+                })
+                .width(Length::Fixed(160.0))
+                .padding(5)
+                .style(|theme, status| style::validated_text_input(theme, status, true));
+
+            let sl_input = text_input("Stop Loss Price", &state.coord_p2)
+                .on_input(move |v| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::DrawingSettingsAction(DrawingSettingsAction::CoordP2Changed(v)),
+                    )
+                })
+                .width(Length::Fixed(160.0))
+                .padding(5)
+                .style(|theme, status| style::validated_text_input(theme, status, true));
+
+            let t1_input = text_input("Entry Time (ms)", &state.coord_t1)
+                .on_input(move |v| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::DrawingSettingsAction(DrawingSettingsAction::CoordT1Changed(v)),
+                    )
+                })
+                .width(Length::Fixed(160.0))
+                .padding(5)
+                .style(|theme, status| style::validated_text_input(theme, status, true));
+
+            let t2_input = text_input("End Time (ms)", &state.coord_t2)
+                .on_input(move |v| {
+                    Message::PaneEvent(
+                        pane,
+                        Event::DrawingSettingsAction(DrawingSettingsAction::CoordT2Changed(v)),
+                    )
+                })
+                .width(Length::Fixed(160.0))
+                .padding(5)
+                .style(|theme, status| style::validated_text_input(theme, status, true));
+
+            rows = rows
+                .push(
+                    row![
+                        container(text("Entry Price:").size(11).font(style::AZERET_MONO)).width(85),
+                        entry_input,
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .push(
+                    row![
+                        container(text("Take Profit:").size(11).font(style::AZERET_MONO)).width(85),
+                        tp_input,
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .push(
+                    row![
+                        container(text("Stop Loss:").size(11).font(style::AZERET_MONO)).width(85),
+                        sl_input,
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .push(
+                    row![
+                        container(text("Entry Time:").size(11).font(style::AZERET_MONO)).width(85),
+                        t1_input,
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .push(
+                    row![
+                        container(text("End Time:").size(11).font(style::AZERET_MONO)).width(85),
+                        t2_input,
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+        }
         _ => {
             rows = rows.push(text("Coordinates for this tool are edited on chart.").size(11));
         }
@@ -832,4 +1251,57 @@ fn view_visibility_tab<'a>(
     ]
     .spacing(10)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use data::chart::drawing::Drawing;
+
+    #[test]
+    fn test_position_drawing_settings_state_initialization() {
+        let pos = Drawing::position(
+            (100_000, 80_000.0),
+            78_000.0,
+            85_000.0,
+            true,
+            Some(200_000),
+            [0.65, 0.65, 0.65, 1.0],
+            1.0,
+        );
+
+        let state = DrawingSettingsState::new(&pos);
+        assert_eq!(state.coord_p1, "80000");
+        assert_eq!(state.coord_p2, "78000");
+        assert_eq!(state.coord_target_price, "85000");
+        assert_eq!(state.coord_t1, "100000");
+        assert_eq!(state.coord_t2, "200000");
+    }
+
+    #[test]
+    fn test_position_style_color_mutations_in_settings() {
+        let mut pos = Drawing::position(
+            (100_000, 80_000.0),
+            78_000.0,
+            85_000.0,
+            true,
+            Some(200_000),
+            [0.65, 0.65, 0.65, 1.0],
+            1.0,
+        );
+
+        // Customize profit color to gray (same as user's screenshot)
+        let gray = [0.65, 0.65, 0.65, 0.25];
+        pos.set_position_profit_color(Some(gray));
+        assert_eq!(pos.position_style().profit_color, Some(gray));
+
+        // Customize stop color
+        let dark_slate = [0.2, 0.25, 0.3, 0.2];
+        pos.set_position_stop_color(Some(dark_slate));
+        assert_eq!(pos.position_style().stop_color, Some(dark_slate));
+
+        // Auto profit color reset
+        pos.set_position_profit_color(None);
+        assert_eq!(pos.position_style().profit_color, None);
+    }
 }
