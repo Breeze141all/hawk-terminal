@@ -1018,17 +1018,8 @@ pub async fn get_hist_trades(
                     None => continue,
                 };
 
-                let time = if raw_time.contains('.') {
-                    (raw_time.parse::<f64>().unwrap_or(0.0) * 1000.0) as u64
-                } else {
-                    let t = raw_time.parse::<u64>().unwrap_or(0);
-                    if t < 100_000_000_000 {
-                        t * 1000
-                    } else if t > 100_000_000_000_000 {
-                        t / 1000
-                    } else {
-                        t
-                    }
+                let Some(time) = parse_okx_trade_time(raw_time) else {
+                    continue;
                 };
 
                 let is_sell = record
@@ -1203,9 +1194,76 @@ pub async fn fetch_trades(
     }
 }
 
+/// Parses a timestamp column from an OKX historical trades CSV into epoch milliseconds.
+///
+/// Accepts fractional seconds, whole seconds, milliseconds and microseconds. Returns `None` for
+/// anything unparseable or non-positive so callers skip the row instead of recording a trade at
+/// the Unix epoch (which would also defeat the cache-coverage checks that read `first().time`).
+fn parse_okx_trade_time(raw: &str) -> Option<u64> {
+    let raw = raw.trim();
+    let time = if raw.contains('.') {
+        let secs = raw.parse::<f64>().ok()?;
+        if !secs.is_finite() || secs <= 0.0 {
+            return None;
+        }
+        (secs * 1000.0) as u64
+    } else {
+        let t = raw.parse::<u64>().ok()?;
+        if t < 100_000_000_000 {
+            t.checked_mul(1000)?
+        } else if t > 100_000_000_000_000 {
+            t / 1000
+        } else {
+            t
+        }
+    };
+    (time > 0).then_some(time)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::Timeframe;
+
+    use super::parse_okx_trade_time;
+
+    #[test]
+    fn test_parse_okx_trade_time_accepts_all_supported_units() {
+        assert_eq!(parse_okx_trade_time("1700000000"), Some(1_700_000_000_000));
+        assert_eq!(
+            parse_okx_trade_time("1700000000123"),
+            Some(1_700_000_000_123)
+        );
+        assert_eq!(
+            parse_okx_trade_time("1700000000123456"),
+            Some(1_700_000_000_123)
+        );
+        assert_eq!(
+            parse_okx_trade_time("1700000000.5"),
+            Some(1_700_000_000_500)
+        );
+        assert_eq!(
+            parse_okx_trade_time(" 1700000000123 "),
+            Some(1_700_000_000_123)
+        );
+    }
+
+    #[test]
+    fn test_parse_okx_trade_time_rejects_garbage_instead_of_returning_epoch() {
+        for bad in [
+            "",
+            "abc",
+            "-5",
+            "-1.5",
+            "0",
+            "0.0",
+            "NaN",
+            "inf",
+            "1.2.3",
+            "99999999999999999999",
+        ] {
+            assert_eq!(parse_okx_trade_time(bad), None, "{bad:?} must be rejected");
+        }
+    }
 
     #[test]
     fn test_ex05_okex_reversed_interval_safe() {
