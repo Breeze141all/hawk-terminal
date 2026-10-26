@@ -2951,11 +2951,11 @@ impl State {
                         }
                         modal::pane::drawing_settings::DrawingSettingsAction::CoordTargetPriceChanged(tp_s) => {
                             st.coord_target_price = tp_s.clone();
-                            if let Ok(price) = tp_s.trim().parse::<f32>() {
-                                if let data::chart::drawing::DrawingKind::Position { ref mut target_price, .. } = st.drawing.kind {
-                                    *target_price = price;
-                                    needs_update = true;
-                                }
+                            if let Ok(price) = tp_s.trim().parse::<f32>()
+                                && let data::chart::drawing::DrawingKind::Position { ref mut target_price, .. } = st.drawing.kind
+                            {
+                                *target_price = price;
+                                needs_update = true;
                             }
                         }
                         modal::pane::drawing_settings::DrawingSettingsAction::CoordT1Changed(t1_s) => {
