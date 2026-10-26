@@ -125,15 +125,7 @@ pub fn save_drawing_templates(
 }
 
 pub fn load_drawing_templates() -> Vec<chart::drawing::DrawingTemplate> {
-    let path = data_path(Some(DRAWING_TEMPLATES_PATH));
-    let Ok(mut file) = File::open(&path) else {
-        return Vec::new();
-    };
-    let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_err() {
-        return Vec::new();
-    }
-    serde_json::from_str(&contents).unwrap_or_default()
+    load_json_list(&data_path(Some(DRAWING_TEMPLATES_PATH)))
 }
 
 pub fn save_drawings(drawings: &[chart::drawing::DrawingRecord]) -> std::io::Result<()> {
@@ -143,15 +135,7 @@ pub fn save_drawings(drawings: &[chart::drawing::DrawingRecord]) -> std::io::Res
 }
 
 pub fn load_drawings() -> Vec<chart::drawing::DrawingRecord> {
-    let path = data_path(Some(DRAWINGS_PATH));
-    let Ok(mut file) = File::open(&path) else {
-        return Vec::new();
-    };
-    let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_err() {
-        return Vec::new();
-    }
-    serde_json::from_str(&contents).unwrap_or_default()
+    load_json_list(&data_path(Some(DRAWINGS_PATH)))
 }
 
 pub fn save_alerts(alerts: &[chart::alert::PriceAlert]) -> std::io::Result<()> {
@@ -161,16 +145,7 @@ pub fn save_alerts(alerts: &[chart::alert::PriceAlert]) -> std::io::Result<()> {
 }
 
 pub fn load_alerts() -> Vec<chart::alert::PriceAlert> {
-    let path = data_path(Some(ALERTS_PATH));
-    let Ok(mut file) = File::open(&path) else {
-        return Vec::new();
-    };
-    let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_err() {
-        return Vec::new();
-    }
-    let mut alerts: Vec<chart::alert::PriceAlert> =
-        serde_json::from_str(&contents).unwrap_or_default();
+    let mut alerts: Vec<chart::alert::PriceAlert> = load_json_list(&data_path(Some(ALERTS_PATH)));
     for alert in &mut alerts {
         if alert.status == chart::alert::AlertStatus::Active {
             alert.triggered_at = None;
@@ -187,9 +162,69 @@ pub enum InternalError {
     Layout(String),
 }
 
-pub fn write_json_to_file(json: &str, file_name: &str) -> std::io::Result<()> {
-    let path = data_path(Some(file_name));
+/// Loads a JSON array from `path`. A missing file yields an empty list. A file that exists but
+/// cannot be parsed is moved aside (never silently discarded) so the next save cannot overwrite
+/// the user's data.
+fn load_json_list<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => {
+            warn!("Failed to read '{}': {}", path.display(), e);
+            return Vec::new();
+        }
+    };
 
+    match serde_json::from_str(&contents) {
+        Ok(items) => items,
+        Err(e) => {
+            warn!("Failed to parse '{}': {}", path.display(), e);
+            quarantine_corrupt_file(path);
+            Vec::new()
+        }
+    }
+}
+
+/// Renames an unreadable data file to `<stem>_corrupt_<unix-secs>.<ext>` next to the original.
+fn quarantine_corrupt_file(path: &Path) -> Option<PathBuf> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    let stem = path.file_stem()?.to_string_lossy();
+    let backup_name = match path.extension() {
+        Some(ext) => format!("{stem}_corrupt_{secs}.{}", ext.to_string_lossy()),
+        None => format!("{stem}_corrupt_{secs}"),
+    };
+    let backup_path = path.with_file_name(backup_name);
+
+    match std::fs::rename(path, &backup_path) {
+        Ok(()) => {
+            info!(
+                "Backed up corrupted file to '{}'. It can be restored manually.",
+                backup_path.display()
+            );
+            Some(backup_path)
+        }
+        Err(e) => {
+            warn!(
+                "Failed to back up corrupted file '{}' to '{}': {}",
+                path.display(),
+                backup_path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+pub fn write_json_to_file(json: &str, file_name: &str) -> std::io::Result<()> {
+    write_file_atomic(&data_path(Some(file_name)), json.as_bytes())
+}
+
+/// Writes via a temp file in the same directory and renames it into place. The temp file is
+/// fsynced first so a crash or power loss cannot leave an empty or truncated target behind.
+fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid state file path")
     })?;
@@ -201,14 +236,15 @@ pub fn write_json_to_file(json: &str, file_name: &str) -> std::io::Result<()> {
     let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
     {
         let mut file = File::create(&tmp_path)?;
-        file.write_all(json.as_bytes())?;
+        file.write_all(contents)?;
         file.flush()?;
+        file.sync_all()?;
     }
 
-    if let Err(e) = std::fs::rename(&tmp_path, &path) {
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
         if path.exists() {
-            let _ = std::fs::remove_file(&path);
-            std::fs::rename(&tmp_path, &path).map_err(|_| e)?;
+            let _ = std::fs::remove_file(path);
+            std::fs::rename(&tmp_path, path).map_err(|_| e)?;
         } else {
             return Err(e);
         }
@@ -539,5 +575,121 @@ mod tests {
         assert_eq!(read2, data2);
 
         let _ = std::fs::remove_file(data_path(Some(&test_file)));
+    }
+
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Item {
+        id: u32,
+    }
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hawk-data-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn corrupt_backups(dir: &Path, prefix: &str) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with(prefix) && n.contains("_corrupt_"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_load_json_list_missing_file_is_empty_without_side_effects() {
+        let dir = scratch_dir();
+        let items: Vec<Item> = load_json_list(&dir.join("drawings.json"));
+        assert!(items.is_empty());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_load_json_list_reads_valid_file_and_keeps_it() {
+        let dir = scratch_dir();
+        let path = dir.join("drawings.json");
+        std::fs::write(&path, r#"[{"id":1},{"id":2}]"#).unwrap();
+
+        let items: Vec<Item> = load_json_list(&path);
+        assert_eq!(items, vec![Item { id: 1 }, Item { id: 2 }]);
+        assert!(path.exists());
+        assert!(corrupt_backups(&dir, "drawings").is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_load_json_list_corrupt_file_is_quarantined_not_lost() {
+        let dir = scratch_dir();
+        let path = dir.join("drawings.json");
+        let corrupt = r#"[{"id":1},{"id":"#;
+        std::fs::write(&path, corrupt).unwrap();
+
+        let items: Vec<Item> = load_json_list(&path);
+        assert!(items.is_empty());
+        assert!(!path.exists(), "corrupt file must be moved away");
+
+        let backups = corrupt_backups(&dir, "drawings");
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read_to_string(&backups[0]).unwrap(), corrupt);
+        assert_eq!(backups[0].extension().unwrap(), "json");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_save_after_corrupt_load_cannot_destroy_original_data() {
+        let dir = scratch_dir();
+        let path = dir.join("alerts.json");
+        std::fs::write(&path, "not json at all").unwrap();
+
+        let items: Vec<Item> = load_json_list(&path);
+        assert!(items.is_empty());
+        write_file_atomic(&path, b"[]").unwrap();
+
+        let backups = corrupt_backups(&dir, "alerts");
+        assert_eq!(backups.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&backups[0]).unwrap(),
+            "not json at all"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_quarantine_handles_names_without_extension() {
+        let dir = scratch_dir();
+        let path = dir.join("state");
+        std::fs::write(&path, "x").unwrap();
+
+        let backup = quarantine_corrupt_file(&path).unwrap();
+        assert!(!path.exists());
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("state_corrupt_")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_write_file_atomic_creates_dirs_replaces_and_leaves_no_temp_files() {
+        let dir = scratch_dir();
+        let path = dir.join("nested").join("saved.json");
+
+        write_file_atomic(&path, b"first").unwrap();
+        write_file_atomic(&path, b"second").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1, "temp file must not remain after rename");
+        std::fs::remove_dir_all(dir).ok();
     }
 }
