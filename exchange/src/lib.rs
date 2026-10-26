@@ -60,7 +60,9 @@ pub fn volume_size_unit() -> SizeUnit {
 /// Maps user-selected update intervals to exchange-specific depth levels.
 /// Used for some exchanges that determine push frequency based on subscribed depth level
 /// (e.g., Bybit pushes every 300ms for 1000-level depth, 100ms for 200-level).
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord,
+)]
 pub enum PushFrequency {
     #[default]
     ServerDefault,

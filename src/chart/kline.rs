@@ -1289,7 +1289,9 @@ impl KlineChart {
             let idx = selected_unlocked[0];
             let id = self.drawings[idx].id;
             let is_burst = self.last_nudge.as_ref().is_some_and(|(prev_ids, prev_t)| {
-                prev_ids.len() == 1 && prev_ids[0] == id && now.duration_since(*prev_t).as_millis() <= 500
+                prev_ids.len() == 1
+                    && prev_ids[0] == id
+                    && now.duration_since(*prev_t).as_millis() <= 500
             });
             self.last_nudge = Some((vec![id], now));
 
@@ -13982,24 +13984,29 @@ mod tests {
         chart.chart.bounds = bounds;
         let cursor = mouse::Cursor::Available(Point::new(100.0, 100.0));
 
-        let make_arrow = |named: iced::keyboard::key::Named, code: iced::keyboard::key::Code, shift: bool| {
-            let mut modifiers = iced::keyboard::Modifiers::default();
-            if shift {
-                modifiers |= iced::keyboard::Modifiers::SHIFT;
-            }
-            Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key: iced::keyboard::Key::Named(named),
-                location: iced::keyboard::Location::Standard,
-                modifiers,
-                repeat: false,
-                text: None,
-                physical_key: iced::keyboard::key::Physical::Code(code),
-                modified_key: iced::keyboard::Key::Named(named),
-            })
-        };
+        let make_arrow =
+            |named: iced::keyboard::key::Named, code: iced::keyboard::key::Code, shift: bool| {
+                let mut modifiers = iced::keyboard::Modifiers::default();
+                if shift {
+                    modifiers |= iced::keyboard::Modifiers::SHIFT;
+                }
+                Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                    key: iced::keyboard::Key::Named(named),
+                    location: iced::keyboard::Location::Standard,
+                    modifiers,
+                    repeat: false,
+                    text: None,
+                    physical_key: iced::keyboard::key::Physical::Code(code),
+                    modified_key: iced::keyboard::Key::Named(named),
+                })
+            };
 
         // Without any selection, arrow keys should not produce an action
-        let up_key = make_arrow(iced::keyboard::key::Named::ArrowUp, iced::keyboard::key::Code::ArrowUp, false);
+        let up_key = make_arrow(
+            iced::keyboard::key::Named::ArrowUp,
+            iced::keyboard::key::Code::ArrowUp,
+            false,
+        );
         let action = chart.update(&mut interaction, &up_key, bounds, cursor);
         assert!(action.is_none());
 
@@ -14014,22 +14021,38 @@ mod tests {
         assert!(action_up.is_some());
 
         // Shift+ArrowUp publishes action
-        let shift_up_key = make_arrow(iced::keyboard::key::Named::ArrowUp, iced::keyboard::key::Code::ArrowUp, true);
+        let shift_up_key = make_arrow(
+            iced::keyboard::key::Named::ArrowUp,
+            iced::keyboard::key::Code::ArrowUp,
+            true,
+        );
         let action_shift_up = chart.update(&mut interaction, &shift_up_key, bounds, cursor);
         assert!(action_shift_up.is_some());
 
         // ArrowDown publishes action
-        let down_key = make_arrow(iced::keyboard::key::Named::ArrowDown, iced::keyboard::key::Code::ArrowDown, false);
+        let down_key = make_arrow(
+            iced::keyboard::key::Named::ArrowDown,
+            iced::keyboard::key::Code::ArrowDown,
+            false,
+        );
         let action_down = chart.update(&mut interaction, &down_key, bounds, cursor);
         assert!(action_down.is_some());
 
         // ArrowLeft publishes action
-        let left_key = make_arrow(iced::keyboard::key::Named::ArrowLeft, iced::keyboard::key::Code::ArrowLeft, false);
+        let left_key = make_arrow(
+            iced::keyboard::key::Named::ArrowLeft,
+            iced::keyboard::key::Code::ArrowLeft,
+            false,
+        );
         let action_left = chart.update(&mut interaction, &left_key, bounds, cursor);
         assert!(action_left.is_some());
 
         // ArrowRight publishes action
-        let right_key = make_arrow(iced::keyboard::key::Named::ArrowRight, iced::keyboard::key::Code::ArrowRight, false);
+        let right_key = make_arrow(
+            iced::keyboard::key::Named::ArrowRight,
+            iced::keyboard::key::Code::ArrowRight,
+            false,
+        );
         let action_right = chart.update(&mut interaction, &right_key, bounds, cursor);
         assert!(action_right.is_some());
     }

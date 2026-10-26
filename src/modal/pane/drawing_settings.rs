@@ -626,9 +626,9 @@ fn view_position_style_tab<'a>(
             .style(move |theme, status| style::button::transparent(theme, status, is_selected))
             .on_press(Message::PaneEvent(
                 pane,
-                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(Some([
-                    rgb[0], rgb[1], rgb[2], tp_alpha,
-                ]))),
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(Some(
+                    [rgb[0], rgb[1], rgb[2], tp_alpha],
+                ))),
             ));
 
         tp_swatches = tp_swatches.push(btn);
@@ -641,19 +641,17 @@ fn view_position_style_tab<'a>(
     .spacing(4)
     .align_y(Alignment::Center);
 
-    let tp_opacity_slider = slider(0..=100, tp_alpha_pct, move |new_pct| {
-        Message::PaneEvent(
-            pane,
-            Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(Some([
-                tp_rgb[0],
-                tp_rgb[1],
-                tp_rgb[2],
-                new_pct as f32 / 100.0,
-            ]))),
-        )
-    })
-    .step(5u8)
-    .width(Length::Fixed(180.0));
+    let tp_opacity_slider =
+        slider(0..=100, tp_alpha_pct, move |new_pct| {
+            Message::PaneEvent(
+                pane,
+                Event::DrawingSettingsAction(DrawingSettingsAction::SetPositionProfitColor(Some(
+                    [tp_rgb[0], tp_rgb[1], tp_rgb[2], new_pct as f32 / 100.0],
+                ))),
+            )
+        })
+        .step(5u8)
+        .width(Length::Fixed(180.0));
 
     let tp_opacity_row = row![
         container(text("TP Opacity:").size(11).font(style::AZERET_MONO)).width(75),
@@ -835,7 +833,9 @@ fn view_position_style_tab<'a>(
                 Event::DrawingSettingsAction(DrawingSettingsAction::TogglePositionPricePath),
             )
         }),
-        text("Show Price Path (Trajectory)").size(11).font(style::AZERET_MONO),
+        text("Show Price Path (Trajectory)")
+            .size(11)
+            .font(style::AZERET_MONO),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
@@ -1110,7 +1110,9 @@ fn view_coordinates_tab<'a>(
                 .on_input(move |v| {
                     Message::PaneEvent(
                         pane,
-                        Event::DrawingSettingsAction(DrawingSettingsAction::CoordTargetPriceChanged(v)),
+                        Event::DrawingSettingsAction(
+                            DrawingSettingsAction::CoordTargetPriceChanged(v),
+                        ),
                     )
                 })
                 .width(Length::Fixed(160.0))

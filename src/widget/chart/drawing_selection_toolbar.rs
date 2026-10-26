@@ -436,7 +436,9 @@ fn view_settings<'a, Message: 'a + Clone>(
     let advanced_btn = button(
         row![
             icon_text(Icon::Edit, 10),
-            text("Advanced Properties...").size(9).font(style::AZERET_MONO),
+            text("Advanced Properties...")
+                .size(9)
+                .font(style::AZERET_MONO),
         ]
         .spacing(4)
         .align_y(Alignment::Center),
@@ -445,10 +447,17 @@ fn view_settings<'a, Message: 'a + Clone>(
     .style(|theme, status| toolbar_button_style(theme, status, false))
     .on_press(on_action(SelectionToolbarAction::OpenAdvancedSettings));
 
-    column![separator, preset_row, color_row, width_row, opacity_row, advanced_btn]
-        .spacing(6)
-        .padding(padding::top(4).bottom(2).left(2).right(2))
-        .into()
+    column![
+        separator,
+        preset_row,
+        color_row,
+        width_row,
+        opacity_row,
+        advanced_btn
+    ]
+    .spacing(6)
+    .padding(padding::top(4).bottom(2).left(2).right(2))
+    .into()
 }
 
 fn view_position_settings<'a, Message: 'a + Clone>(
@@ -823,7 +832,9 @@ fn view_position_settings<'a, Message: 'a + Clone>(
     let advanced_btn = button(
         row![
             icon_text(Icon::Edit, 10),
-            text("Advanced Properties...").size(9).font(style::AZERET_MONO),
+            text("Advanced Properties...")
+                .size(9)
+                .font(style::AZERET_MONO),
         ]
         .spacing(4)
         .align_y(Alignment::Center),

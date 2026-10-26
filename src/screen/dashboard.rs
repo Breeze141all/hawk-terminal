@@ -22,7 +22,8 @@ use exchange::{
     Kline, PushFrequency, StreamPairKind, TickMultiplier, TickerInfo, Timeframe, Trade,
     adapter::{
         self, AdapterError, Exchange, PersistStreamKind, ResolvedStream, StreamConfig, StreamKind,
-        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, coinbase, hyperliquid, mexc, okex,
+        StreamTicksize, UniqueStreams, binance, bitcoincounterflow, bybit, coinbase, hyperliquid,
+        mexc, okex,
     },
     depth::Depth,
     fetcher::{FetchRange, FetchedData, NetOiInterval},

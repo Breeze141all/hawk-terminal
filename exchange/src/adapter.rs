@@ -442,7 +442,9 @@ impl PersistStreamKind {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, PartialOrd, Ord,
+)]
 pub enum StreamTicksize {
     ServerSide(TickMultiplier),
     #[default]
@@ -516,7 +518,9 @@ impl std::fmt::Display for ExchangeInclusive {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize, Enum, PartialOrd, Ord,
+)]
 pub enum Exchange {
     BinanceLinear,
     BinanceInverse,
@@ -767,9 +771,7 @@ pub async fn fetch_ticker_info(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_ticksize(market_type).await
         }
-        Exchange::CoinbaseSpot => {
-            coinbase::fetch_ticksize(market_type).await
-        }
+        Exchange::CoinbaseSpot => coinbase::fetch_ticksize(market_type).await,
     }
 }
 
@@ -794,9 +796,7 @@ pub async fn fetch_ticker_prices(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_ticker_prices(market_type).await
         }
-        Exchange::CoinbaseSpot => {
-            coinbase::fetch_ticker_prices(market_type).await
-        }
+        Exchange::CoinbaseSpot => coinbase::fetch_ticker_prices(market_type).await,
     }
 }
 
@@ -821,9 +821,7 @@ pub async fn fetch_klines(
         Exchange::MexcLinear | Exchange::MexcInverse | Exchange::MexcSpot => {
             mexc::fetch_klines(ticker_info, timeframe, range).await
         }
-        Exchange::CoinbaseSpot => {
-            coinbase::fetch_klines(ticker_info, timeframe, range).await
-        }
+        Exchange::CoinbaseSpot => coinbase::fetch_klines(ticker_info, timeframe, range).await,
     }
 }
 
@@ -933,8 +931,13 @@ mod tests {
         let d2 = u2.depth_streams(Some(Exchange::BinanceLinear));
         let d3 = u3.depth_streams(Some(Exchange::BinanceLinear));
 
-        assert_eq!(d1, d2, "Stream specs ordering must be deterministic regardless of insertion order");
-        assert_eq!(d1, d3, "Duplicate pane/popout specs must collapse and produce identical stable order");
+        assert_eq!(
+            d1, d2,
+            "Stream specs ordering must be deterministic regardless of insertion order"
+        );
+        assert_eq!(
+            d1, d3,
+            "Duplicate pane/popout specs must collapse and produce identical stable order"
+        );
     }
 }
-

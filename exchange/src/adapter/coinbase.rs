@@ -3,9 +3,7 @@ use crate::{
     adapter::{AdapterError, Event, StreamKind, StreamTicksize},
     depth::{DeOrder, DepthPayload, DepthUpdate, LocalDepthCache},
     limiter::HTTP_CLIENT,
-    trades::cache::{
-        load_intraday_trades_from_cache, save_raw_trades_to_cache,
-    },
+    trades::cache::{load_intraday_trades_from_cache, save_raw_trades_to_cache},
 };
 
 use super::super::{
@@ -20,11 +18,7 @@ use iced_futures::{
     stream,
 };
 use serde_json::Value;
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 pub const WS_DOMAIN: &str = "advanced-trade-ws.coinbase.com";
 pub const REST_EXCHANGE_BASE: &str = "https://api.exchange.coinbase.com";
@@ -42,11 +36,7 @@ pub fn timeframe_to_seconds(tf: Timeframe) -> Option<u64> {
         Timeframe::D1 => Some(86400),
         _ => {
             let ms = tf.to_milliseconds();
-            if ms >= 60_000 {
-                Some(ms / 1000)
-            } else {
-                None
-            }
+            if ms >= 60_000 { Some(ms / 1000) } else { None }
         }
     }
 }
@@ -184,9 +174,8 @@ pub async fn fetch_klines(
     let (symbol, _) = ticker_info.ticker.to_full_symbol_and_type();
     let granularity = timeframe_to_seconds(timeframe).unwrap_or(300);
 
-    let mut url = format!(
-        "{REST_EXCHANGE_BASE}/products/{symbol}/candles?granularity={granularity}"
-    );
+    let mut url =
+        format!("{REST_EXCHANGE_BASE}/products/{symbol}/candles?granularity={granularity}");
 
     if let Some((start_ms, end_ms)) = range {
         let start_iso = chrono::DateTime::from_timestamp_millis(start_ms as i64)
@@ -350,11 +339,26 @@ pub fn connect_market_stream(
                         Ok(mut ws) => {
                             let text1 = subscribe_msg.to_string();
                             let text2 = subscribe_l2_msg.to_string();
-                            if ws.write_frame(Frame::text(fastwebsockets::Payload::Borrowed(text1.as_bytes()))).await.is_err()
-                                || ws.write_frame(Frame::text(fastwebsockets::Payload::Borrowed(text2.as_bytes()))).await.is_err()
+                            if ws
+                                .write_frame(Frame::text(fastwebsockets::Payload::Borrowed(
+                                    text1.as_bytes(),
+                                )))
+                                .await
+                                .is_err()
+                                || ws
+                                    .write_frame(Frame::text(fastwebsockets::Payload::Borrowed(
+                                        text2.as_bytes(),
+                                    )))
+                                    .await
+                                    .is_err()
                             {
                                 tokio::time::sleep(Duration::from_secs(1)).await;
-                                let _ = output.send(Event::Disconnected(exchange, "Subscribe failed".to_string())).await;
+                                let _ = output
+                                    .send(Event::Disconnected(
+                                        exchange,
+                                        "Subscribe failed".to_string(),
+                                    ))
+                                    .await;
                                 state = State::Disconnected;
                                 continue;
                             }
@@ -363,7 +367,9 @@ pub fn connect_market_stream(
                         }
                         Err(e) => {
                             tokio::time::sleep(Duration::from_secs(1)).await;
-                            let _ = output.send(Event::Disconnected(exchange, e.to_string())).await;
+                            let _ = output
+                                .send(Event::Disconnected(exchange, e.to_string()))
+                                .await;
                             state = State::Disconnected;
                         }
                     }
@@ -519,7 +525,10 @@ pub fn connect_kline_stream(
             lookup.insert(symbol, (*ticker_info, *timeframe));
         }
 
-        let exchange = streams.first().map(|(t, _)| t.exchange()).unwrap_or(Exchange::CoinbaseSpot);
+        let exchange = streams
+            .first()
+            .map(|(t, _)| t.exchange())
+            .unwrap_or(Exchange::CoinbaseSpot);
 
         let subscribe_msg = serde_json::json!({
             "type": "subscribe",
@@ -534,9 +543,20 @@ pub fn connect_kline_stream(
                     match connect_ws(WS_DOMAIN, url).await {
                         Ok(mut ws) => {
                             let text = subscribe_msg.to_string();
-                            if ws.write_frame(Frame::text(fastwebsockets::Payload::Borrowed(text.as_bytes()))).await.is_err() {
+                            if ws
+                                .write_frame(Frame::text(fastwebsockets::Payload::Borrowed(
+                                    text.as_bytes(),
+                                )))
+                                .await
+                                .is_err()
+                            {
                                 tokio::time::sleep(Duration::from_secs(1)).await;
-                                let _ = output.send(Event::Disconnected(exchange, "Subscribe candles failed".to_string())).await;
+                                let _ = output
+                                    .send(Event::Disconnected(
+                                        exchange,
+                                        "Subscribe candles failed".to_string(),
+                                    ))
+                                    .await;
                                 state = State::Disconnected;
                                 continue;
                             }
@@ -545,69 +565,101 @@ pub fn connect_kline_stream(
                         }
                         Err(e) => {
                             tokio::time::sleep(Duration::from_secs(1)).await;
-                            let _ = output.send(Event::Disconnected(exchange, e.to_string())).await;
+                            let _ = output
+                                .send(Event::Disconnected(exchange, e.to_string()))
+                                .await;
                             state = State::Disconnected;
                         }
                     }
                 }
-                State::Connected(ws) => {
-                    match ws.read_frame().await {
-                        Ok(frame) => match frame.opcode {
-                            OpCode::Text => {
-                                if let Ok(val) = serde_json::from_slice::<Value>(&frame.payload) {
-                                    let channel = val["channel"].as_str().unwrap_or("");
-                                    if channel == "candles" && let Some(events) = val["events"].as_array() {
-                                        for ev in events {
-                                            if let Some(candles_arr) = ev["candles"].as_array() {
-                                                for c in candles_arr {
-                                                    let product_id = c["product_id"].as_str().unwrap_or("");
-                                                    if let Some(&(ticker_info, timeframe)) = lookup.get(product_id) {
-                                                        let start_sec = c["start"].as_str().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-                                                        let open = c["open"].as_str().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-                                                        let high = c["high"].as_str().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-                                                        let low = c["low"].as_str().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-                                                        let close = c["close"].as_str().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
-                                                        let volume = c["volume"].as_str().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                State::Connected(ws) => match ws.read_frame().await {
+                    Ok(frame) => match frame.opcode {
+                        OpCode::Text => {
+                            if let Ok(val) = serde_json::from_slice::<Value>(&frame.payload) {
+                                let channel = val["channel"].as_str().unwrap_or("");
+                                if channel == "candles"
+                                    && let Some(events) = val["events"].as_array()
+                                {
+                                    for ev in events {
+                                        if let Some(candles_arr) = ev["candles"].as_array() {
+                                            for c in candles_arr {
+                                                let product_id =
+                                                    c["product_id"].as_str().unwrap_or("");
+                                                if let Some(&(ticker_info, timeframe)) =
+                                                    lookup.get(product_id)
+                                                {
+                                                    let start_sec = c["start"]
+                                                        .as_str()
+                                                        .and_then(|s| s.parse::<u64>().ok())
+                                                        .unwrap_or(0);
+                                                    let open = c["open"]
+                                                        .as_str()
+                                                        .and_then(|s| s.parse::<f32>().ok())
+                                                        .unwrap_or(0.0);
+                                                    let high = c["high"]
+                                                        .as_str()
+                                                        .and_then(|s| s.parse::<f32>().ok())
+                                                        .unwrap_or(0.0);
+                                                    let low = c["low"]
+                                                        .as_str()
+                                                        .and_then(|s| s.parse::<f32>().ok())
+                                                        .unwrap_or(0.0);
+                                                    let close = c["close"]
+                                                        .as_str()
+                                                        .and_then(|s| s.parse::<f32>().ok())
+                                                        .unwrap_or(0.0);
+                                                    let volume = c["volume"]
+                                                        .as_str()
+                                                        .and_then(|s| s.parse::<f32>().ok())
+                                                        .unwrap_or(0.0);
 
-                                                        let kline = Kline::new(
-                                                            start_sec * 1000,
-                                                            open,
-                                                            high,
-                                                            low,
-                                                            close,
-                                                            (volume, volume * 0.5),
-                                                            ticker_info.min_ticksize,
-                                                        );
+                                                    let kline = Kline::new(
+                                                        start_sec * 1000,
+                                                        open,
+                                                        high,
+                                                        low,
+                                                        close,
+                                                        (volume, volume * 0.5),
+                                                        ticker_info.min_ticksize,
+                                                    );
 
-                                                        let _ = output.send(Event::KlineReceived(
+                                                    let _ = output
+                                                        .send(Event::KlineReceived(
                                                             StreamKind::Kline {
                                                                 ticker_info,
                                                                 timeframe,
                                                             },
                                                             kline,
-                                                        )).await;
-                                                    }
+                                                        ))
+                                                        .await;
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            OpCode::Ping => {
-                                let _ = ws.write_frame(Frame::pong(frame.payload)).await;
-                            }
-                            OpCode::Close => {
-                                state = State::Disconnected;
-                                let _ = output.send(Event::Disconnected(exchange, "Connection closed".to_string())).await;
-                            }
-                            _ => {}
-                        },
-                        Err(e) => {
-                            state = State::Disconnected;
-                            let _ = output.send(Event::Disconnected(exchange, e.to_string())).await;
                         }
+                        OpCode::Ping => {
+                            let _ = ws.write_frame(Frame::pong(frame.payload)).await;
+                        }
+                        OpCode::Close => {
+                            state = State::Disconnected;
+                            let _ = output
+                                .send(Event::Disconnected(
+                                    exchange,
+                                    "Connection closed".to_string(),
+                                ))
+                                .await;
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        state = State::Disconnected;
+                        let _ = output
+                            .send(Event::Disconnected(exchange, e.to_string()))
+                            .await;
                     }
-                }
+                },
             }
         }
     })
