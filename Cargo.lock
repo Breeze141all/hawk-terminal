@@ -2209,6 +2209,7 @@ dependencies = [
  "palette",
  "reqwest",
  "rfd",
+ "ring",
  "rodio",
  "rustc-hash 2.1.1",
  "semver",

@@ -139,6 +139,8 @@ jobs:
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           DATE=$(date -u +%Y-%m-%d)
+          # Installer checksum is mandatory: the in-app updater refuses releases without it.
+          SHA256=$(sha256sum final-assets/hawk-terminal-x86_64-setup.exe | cut -d' ' -f1)
           git clone https://x-access-token:${SITE_DEPLOY_TOKEN}@github.com/Breeze141all/hawk-site.git hawk-site-repo
           cd hawk-site-repo
           cat <<EOF > version.json
@@ -149,7 +151,8 @@ jobs:
               "Hawk Terminal $TAG release"
             ],
             "download_url": "https://github.com/Breeze141all/hawk-terminal/releases/download/$TAG/hawk-terminal-x86_64-setup.exe",
-            "direct_site_url": "https://breeze141all.github.io/hawk-site/hawk-terminal-setup.exe"
+            "direct_site_url": "https://breeze141all.github.io/hawk-site/hawk-terminal-setup.exe",
+            "sha256": "$SHA256"
           }
           EOF
           git config user.name "github-actions[bot]"

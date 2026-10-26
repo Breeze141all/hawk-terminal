@@ -7,6 +7,95 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const VERSION_CHECK_URL: &str = "https://breeze141all.github.io/hawk-site/version.json";
 
+/// Upper bound for the installer download; anything larger is rejected as malformed.
+const MAX_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+
+const ALLOWED_RELEASE_HOST: &str = "github.com";
+const ALLOWED_RELEASE_PATH_PREFIX: &str = "/Breeze141all/hawk-terminal/releases/download/";
+const ALLOWED_SITE_HOST: &str = "breeze141all.github.io";
+const ALLOWED_SITE_PATH_PREFIX: &str = "/hawk-site/";
+
+/// Accepts only HTTPS URLs that point to this project's own GitHub release or site assets.
+pub fn validate_download_url(raw: &str) -> Result<(), String> {
+    let url = url::Url::parse(raw).map_err(|e| format!("Invalid download URL: {e}"))?;
+    if url.scheme() != "https" {
+        return Err(format!("Download URL must use https, got {}", url.scheme()));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Download URL must not contain credentials".to_string());
+    }
+    let host = url.host_str().unwrap_or_default();
+    let allowed = (host == ALLOWED_RELEASE_HOST
+        && url.path().starts_with(ALLOWED_RELEASE_PATH_PREFIX))
+        || (host == ALLOWED_SITE_HOST && url.path().starts_with(ALLOWED_SITE_PATH_PREFIX));
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "Download URL is not an official release location: {host}"
+        ))
+    }
+}
+
+/// Parses a SHA-256 hex digest (64 hex chars, case-insensitive) into canonical lowercase form.
+pub fn normalize_sha256(raw: &str) -> Option<String> {
+    let clean = raw.trim();
+    (clean.len() == 64 && clean.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| clean.to_ascii_lowercase())
+}
+
+/// Streams the file through SHA-256 and returns the lowercase hex digest.
+pub fn sha256_file_hex(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        ctx.update(&buf[..n]);
+    }
+    let digest = ctx.finish();
+    Ok(digest.as_ref().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Verifies the downloaded file against the expected checksum from the release manifest.
+pub fn verify_installer_checksum(path: &Path, expected: &str) -> Result<(), String> {
+    let expected = normalize_sha256(expected)
+        .ok_or_else(|| "Release checksum is not a valid SHA-256 digest".to_string())?;
+    let actual =
+        sha256_file_hex(path).map_err(|e| format!("Failed to hash downloaded installer: {e}"))?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(
+            "Installer checksum mismatch: the download is corrupted or has been tampered with"
+                .to_string(),
+        )
+    }
+}
+
+/// Verifies the temp download and, only on success, moves it to its final location.
+/// A failed verification deletes the temp file so an unverified installer never survives.
+fn finalize_download(
+    tmp_path: &Path,
+    final_path: &Path,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    if let Err(e) = verify_installer_checksum(tmp_path, expected_sha256) {
+        let _ = std::fs::remove_file(tmp_path);
+        return Err(e);
+    }
+    if final_path.exists() {
+        let _ = std::fs::remove_file(final_path);
+    }
+    std::fs::rename(tmp_path, final_path)
+        .map_err(|e| format!("Failed to finalize installer file: {e}"))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteRelease {
     pub version: String,
@@ -161,6 +250,17 @@ where
 {
     use tokio::io::AsyncWriteExt;
 
+    // Refuse to download anything we cannot verify afterwards.
+    let expected_sha256 = release
+        .sha256
+        .as_deref()
+        .and_then(normalize_sha256)
+        .ok_or_else(|| "Release manifest has no valid sha256; refusing to install".to_string())?;
+    validate_download_url(&release.download_url)?;
+    if let Some(fallback) = &release.direct_site_url {
+        validate_download_url(fallback)?;
+    }
+
     let client = reqwest::Client::builder()
         .user_agent(format!("HawkTerminal/{}", env!("CARGO_PKG_VERSION")))
         .build()
@@ -192,6 +292,9 @@ where
     }
 
     let total_bytes = response.content_length();
+    if total_bytes.is_some_and(|total| total > MAX_INSTALLER_BYTES) {
+        return Err("Installer is unexpectedly large; refusing to download".to_string());
+    }
     let temp_dir = std::env::temp_dir();
     let file_name = format!("hawk-terminal-setup-v{}.exe", release.version);
     let final_path = temp_dir.join(file_name);
@@ -217,6 +320,11 @@ where
             .map_err(|e| format!("Failed writing to installer file: {e}"))?;
 
         downloaded += chunk.len() as u64;
+        if downloaded > MAX_INSTALLER_BYTES {
+            drop(file);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err("Installer exceeded the maximum allowed size".to_string());
+        }
         let progress = match total_bytes {
             Some(total) if total > 0 => (downloaded as f32 / total as f32).min(1.0),
             _ => 0.0,
@@ -229,13 +337,12 @@ where
         .map_err(|e| format!("Failed to flush installer file: {e}"))?;
     drop(file);
 
-    if final_path.exists() {
-        let _ = tokio::fs::remove_file(&final_path).await;
+    {
+        let (tmp, fin) = (tmp_path.clone(), final_path.clone());
+        tokio::task::spawn_blocking(move || finalize_download(&tmp, &fin, &expected_sha256))
+            .await
+            .map_err(|e| format!("Checksum task failed: {e}"))??;
     }
-
-    tokio::fs::rename(&tmp_path, &final_path)
-        .await
-        .map_err(|e| format!("Failed to finalize installer file: {e}"))?;
 
     info!("Installer saved to {:?}", final_path);
     Ok(final_path)
@@ -289,5 +396,143 @@ mod tests {
         assert!(!is_newer_version("0.9.6", "0.9.6"));
         assert!(!is_newer_version("0.9.7", "0.9.6"));
         assert!(!is_newer_version("1.0.0", "0.9.9"));
+    }
+
+    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    fn scratch_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hawk-updater-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_download_url_accepts_official_locations() {
+        assert!(
+            validate_download_url(
+                "https://github.com/Breeze141all/hawk-terminal/releases/download/v0.9.8/hawk-terminal-x86_64-setup.exe"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_download_url(
+                "https://breeze141all.github.io/hawk-site/hawk-terminal-setup.exe"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_download_url_rejects_untrusted_locations() {
+        for bad in [
+            "http://github.com/Breeze141all/hawk-terminal/releases/download/v1/x.exe",
+            "https://evil.example.com/hawk.exe",
+            "https://github.com.evil.com/Breeze141all/hawk-terminal/releases/download/v1/x.exe",
+            "https://github.com@evil.com/Breeze141all/hawk-terminal/releases/download/v1/x.exe",
+            "https://user:pw@github.com/Breeze141all/hawk-terminal/releases/download/v1/x.exe",
+            "https://github.com/attacker/hawk-terminal/releases/download/v1/x.exe",
+            "https://breeze141all.github.io/other-site/x.exe",
+            "file:///C:/Windows/System32/calc.exe",
+            "not a url",
+            "",
+        ] {
+            assert!(validate_download_url(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_normalize_sha256() {
+        assert_eq!(normalize_sha256(ABC_SHA256).as_deref(), Some(ABC_SHA256));
+        assert_eq!(
+            normalize_sha256(&format!("  {}\n", ABC_SHA256.to_uppercase())).as_deref(),
+            Some(ABC_SHA256)
+        );
+        assert_eq!(normalize_sha256(""), None);
+        assert_eq!(normalize_sha256("abc"), None);
+        assert_eq!(normalize_sha256(&"g".repeat(64)), None);
+        assert_eq!(normalize_sha256(&format!("{ABC_SHA256}00")), None);
+    }
+
+    #[test]
+    fn test_sha256_file_matches_known_vector() {
+        let dir = scratch_dir();
+        let path = dir.join("abc.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        assert_eq!(sha256_file_hex(&path).unwrap(), ABC_SHA256);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_verify_installer_checksum_rejects_mismatch_and_garbage() {
+        let dir = scratch_dir();
+        let path = dir.join("setup.exe");
+        std::fs::write(&path, b"abc").unwrap();
+
+        assert!(verify_installer_checksum(&path, ABC_SHA256).is_ok());
+        assert!(verify_installer_checksum(&path, &ABC_SHA256.to_uppercase()).is_ok());
+        assert!(verify_installer_checksum(&path, &"0".repeat(64)).is_err());
+        assert!(verify_installer_checksum(&path, "not-a-hash").is_err());
+        assert!(verify_installer_checksum(&dir.join("missing.exe"), ABC_SHA256).is_err());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_finalize_download_installs_only_verified_file() {
+        let dir = scratch_dir();
+        let tmp = dir.join("setup.tmp");
+        let fin = dir.join("setup.exe");
+
+        std::fs::write(&tmp, b"abc").unwrap();
+        finalize_download(&tmp, &fin, ABC_SHA256).unwrap();
+        assert!(!tmp.exists());
+        assert_eq!(std::fs::read(&fin).unwrap(), b"abc");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn test_finalize_download_deletes_tampered_file_and_keeps_old_installer() {
+        let dir = scratch_dir();
+        let tmp = dir.join("setup.tmp");
+        let fin = dir.join("setup.exe");
+        std::fs::write(&fin, b"previous-good-installer").unwrap();
+        std::fs::write(&tmp, b"tampered").unwrap();
+
+        let err = finalize_download(&tmp, &fin, ABC_SHA256).unwrap_err();
+        assert!(err.contains("mismatch"));
+        assert!(!tmp.exists(), "tampered download must be deleted");
+        assert_eq!(std::fs::read(&fin).unwrap(), b"previous-good-installer");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn release_with(sha256: Option<&str>, url: &str) -> RemoteRelease {
+        RemoteRelease {
+            version: "9.9.9".into(),
+            release_date: None,
+            changelog: None,
+            download_url: url.into(),
+            direct_site_url: None,
+            sha256: sha256.map(String::from),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_download_refuses_release_without_checksum() {
+        let release = release_with(
+            None,
+            "https://github.com/Breeze141all/hawk-terminal/releases/download/v9.9.9/x.exe",
+        );
+        let err = download_installer_file(release, |_, _, _| {}, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap_err();
+        assert!(err.contains("sha256"));
+    }
+
+    #[tokio::test]
+    async fn test_download_refuses_untrusted_url_before_any_request() {
+        let release = release_with(Some(ABC_SHA256), "https://evil.example.com/x.exe");
+        let err = download_installer_file(release, |_, _, _| {}, Arc::new(AtomicBool::new(false)))
+            .await
+            .unwrap_err();
+        assert!(err.contains("official release location"));
     }
 }
