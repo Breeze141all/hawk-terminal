@@ -101,6 +101,10 @@ jobs:
     name: Publish GitHub Release
     needs: [build-macos, build-linux, build-windows]
     runs-on: ubuntu-latest
+    env:
+      # Job-level so the `if:` of the site-update step below can see it
+      # (a step's own `env:` is not visible to that step's `if:`).
+      SITE_DEPLOY_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -133,15 +137,14 @@ jobs:
 
       - name: Update hawk-site version.json
         if: env.SITE_DEPLOY_TOKEN != ''
-        env:
-          SITE_DEPLOY_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
         run: |
           TAG="${{ github.event.inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           DATE=$(date -u +%Y-%m-%d)
           # Installer checksum is mandatory: the in-app updater refuses releases without it.
           SHA256=$(sha256sum final-assets/hawk-terminal-x86_64-setup.exe | cut -d' ' -f1)
-          git clone https://x-access-token:${SITE_DEPLOY_TOKEN}@github.com/Breeze141all/hawk-site.git hawk-site-repo
+          # GitHub Pages serves the gh-pages branch, so that is where version.json must land.
+          git clone --branch gh-pages https://x-access-token:${SITE_DEPLOY_TOKEN}@github.com/Breeze141all/hawk-site.git hawk-site-repo
           cd hawk-site-repo
           cat <<EOF > version.json
           {
@@ -159,4 +162,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version.json
           git commit -m "chore: bump version to $TAG in version.json" || true
-          git push origin main || true
+          git push origin gh-pages
