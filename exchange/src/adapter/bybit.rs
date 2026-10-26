@@ -208,7 +208,9 @@ fn feed_de(
             }
         } else if k == "type" {
             v.as_str()
-                .ok_or_else(|| AdapterError::ParseError("Bybit `type` field is not a string".into()))?
+                .ok_or_else(|| {
+                    AdapterError::ParseError("Bybit `type` field is not a string".into())
+                })?
                 .clone_into(&mut data_type);
         } else if k == "data" {
             match stream_type {
