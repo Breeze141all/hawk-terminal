@@ -4264,8 +4264,12 @@ mod tests {
         assert!(!modal.is_end_date_valid);
         assert!(!modal.is_date_range_valid());
 
-        // Step 2: User sets Start Date to a date after the existing end_date (e.g. 2026-10-25)
-        modal.update(Message::StartDateInputChanged("2026-10-25".into()), None);
+        // Step 2: User sets Start Date to a date after the existing end_date (the default end
+        // date is today, so use tomorrow to keep the test independent of the current date)
+        let after_end = (modal.end_date + chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        modal.update(Message::StartDateInputChanged(after_end.clone()), None);
         assert!(modal.is_start_date_valid);
 
         // Step 3: User hits ApplySearch (or presses Enter in search)
@@ -4282,11 +4286,11 @@ mod tests {
             "Date range is valid after ApplySearch normalization"
         );
         assert_eq!(modal.start_date, modal.end_date);
-        assert_eq!(modal.end_date_input, "2026-10-25");
+        assert_eq!(modal.end_date_input, after_end);
         // And target_dates() returns non-empty slice:
         assert_eq!(
             modal.target_dates(),
-            vec![NaiveDate::from_ymd_opt(2026, 10, 25).unwrap()],
+            vec![modal.start_date],
             "target_dates() must not be empty"
         );
     }
