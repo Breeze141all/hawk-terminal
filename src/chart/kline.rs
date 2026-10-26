@@ -9161,6 +9161,13 @@ pub(crate) fn evaluate_position_outcome(
     }
 }
 
+/// Fill for the highlighted zone between a position's entry and its current/exit price:
+/// the profit color when in profit, the stop color otherwise, with boosted (clamped) alpha.
+fn position_active_fill(is_profit: bool, profit_color: [f32; 4], stop_color: [f32; 4]) -> Color {
+    let [r, g, b, a] = if is_profit { profit_color } else { stop_color };
+    Color::from_rgba(r, g, b, (a * 1.8).clamp(0.25, 0.65))
+}
+
 fn draw_chart_drawings(
     frame: &mut canvas::Frame,
     drawings: &[Drawing],
@@ -9590,21 +9597,7 @@ fn draw_chart_drawings(
                     let active_min_y = entry_y.min(exit_y);
                     let active_h = (entry_y - exit_y).abs();
                     if active_w > 0.0 && active_h > 0.5 {
-                        let active_fill = if outcome.is_profit {
-                            iced::Color::from_rgba(
-                                p_col[0],
-                                p_col[1],
-                                p_col[2],
-                                (p_col[3] * 1.8).clamp(0.25, 0.65),
-                            )
-                        } else {
-                            iced::Color::from_rgba(
-                                s_col[0],
-                                s_col[1],
-                                s_col[2],
-                                (s_col[3] * 1.8).clamp(0.25, 0.65),
-                            )
-                        };
+                        let active_fill = position_active_fill(outcome.is_profit, p_col, s_col);
                         frame.fill_rectangle(
                             Point::new(entry_x, active_min_y),
                             Size::new(active_w, active_h),
@@ -12491,30 +12484,32 @@ mod tests {
     #[test]
     fn test_position_active_fill_color_matches_custom_style() {
         let gray_profit = [0.65f32, 0.65, 0.65, 0.2];
-        let p_col = gray_profit;
-        let is_profit = true;
-
-        let active_fill = if is_profit {
-            iced::Color::from_rgba(
-                p_col[0],
-                p_col[1],
-                p_col[2],
-                (p_col[3] * 1.8).clamp(0.25, 0.65),
-            )
-        } else {
-            iced::Color::from_rgba(
-                p_col[0],
-                p_col[1],
-                p_col[2],
-                (p_col[3] * 1.8).clamp(0.25, 0.65),
-            )
-        };
+        let red_stop = [0.9f32, 0.1, 0.2, 0.2];
 
         // Assert RGB channels match exact position color without green bias
-        assert_eq!(active_fill.r, 0.65);
-        assert_eq!(active_fill.g, 0.65);
-        assert_eq!(active_fill.b, 0.65);
-        assert!((active_fill.a - 0.36).abs() < 1e-4);
+        let profit_fill = position_active_fill(true, gray_profit, red_stop);
+        assert_eq!(profit_fill.r, 0.65);
+        assert_eq!(profit_fill.g, 0.65);
+        assert_eq!(profit_fill.b, 0.65);
+        assert!((profit_fill.a - 0.36).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_position_active_fill_uses_stop_color_when_not_in_profit() {
+        let green_profit = [0.1f32, 0.8, 0.2, 0.2];
+        let red_stop = [0.9f32, 0.1, 0.2, 0.2];
+
+        let loss_fill = position_active_fill(false, green_profit, red_stop);
+        assert_eq!((loss_fill.r, loss_fill.g, loss_fill.b), (0.9, 0.1, 0.2));
+    }
+
+    #[test]
+    fn test_position_active_fill_alpha_is_clamped() {
+        let transparent = [0.5f32, 0.5, 0.5, 0.0];
+        let opaque = [0.5f32, 0.5, 0.5, 1.0];
+
+        assert_eq!(position_active_fill(true, transparent, opaque).a, 0.25);
+        assert_eq!(position_active_fill(false, transparent, opaque).a, 0.65);
     }
 
     #[test]
