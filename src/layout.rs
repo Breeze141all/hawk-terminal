@@ -125,6 +125,7 @@ impl From<&pane::State> for data::Pane {
                     .map_or(studies.clone(), |c| c.studies.clone()),
                 link_group: pane.link_group,
             },
+            #[cfg(feature = "shader-heatmap")]
             pane::Content::ShaderHeatmap {
                 indicators,
                 studies,

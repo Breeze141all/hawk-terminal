@@ -14,17 +14,18 @@ use crate::{
         tickers_table::TickersTable,
     },
     style::{self, Icon, icon_text},
-    widget::{
-        self, button_with_tooltip, chart::heatmap::HeatmapShader, column_drag, link_group_button,
-        toast::Toast,
-    },
+    widget::{self, button_with_tooltip, column_drag, link_group_button, toast::Toast},
     window::{self, Window},
 };
+
+#[cfg(feature = "shader-heatmap")]
+use crate::widget::chart::heatmap::HeatmapShader;
+#[cfg(feature = "shader-heatmap")]
+use data::chart::heatmap::HeatmapStudy;
 use data::{
     UserTimezone,
     chart::{
         Basis, ViewConfig,
-        heatmap::HeatmapStudy,
         indicator::{HeatmapIndicator, Indicator, KlineIndicator, UiIndicator},
     },
     layout::pane::{ContentKind, LinkGroup, PaneSetup, Settings, VisualConfig},
@@ -132,6 +133,7 @@ pub enum Event {
     StudyConfigurator(modal::pane::settings::study::StudyMessage),
     StreamModifierChanged(modal::stream::Message),
     ComparisonChartInteraction(super::chart::comparison::Message),
+    #[cfg(feature = "shader-heatmap")]
     HeatmapShaderInteraction(crate::widget::chart::heatmap::Message),
     MiniTickersListInteraction(modal::pane::mini_tickers_list::Message),
     /// Heatmap trade size filter input changed
@@ -525,6 +527,13 @@ impl State {
             self.settings.tick_multiply = None;
         }
 
+        // Without the feature the WGPU heatmap does not exist; serve the canvas heatmap.
+        #[cfg(not(feature = "shader-heatmap"))]
+        let kind = match kind {
+            ContentKind::ShaderHeatmap => ContentKind::HeatmapChart,
+            other => other,
+        };
+
         let Some(&base_ticker) = tickers.first() else {
             return vec![];
         };
@@ -565,6 +574,11 @@ impl State {
 
                     (content, streams)
                 }
+                #[cfg(not(feature = "shader-heatmap"))]
+                ContentKind::ShaderHeatmap => {
+                    unreachable!("mapped to HeatmapChart at the top of this function")
+                }
+                #[cfg(feature = "shader-heatmap")]
                 ContentKind::ShaderHeatmap => {
                     let basis = derived_plan
                         .basis
@@ -1331,6 +1345,7 @@ impl State {
                     )
                 }
             }
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap {
                 chart, indicators, ..
             } => {
@@ -1911,6 +1926,7 @@ impl State {
                 Content::TimeAndSales(Some(p)) => super::panel::update(p, msg),
                 _ => {}
             },
+            #[cfg(feature = "shader-heatmap")]
             Event::HeatmapShaderInteraction(message) => {
                 if let Content::ShaderHeatmap { chart: Some(c), .. } = &mut self.content {
                     c.update(message);
@@ -2082,6 +2098,7 @@ impl State {
                         c.update_study_configurator(m);
                         *studies = c.studies.clone();
                     }
+                    #[cfg(feature = "shader-heatmap")]
                     if let Content::ShaderHeatmap { chart, studies, .. } = &mut self.content
                         && let Some(c) = chart
                     {
@@ -2119,6 +2136,7 @@ impl State {
                                                 tm.multiply_with_min_tick_size(ticker),
                                             );
                                         }
+                                        #[cfg(feature = "shader-heatmap")]
                                         Content::ShaderHeatmap {
                                             chart: Some(c),
                                             indicators,
@@ -2209,6 +2227,7 @@ impl State {
 
                                         effect = Some(Effect::RefreshStreams);
                                     }
+                                    #[cfg(feature = "shader-heatmap")]
                                     Content::ShaderHeatmap {
                                         chart: Some(c),
                                         indicators,
@@ -2457,6 +2476,7 @@ impl State {
                 Content::Heatmap { chart: Some(c), .. } => {
                     c.set_trade_size_input(input);
                 }
+                #[cfg(feature = "shader-heatmap")]
                 Content::ShaderHeatmap { chart: Some(c), .. } => {
                     c.set_trade_size_input(input);
                 }
@@ -2466,6 +2486,7 @@ impl State {
                 Content::Heatmap { chart: Some(c), .. } => {
                     c.set_order_size_input(input);
                 }
+                #[cfg(feature = "shader-heatmap")]
                 Content::ShaderHeatmap { chart: Some(c), .. } => {
                     c.set_order_size_input(input);
                 }
@@ -3998,6 +4019,7 @@ impl State {
             Content::Comparison(chart) => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap { chart, .. } => chart
                 .as_mut()
                 .and_then(|c| c.invalidate(Some(now)).map(Action::Chart)),
@@ -4005,6 +4027,7 @@ impl State {
     }
 
     pub fn park_for_inactive_layout(&mut self) {
+        #[cfg(feature = "shader-heatmap")]
         if let Content::ShaderHeatmap { chart, .. } = &mut self.content {
             *chart = None;
             self.status = Status::Ready;
@@ -4032,6 +4055,7 @@ impl State {
                 }
             }
             Content::Ladder(_) | Content::TimeAndSales(_) => Some(100),
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap { .. } => None,
             Content::Starter => None,
         }
@@ -4133,6 +4157,7 @@ pub enum Content {
         layout: data::chart::ViewConfig,
         studies: Vec<data::chart::heatmap::HeatmapStudy>,
     },
+    #[cfg(feature = "shader-heatmap")]
     ShaderHeatmap {
         chart: Option<Box<HeatmapShader>>,
         indicators: Vec<HeatmapIndicator>,
@@ -4415,6 +4440,9 @@ impl Content {
                     autoscale: Some(data::chart::Autoscale::CenterLatest),
                 },
             },
+            #[cfg(not(feature = "shader-heatmap"))]
+            ContentKind::ShaderHeatmap => Self::placeholder(ContentKind::HeatmapChart),
+            #[cfg(feature = "shader-heatmap")]
             ContentKind::ShaderHeatmap => Content::ShaderHeatmap {
                 chart: None,
                 indicators: vec![HeatmapIndicator::Volume],
@@ -4431,6 +4459,7 @@ impl Content {
     pub fn last_tick(&self) -> Option<Instant> {
         match self {
             Content::Heatmap { chart, .. } => Some(chart.as_ref()?.last_update()),
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap { chart, .. } => Some(chart.as_ref()?.last_tick?),
             Content::Kline { chart, .. } => Some(chart.as_ref()?.last_update()),
             Content::TimeAndSales(panel) => Some(panel.as_ref()?.last_update()),
@@ -4466,6 +4495,7 @@ impl Content {
                 }
                 chart.toggle_indicator(ind);
             }
+            #[cfg(feature = "shader-heatmap")]
             (
                 Content::ShaderHeatmap {
                     chart, indicators, ..
@@ -4515,8 +4545,11 @@ impl Content {
             Content::TimeAndSales(_)
             | Content::Ladder(_)
             | Content::Starter
-            | Content::ShaderHeatmap { .. }
             | Content::Comparison(_) => {
+                log::error!("Cannot reorder indicators on {self} pane (ignored)");
+            }
+            #[cfg(feature = "shader-heatmap")]
+            Content::ShaderHeatmap { .. } => {
                 log::error!("Cannot reorder indicators on {self} pane (ignored)");
             }
         }
@@ -4530,6 +4563,7 @@ impl Content {
             (Content::Heatmap { chart: Some(c), .. }, VisualConfig::Heatmap(cfg)) => {
                 c.set_visual_config(cfg);
             }
+            #[cfg(feature = "shader-heatmap")]
             (Content::ShaderHeatmap { chart: Some(c), .. }, VisualConfig::Heatmap(cfg)) => {
                 c.set_visual_config(cfg);
             }
@@ -4549,6 +4583,7 @@ impl Content {
     pub fn studies(&self) -> Option<data::chart::Study> {
         match &self {
             Content::Heatmap { studies, .. } => Some(data::chart::Study::Heatmap(studies.clone())),
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap { studies, .. } => {
                 Some(data::chart::Study::Heatmap(studies.clone()))
             }
@@ -4592,6 +4627,7 @@ impl Content {
                     .studies = studies.clone();
                 *previous = studies;
             }
+            #[cfg(feature = "shader-heatmap")]
             (
                 Content::ShaderHeatmap {
                     chart,
@@ -4625,6 +4661,7 @@ impl Content {
     pub fn kind(&self) -> ContentKind {
         match self {
             Content::Heatmap { .. } => ContentKind::HeatmapChart,
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap { .. } => ContentKind::ShaderHeatmap,
             Content::Kline { kind, .. } => match kind {
                 data::chart::KlineChartKind::Footprint { .. } => ContentKind::FootprintChart,
@@ -4639,6 +4676,10 @@ impl Content {
     }
 
     pub fn update_theme(&mut self, theme: &iced_core::Theme) {
+        // Only the WGPU heatmap caches theme colors; the other charts read them per frame.
+        #[cfg(not(feature = "shader-heatmap"))]
+        let _ = theme;
+        #[cfg(feature = "shader-heatmap")]
         if let Content::ShaderHeatmap { chart: Some(c), .. } = self {
             c.update_theme(theme);
         }
@@ -4647,6 +4688,7 @@ impl Content {
     fn initialized(&self) -> bool {
         match self {
             Content::Heatmap { chart, .. } => chart.is_some(),
+            #[cfg(feature = "shader-heatmap")]
             Content::ShaderHeatmap { chart, .. } => chart.is_some(),
             Content::Kline { chart, .. } => chart.is_some(),
             Content::TimeAndSales(panel) => panel.is_some(),
@@ -4663,13 +4705,34 @@ impl std::fmt::Display for Content {
     }
 }
 
+impl Content {
+    /// Whether a visual config of `cfg`'s kind applies to this pane's chart family.
+    pub fn accepts_visual_config(&self, cfg: &VisualConfig) -> bool {
+        match (cfg, self) {
+            (VisualConfig::Kline(_), Content::Kline { .. })
+            | (VisualConfig::Heatmap(_), Content::Heatmap { .. })
+            | (VisualConfig::TimeAndSales(_), Content::TimeAndSales(_))
+            | (VisualConfig::Comparison(_), Content::Comparison(_)) => true,
+            #[cfg(feature = "shader-heatmap")]
+            (VisualConfig::Heatmap(_), Content::ShaderHeatmap { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
 impl PartialEq for Content {
     fn eq(&self, other: &Self) -> bool {
+        #[cfg(feature = "shader-heatmap")]
+        if matches!(
+            (self, other),
+            (Content::ShaderHeatmap { .. }, Content::ShaderHeatmap { .. })
+        ) {
+            return true;
+        }
         matches!(
             (self, other),
             (Content::Starter, Content::Starter)
                 | (Content::Heatmap { .. }, Content::Heatmap { .. })
-                | (Content::ShaderHeatmap { .. }, Content::ShaderHeatmap { .. })
                 | (Content::Kline { .. }, Content::Kline { .. })
                 | (Content::TimeAndSales(_), Content::TimeAndSales(_))
                 | (Content::Ladder(_), Content::Ladder(_))
@@ -5245,6 +5308,7 @@ mod tests {
         assert!(streams.is_empty());
     }
 
+    #[cfg(feature = "shader-heatmap")]
     #[test]
     fn test_shader_heatmap_set_content_and_streams() {
         let ticker = exchange::Ticker::new("BTCUSDT", Exchange::BinanceLinear);

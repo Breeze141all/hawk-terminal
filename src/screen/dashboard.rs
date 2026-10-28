@@ -444,23 +444,7 @@ impl Dashboard {
                                             std::mem::discriminant(current_cfg)
                                                 == std::mem::discriminant(&cfg)
                                         }
-                                        None => matches!(
-                                            (&cfg, &state.content),
-                                            (
-                                                data::layout::pane::VisualConfig::Kline(_),
-                                                pane::Content::Kline { .. }
-                                            ) | (
-                                                data::layout::pane::VisualConfig::Heatmap(_),
-                                                pane::Content::Heatmap { .. }
-                                                    | pane::Content::ShaderHeatmap { .. }
-                                            ) | (
-                                                data::layout::pane::VisualConfig::TimeAndSales(_),
-                                                pane::Content::TimeAndSales(_)
-                                            ) | (
-                                                data::layout::pane::VisualConfig::Comparison(_),
-                                                pane::Content::Comparison(_)
-                                            )
-                                        ),
+                                        None => state.content.accepts_visual_config(&cfg),
                                     };
 
                                     if should_apply {
@@ -1651,6 +1635,7 @@ impl Dashboard {
                         pane::Content::Heatmap { chart: Some(c), .. } if exact_match => {
                             c.insert_datapoint(trades_buffer, depth_update_t, Arc::clone(depth));
                         }
+                        #[cfg(feature = "shader-heatmap")]
                         pane::Content::ShaderHeatmap { chart: Some(c), .. } if exact_match => {
                             c.insert_datapoint(trades_buffer, depth_update_t, depth);
                         }

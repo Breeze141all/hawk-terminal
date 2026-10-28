@@ -15,6 +15,9 @@ cargo run --release
 cargo build --features debug
 cargo run --features debug
 
+# Include the experimental WGPU heatmap (hidden from the UI)
+cargo build --features shader-heatmap
+
 # Tests (use --no-fail-fast to see every failing suite, not just the first)
 cargo test --workspace --no-fail-fast
 
@@ -69,7 +72,7 @@ Hawk Terminal is a desktop crypto charting application built with Rust and the I
 1. **Trade cache currency**: `SizeUnit::Base = 0`. Tick caches (`.bin`, `.fst`), footprints and CVD are stored and computed in Base units (coin count). Never serialize `qty * price`; convert to Quote only at the presentation layer.
 2. **Installer isolation**: `installer.iss` must never write into `{userappdata}` (`saved-state.json`, `drawings.json`, `alerts.json`, ...).
 3. **Legacy migration**: keep `ensure_migration_from_legacy` in `data/src/lib.rs` (migrates `%APPDATA%\flowsurface` to `hawk-terminal`).
-4. **Heatmap renderer**: the CPU Canvas heatmap is the default; the experimental WGPU `ShaderHeatmap` stays hidden.
+4. **Heatmap renderer**: the CPU Canvas heatmap is the default; the experimental WGPU `ShaderHeatmap` stays hidden and is compiled only with the `shader-heatmap` cargo feature (off by default; `--all-features` in CI still builds it). Without the feature, saved or requested `ShaderHeatmap` panes open as the canvas heatmap.
 5. **Updater trust**: `updater::download_installer_file` must keep refusing releases without a valid `sha256`, URLs outside the project's GitHub release/site paths, and checksum mismatches. `release.yaml` must keep writing `sha256` into `version.json`.
 6. **Secrets**: exchange API keys/secrets for trade import live in memory only. Never persist or log them; `ImportCredentials` has a redacting `Debug` impl, keep it.
 

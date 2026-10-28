@@ -85,8 +85,8 @@ arrow-schema.workspace = true
 reqwest.workspace = true
 bytes.workspace = true
 url.workspace = true
-bytemuck.workspace = true
-iced_wgpu.workspace = true
+bytemuck = { workspace = true, optional = true }
+iced_wgpu = { workspace = true, optional = true }
 
 exchange = { version = "0.1.0", path = "exchange", package = "hawk-exchange" }
 data = { version = "0.1.0", path = "data", package = "hawk-data", default-features = false }
@@ -101,6 +101,8 @@ ring = "0.17"
 [features]
 default = ["volume-search"]
 debug = ["iced/hot"]
+# Experimental WGPU heatmap (hidden from the UI; see ROADMAP #109, #132).
+shader-heatmap = ["dep:bytemuck", "dep:iced_wgpu"]
 volume-search = ["data/volume-search"]
 
 [target.'cfg(windows)'.build-dependencies]
