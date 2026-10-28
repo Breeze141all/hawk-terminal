@@ -491,6 +491,18 @@ pub fn cleanup_old_market_data() -> usize {
     total_deleted
 }
 
+/// Wall-clock budget for a performance test. Shared CI runners are ~3x slower than a
+/// dev machine, so the budget is widened there (`CI` is set by GitHub Actions); locally
+/// it stays strict. Still catches complexity regressions, which cost far more than 4x.
+#[cfg(test)]
+pub(crate) fn perf_budget_ms(local_ms: u128) -> u128 {
+    if std::env::var_os("CI").is_some() {
+        local_ms * 4
+    } else {
+        local_ms
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2326,7 +2326,7 @@ mod tests {
 
         // Must finish well under 50ms (previously took > 1000ms)
         assert!(
-            elapsed.as_millis() < 100,
+            elapsed.as_millis() < crate::perf_budget_ms(100),
             "60k candles update_poc_status must complete in <100ms, took {:?}",
             elapsed
         );

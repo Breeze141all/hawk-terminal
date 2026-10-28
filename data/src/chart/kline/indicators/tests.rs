@@ -203,7 +203,7 @@ fn test_lifecycle_high_frequency_preview_zero_leak_benchmark() {
     }
     let elapsed = start.elapsed();
     assert!(
-        elapsed.as_millis() < 500,
+        elapsed.as_millis() < crate::perf_budget_ms(500),
         "1,000 preview ticks took {:?}",
         elapsed
     );
