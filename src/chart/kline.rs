@@ -528,6 +528,10 @@ impl KlineChart {
                         rv.set_colors(config.rolling_vwap_colors);
                         rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
                     }
+                    crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
+                        indi.as_mut(),
+                        &config,
+                    );
                     indi.rebuild_from_source(&data_source);
                     indicators[i] = Some(indi);
                 }
@@ -639,6 +643,10 @@ impl KlineChart {
                         rv.set_colors(config.rolling_vwap_colors);
                         rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
                     }
+                    crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
+                        indi.as_mut(),
+                        &config,
+                    );
                     indi.rebuild_from_source(&data_source);
                     indicators[i] = Some(indi);
                 }
@@ -3514,6 +3522,10 @@ impl KlineChart {
                 self.liquidation_heatmap.config.enabled = true;
                 self.rebuild_liquidation_heatmap();
             }
+            crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
+                box_indi.as_mut(),
+                &self.config,
+            );
             box_indi.rebuild_from_source(&self.data_source);
             self.indicators[indicator] = Some(box_indi);
         }
@@ -3569,6 +3581,13 @@ impl KlineChart {
         {
             rv.set_colors(config.rolling_vwap_colors);
             rv.set_window_hours(config.rolling_vwap_window_hours, &self.data_source);
+        }
+
+        if let Some(indi) = self.indicators[KlineIndicator::DepthImbalance].as_mut() {
+            crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
+                indi.as_mut(),
+                &config,
+            );
         }
 
         self.invalidate(None);

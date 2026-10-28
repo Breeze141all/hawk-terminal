@@ -759,6 +759,7 @@ fn indicator_settings_section<'a>(
                 KlineIndicator::PositionFlow
                     | KlineIndicator::RollingVwap
                     | KlineIndicator::LiquidationHeatmap
+                    | KlineIndicator::DepthImbalance
             )
         })
         .collect();
@@ -966,6 +967,35 @@ fn indicator_settings_section<'a>(
                     .spacing(6)
                     .into()
                 }
+                KlineIndicator::DepthImbalance => {
+                    let band_list = pick_list(
+                        data::chart::kline::DepthImbalanceBand::ALL,
+                        Some(cfg.depth_imbalance_band),
+                        move |band| {
+                            let mut new_cfg = cfg;
+                            new_cfg.depth_imbalance_band = band;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        },
+                    );
+                    let cb_twap = checkbox(cfg.depth_imbalance_twap)
+                        .label("Smooth (moving average of recent snapshots)")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.depth_imbalance_twap = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+
+                    column![
+                        text("Depth Imbalance:").size(12),
+                        row![text("Book depth").size(12), band_list]
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                        cb_twap,
+                        text("Changing either setting restarts the series.").size(11),
+                    ]
+                    .spacing(6)
+                    .into()
+                }
                 _ => column![].into(),
             };
 
@@ -1034,7 +1064,7 @@ pub fn kline_cfg_view<'a>(
                 SettingsCategory::Indicators => {
                     indicator_settings_section(cfg, pane, indicators, expanded_indicator)
                         .unwrap_or_else(|| {
-                            container(text("No configurable indicators enabled (PositionFlow, Rolling VWAP, Liquidation Heatmap).").size(13))
+                            container(text("No configurable indicators enabled (Position Flow, Rolling VWAP, Liquidation Heatmap, Depth Imbalance).").size(13))
                                 .padding(8)
                                 .into()
                         })
@@ -1588,7 +1618,7 @@ pub fn kline_cfg_view<'a>(
                 SettingsCategory::Indicators => {
                     indicator_settings_section(cfg, pane, indicators, expanded_indicator)
                         .unwrap_or_else(|| {
-                            container(text("No configurable indicators enabled (PositionFlow, Rolling VWAP, Liquidation Heatmap).").size(13))
+                            container(text("No configurable indicators enabled (Position Flow, Rolling VWAP, Liquidation Heatmap, Depth Imbalance).").size(13))
                                 .padding(8)
                                 .into()
                         })
@@ -1816,7 +1846,7 @@ pub fn kline_cfg_view<'a>(
                 SettingsCategory::Indicators => {
                     indicator_settings_section(cfg, pane, indicators, expanded_indicator)
                         .unwrap_or_else(|| {
-                            container(text("No configurable indicators enabled (PositionFlow, Rolling VWAP, Liquidation Heatmap).").size(13))
+                            container(text("No configurable indicators enabled (Position Flow, Rolling VWAP, Liquidation Heatmap, Depth Imbalance).").size(13))
                                 .padding(8)
                                 .into()
                         })
