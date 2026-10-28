@@ -5,21 +5,25 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-hawk--site-zinc.svg)](https://breeze141all.github.io/hawk-site/)
 
-A sovereign, native desktop charting and order flow intelligence platform for cryptocurrency markets. Built entirely in bare-metal Rust with zero Electron and zero garbage collection pauses.
+A native desktop charting and order flow platform for cryptocurrency markets, written in Rust on [Iced](https://github.com/iced-rs/iced) and WGPU. No Electron, no garbage collector.
+
+Hawk Terminal is a fork of [flowsurface](https://github.com/flowsurface-rs/flowsurface) by akenshaw, which provides the core charting, heatmap, footprint and exchange stream foundation. This fork adds the features listed below on top of it. See [Credits](#credits).
 
 ---
 
 ## Key Modules & Capabilities
 
-- **2D Liquidation Heatmap**: Real-time calculated liquidation leverage bands (10x–100x) from raw exchange streams.
+- **Estimated Liquidation Heatmap**: A model of where positions opened on each candle at 5x–100x leverage would be liquidated, weighted by that candle's volume. It does not use open interest or real liquidation events, so treat the zones as an estimate.
 - **Footprint & Cluster Analysis**: Tick-level volume profile, delta, cumulative volume delta (CVD), and imbalance detection.
 - **Multi-Period Market Profile & TPO**: 30-minute letter brackets, Initial Balance (IB), Value Area 70% (VAH/VAL), and Point of Control (POC).
-- **Tick-Level Market Replay**: High-fidelity session replay with binary LZ4 cache for zero-latency testing.
-- **Direct Sovereign Exchange Connectors**:
-  - Binance (Spot & USD-M Futures)
-  - Bybit (Linear Perpetuals & Spot)
-  - Hyperliquid (Perpetuals L1/L2)
-  - OKX (Swap & Futures)
+- **Tick-Level Market Replay**: Session replay from a local binary LZ4 trade cache, so replays run offline.
+- **Direct Exchange Connectors** (public market data straight from each exchange's WebSocket/REST API):
+  - Binance (Spot, USD-M and COIN-M Futures)
+  - Bybit (Spot, Linear and Inverse Perpetuals)
+  - Hyperliquid (Spot & Perpetuals)
+  - OKX (Spot, Swap & Futures)
+  - MEXC (Spot, Linear and Inverse Futures)
+  - Coinbase (Spot)
 - **Local-First, No Analytics**: Layouts, drawings, alerts, and journal notes are stored only on your disk (plain files, not encrypted). Exchange API keys used for trade import are kept in memory only and are never written to disk. The only network traffic is exchange market data, optional trade import, and an update check against the project site.
 
 ---
@@ -70,5 +74,10 @@ Hawk Terminal uses a multi-crate Cargo workspace architecture:
 
 ---
 
+## Credits
+Hawk Terminal started as a fork of [flowsurface](https://github.com/flowsurface-rs/flowsurface) by [akenshaw](https://github.com/akenshaw) and keeps its git history. The charting engine, the original heatmap/footprint/kline/ladder panels and the first Binance, Bybit, Hyperliquid and OKX adapters come from flowsurface; upstream fixes are still ported (the roadmap marks them with `Джерело: Flowsurface <commit>`). If you only need those core features, consider using and supporting the upstream project.
+
+---
+
 ## License
-Distributed under the GNU General Public License v3.0 or later (GPL-3.0-or-later). See [LICENSE](LICENSE) for details.
+Distributed under the GNU General Public License v3.0 or later (GPL-3.0-or-later), the same license as flowsurface. See [LICENSE](LICENSE) for details.

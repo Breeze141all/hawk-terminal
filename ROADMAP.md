@@ -11,7 +11,7 @@
 
 | Категорія | Пріоритет | Кількість | Статус |
 | :--- | :---: | :---: | :--- |
-| **Аудит 2026-10-28: борг, точність, позиціонування** | P0–P2 | 9 | #126 виконано; відкрито #127–#135 |
+| **Аудит 2026-10-28: борг, точність, позиціонування** | P0–P2 | 8 | #126, #127 виконано; відкрито #128–#135 |
 | **P0: Мережева стабільність, транспорт та паніки** | Критичний | 0 | Всі 9 виконано (0 в беклозі) |
 | **P1: Order Flow, Footprint та Графіка** | Високий | 0 | Всі 15 виконано (0 в беклозі) |
 | **P2: Оптимізація рантайму, надійність та UX** | Середній | 0 | Всі 3 виконано (0 в активному беклозі) |
@@ -44,7 +44,7 @@
     4. Перевірено локально: прогін з `--locked` і проксі, що веде в нікуди, — зелений, тобто решта тестів мережі не потребує.
   - **Обмеження**: Linux-прогін локально не перевірено (немає WSL/Docker); перший запуск у GitHub Actions може виявити платформозалежні тести. Тести `test_get_hist_trades_*` / `test_benchmark_bin_vs_zip` у `exchange/src/lib.rs` читають локальний кеш `C:\Users\Breeze\...` і в CI мовчки повертаються без перевірок — кандидат на фікстури.
 
-- [ ] **[#127] [P0] Чесне позиціонування: атрибуція upstream flowsurface та прибирання маркетингових перебільшень (DOC-01)**
+- [x] **[#127] [P0] Чесне позиціонування: атрибуція upstream flowsurface та прибирання маркетингових перебільшень (DOC-01)**
   - **Файли**: `README.md`, тексти сайту `hawk-site`
   - **Проблема**:
     1. Hawk Terminal — форк `flowsurface-rs/flowsurface` (на момент форку ~37 тис. рядків Rust; ~410 з ~470 комітів історії належать автору upstream), але README жодного разу не згадує flowsurface. Формулювання «Built entirely in bare-metal Rust» та «Sovereign Exchange Connectors» прямо вводять в оману.
@@ -54,6 +54,12 @@
     1. Розділ «Based on / Credits» у README з посиланням на `flowsurface-rs/flowsurface` та автора; зберегти всі copyright-нотатки GPL.
     2. Прибрати «bare-metal», «sovereign», «zero-latency»; описувати фактичні властивості (нативний Rust, без Electron, локальне зберігання).
     3. Ті самі правки — на сайті `hawk-site`.
+  - **Виконано**:
+    1. README: вступ прямо називає проєкт форком flowsurface (akenshaw); новий розділ «Credits» описує, що прийшло з upstream (рушій графіків, heatmap/footprint/kline/ladder, перші адаптери Binance/Bybit/Hyperliquid/OKX) і що upstream-фікси досі портуються; ліцензія GPL-3.0 позначена як спільна з upstream.
+    2. Прибрано «sovereign», «bare-metal», «zero-latency»; heatmap описано як «Estimated Liquidation Heatmap» — модель без OI і реальних ліквідацій (UI-перейменування лишається в **#128**).
+    3. Список бірж у README виправлено за `exchange::adapter::Exchange`: додано MEXC, Coinbase та відсутні ринки (Binance COIN-M, Bybit Inverse, Hyperliquid/OKX Spot).
+    4. Сайт: гілка `site-honest-positioning` у `Breeze141all/hawk-site` від `gh-pages` — ті самі правки в `index.html` (kicker, lead, футер з атрибуцією, meta description, опис heatmap, «microsecond loops»).
+  - **Лишилось**: `legacy.html` на сайті (не має посилань з головної, але публічно доступна й індексується) зберігає старі формулювання — видалити або закрити `noindex`, рішення власника. Картки MEXC і Coinbase на головній сайту не додано (потрібні тексти/посилання від власника).
 
 - [ ] **[#128] [P1] Liquidation Heatmap: чесне маркування моделі та прив'язка до Open Interest (IND-14)**
   - **Файли**: `data/src/chart/liquidation_heatmap.rs`, `src/chart/indicator/kline.rs`, `README.md`
