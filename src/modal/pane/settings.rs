@@ -953,7 +953,13 @@ fn indicator_settings_section<'a>(
                         });
 
                     column![
-                        text("Liquidation Heatmap:").size(12),
+                        text("Liquidation Heatmap (estimated):").size(12),
+                        text(
+                            "Model only: assumes positions opened on every candle at \
+                             5x-100x leverage, weighted by that candle's volume. \
+                             Does not use open interest or real liquidations.",
+                        )
+                        .size(11),
                         cb_liq_bands,
                         cb_liq_hist,
                     ]

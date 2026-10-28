@@ -99,7 +99,7 @@ impl Display for KlineIndicator {
             KlineIndicator::Cvd => write!(f, "Cumulative Delta"),
             KlineIndicator::BidAskRatio => write!(f, "Bid/Ask Ratio"),
             KlineIndicator::PositionFlow => write!(f, "Position Flow"),
-            KlineIndicator::LiquidationHeatmap => write!(f, "Liquidation Heatmap"),
+            KlineIndicator::LiquidationHeatmap => write!(f, "Liquidation Heatmap (est.)"),
             KlineIndicator::DepthImbalance => write!(f, "Depth Imbalance"),
             KlineIndicator::CvdDivergence => write!(f, "CVD Divergence"),
         }
@@ -178,7 +178,7 @@ mod tests {
         );
         assert_eq!(
             KlineIndicator::LiquidationHeatmap.to_string(),
-            "Liquidation Heatmap"
+            "Liquidation Heatmap (est.)"
         );
     }
 
