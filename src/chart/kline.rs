@@ -528,10 +528,7 @@ impl KlineChart {
                         rv.set_colors(config.rolling_vwap_colors);
                         rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
                     }
-                    crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
-                        indi.as_mut(),
-                        &config,
-                    );
+                    crate::chart::indicator::kline::apply_chart_config(indi.as_mut(), &config);
                     indi.rebuild_from_source(&data_source);
                     indicators[i] = Some(indi);
                 }
@@ -540,6 +537,7 @@ impl KlineChart {
                     LiquidationHeatmap::new(LiquidationHeatmapConfig::default());
                 let liq_enabled = indicators[KlineIndicator::LiquidationHeatmap].is_some();
                 liquidation_heatmap.config.enabled = liq_enabled;
+                liquidation_heatmap.config.oi_weighting = config.liq_weight_by_oi;
                 // Rebuild heatmap from existing klines
                 if liq_enabled && let PlotData::TimeBased(ref ts) = data_source {
                     let kline_data: Vec<_> = ts
@@ -643,10 +641,7 @@ impl KlineChart {
                         rv.set_colors(config.rolling_vwap_colors);
                         rv.set_window_hours(config.rolling_vwap_window_hours, &data_source);
                     }
-                    crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
-                        indi.as_mut(),
-                        &config,
-                    );
+                    crate::chart::indicator::kline::apply_chart_config(indi.as_mut(), &config);
                     indi.rebuild_from_source(&data_source);
                     indicators[i] = Some(indi);
                 }
@@ -3071,6 +3066,13 @@ impl KlineChart {
         for indi in self.indicators.values_mut().flatten() {
             indi.on_open_interest(oi_data);
         }
+
+        self.liquidation_heatmap
+            .add_open_interest(oi_data.iter().map(|oi| (oi.time, oi.value)));
+        if self.liquidation_heatmap.config.oi_weighting {
+            self.rebuild_liquidation_heatmap();
+            self.invalidate(None);
+        }
     }
 
     pub fn insert_funding_rates(
@@ -3522,10 +3524,7 @@ impl KlineChart {
                 self.liquidation_heatmap.config.enabled = true;
                 self.rebuild_liquidation_heatmap();
             }
-            crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
-                box_indi.as_mut(),
-                &self.config,
-            );
+            crate::chart::indicator::kline::apply_chart_config(box_indi.as_mut(), &self.config);
             box_indi.rebuild_from_source(&self.data_source);
             self.indicators[indicator] = Some(box_indi);
         }
@@ -3583,11 +3582,13 @@ impl KlineChart {
             rv.set_window_hours(config.rolling_vwap_window_hours, &self.data_source);
         }
 
-        if let Some(indi) = self.indicators[KlineIndicator::DepthImbalance].as_mut() {
-            crate::chart::indicator::kline::depth_imbalance::apply_chart_config(
-                indi.as_mut(),
-                &config,
-            );
+        for indi in self.indicators.values_mut().flatten() {
+            crate::chart::indicator::kline::apply_chart_config(indi.as_mut(), &config);
+        }
+
+        if self.liquidation_heatmap.config.oi_weighting != config.liq_weight_by_oi {
+            self.liquidation_heatmap.config.oi_weighting = config.liq_weight_by_oi;
+            self.rebuild_liquidation_heatmap();
         }
 
         self.invalidate(None);

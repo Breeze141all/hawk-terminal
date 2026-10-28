@@ -87,6 +87,13 @@ pub struct FetchCtx<'a> {
     pub prefetch_earliest: u64,
 }
 
+/// Applies the chart-level settings that some indicators read (Depth Imbalance band and
+/// smoothing, liquidation heatmap OI weighting). Other indicators ignore it.
+pub fn apply_chart_config(indi: &mut dyn KlineIndicatorImpl, config: &data::chart::kline::Config) {
+    super::kline::depth_imbalance::apply_chart_config(indi, config);
+    super::kline::liquidation_heatmap::apply_chart_config(indi, config);
+}
+
 pub fn make_empty(which: KlineIndicator) -> Box<dyn KlineIndicatorImpl> {
     match which {
         KlineIndicator::Volume => Box::new(super::kline::volume::VolumeIndicator::new()),

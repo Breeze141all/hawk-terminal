@@ -13,7 +13,7 @@ Hawk Terminal is a fork of [flowsurface](https://github.com/flowsurface-rs/flows
 
 ## Key Modules & Capabilities
 
-- **Estimated Liquidation Heatmap**: A model of where positions opened on each candle at 5x–100x leverage would be liquidated, weighted by that candle's volume. It does not use open interest or real liquidation events, so treat the zones as an estimate.
+- **Estimated Liquidation Heatmap**: A model of where positions opened on each candle at 5x–100x leverage would be liquidated. By default every candle adds equal weight; with OI weighting on, only candles where open interest grew add levels, scaled by the increase. It does not use real liquidation events, so treat the zones as an estimate.
 - **Footprint & Cluster Analysis**: Tick-level volume profile, delta, cumulative volume delta (CVD), and imbalance detection.
 - **Multi-Period Market Profile & TPO**: 30-minute letter brackets, Initial Balance (IB), Value Area 70% (VAH/VAL), and Point of Control (POC).
 - **Tick-Level Market Replay**: Session replay from a local binary LZ4 trade cache, so replays run offline.

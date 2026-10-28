@@ -1051,6 +1051,9 @@ pub struct Config {
     pub liq_show_bands: bool,
     #[serde(default = "default_true")]
     pub liq_show_histogram: bool,
+    /// Weight the liquidation heatmap by open interest increases instead of volume.
+    #[serde(default = "default_false")]
+    pub liq_weight_by_oi: bool,
     #[serde(default = "default_true")]
     pub magnet_mode: bool,
     #[serde(default = "default_true")]
@@ -1093,6 +1096,7 @@ impl Config {
             rolling_vwap_show_panel: false,
             liq_show_bands: true,
             liq_show_histogram: true,
+            liq_weight_by_oi: false,
             magnet_mode: true,
             alert_drag_handle_only: true,
             show_footprint_summary: false,

@@ -42,6 +42,18 @@ pub struct LiquidationHeatmapConfig {
     pub origin_mode: OriginMode,
     /// Whether the heatmap is enabled
     pub enabled: bool,
+    /// Weight each candle by its open interest increase instead of its volume ratio: new
+    /// levels appear only where OI grew (positions were opened), scaled by the increase
+    /// relative to the average increase over `oi_length` bars.
+    #[serde(default)]
+    pub oi_weighting: bool,
+    /// Bars in the average positive OI change used by `oi_weighting`.
+    #[serde(default = "default_oi_length")]
+    pub oi_length: usize,
+}
+
+fn default_oi_length() -> usize {
+    20
 }
 
 impl Default for LiquidationHeatmapConfig {
@@ -60,6 +72,8 @@ impl Default for LiquidationHeatmapConfig {
             use_log: false,
             origin_mode: OriginMode::HighLow,
             enabled: false,
+            oi_weighting: false,
+            oi_length: default_oi_length(),
         }
     }
 }
@@ -162,6 +176,12 @@ pub struct LiquidationHeatmap {
     pub current_bar: u64,
     /// Price ranges for ATR calculation
     price_ranges: VecDeque<f32>,
+    /// Open interest history (time -> OI), input for `oi_weighting`; kept across `clear`.
+    open_interest: std::collections::BTreeMap<u64, f32>,
+    /// OI seen at the previous candle, to take the per-candle change
+    prev_oi: Option<f32>,
+    /// Recent positive OI changes for the `oi_weighting` average
+    oi_increase_buffer: VecDeque<f32>,
     /// Configuration
     pub config: LiquidationHeatmapConfig,
 }
@@ -185,8 +205,34 @@ impl LiquidationHeatmap {
             sell_vol_buffer: VecDeque::new(),
             current_bar: 0,
             price_ranges: VecDeque::new(),
+            open_interest: std::collections::BTreeMap::new(),
+            prev_oi: None,
+            oi_increase_buffer: VecDeque::new(),
             config,
         }
+    }
+
+    /// Adds open interest points (time, OI). They feed `oi_weighting` on the next rebuild.
+    pub fn add_open_interest(&mut self, points: impl IntoIterator<Item = (u64, f32)>) {
+        self.open_interest.extend(points);
+    }
+
+    /// OI change factor for the candle at `time`: the OI increase since the previous candle
+    /// divided by the average increase over `oi_length` candles. `None` until two OI readings
+    /// exist, so callers fall back to the volume ratio for the first candles.
+    fn oi_factor(&mut self, time: u64) -> Option<f32> {
+        let oi_now = *self.open_interest.range(..=time).next_back()?.1;
+        let prev = self.prev_oi.replace(oi_now)?;
+        let increase = (oi_now - prev).max(0.0);
+        self.oi_increase_buffer.push_back(increase);
+        if self.oi_increase_buffer.len() > self.config.oi_length.max(1) {
+            self.oi_increase_buffer.pop_front();
+        }
+        let avg = Self::calculate_sma(&self.oi_increase_buffer);
+        if avg <= f32::EPSILON {
+            return Some(0.0);
+        }
+        Some(increase / avg)
     }
 
     /// Reset all state
@@ -201,6 +247,8 @@ impl LiquidationHeatmap {
         self.sell_vol_buffer.clear();
         self.current_bar = 0;
         self.price_ranges.clear();
+        self.prev_oi = None;
+        self.oi_increase_buffer.clear();
     }
 
     /// Calculate RMA (Running Moving Average) - Wilder's smoothing
@@ -331,6 +379,11 @@ impl LiquidationHeatmap {
 
         // Update volume buffers
         self.update_volume_buffers(buy_volume, sell_volume);
+        let oi_factor = if self.config.oi_weighting {
+            self.oi_factor(time)
+        } else {
+            None
+        };
 
         // Need at least 2 bars for previous price
         if self.current_bar < 2 {
@@ -347,6 +400,16 @@ impl LiquidationHeatmap {
 
         let mut buy_ratio = buy_volume / avg_buy;
         let mut sell_ratio = sell_volume / avg_sell;
+
+        // OI weighting replaces the volume ratio: a candle where OI fell or stayed flat
+        // opened no new leveraged positions, so it adds no liquidation levels.
+        if let Some(factor) = oi_factor {
+            if factor <= 0.0 {
+                return;
+            }
+            buy_ratio = factor;
+            sell_ratio = factor;
+        }
 
         if self.config.use_log {
             buy_ratio = (buy_ratio + 1.0).ln();
@@ -665,6 +728,53 @@ mod tests {
         let (r, _g, _b, a) = interpolate_color_themed(1.0, false);
         assert!(a > 0.9);
         assert!(r > 0.4); // Crimson in light theme
+    }
+
+    #[test]
+    fn test_oi_weighting_adds_levels_only_where_oi_grew() {
+        let cfg = || LiquidationHeatmapConfig {
+            enabled: true,
+            leverages: vec![10],
+            leverage_buffer: 0.0,
+            threshold: 0.0,
+            oi_weighting: true,
+            ..Default::default()
+        };
+        let candle = |h: &mut LiquidationHeatmap, t: u64| {
+            h.on_candle(t, 100.0, 101.0, 99.0, 100.0, 50.0, 50.0);
+        };
+
+        // OI flat, then falling: no new positions, so no levels at all.
+        let mut flat = LiquidationHeatmap::new(cfg());
+        flat.add_open_interest([(1000, 500.0), (2000, 500.0), (3000, 480.0)]);
+        for t in [1000, 2000, 3000] {
+            candle(&mut flat, t);
+        }
+        assert!(flat.segments().is_empty());
+
+        // OI jumps on the third candle: that candle adds levels.
+        let mut rising = LiquidationHeatmap::new(cfg());
+        rising.add_open_interest([(1000, 500.0), (2000, 500.0), (3000, 560.0)]);
+        for t in [1000, 2000, 3000] {
+            candle(&mut rising, t);
+        }
+        assert!(!rising.segments().is_empty());
+        assert!(rising.segments().iter().all(|s| s.start_time == 3000));
+    }
+
+    #[test]
+    fn test_oi_weighting_falls_back_to_volume_without_oi() {
+        let mut heatmap = LiquidationHeatmap::new(LiquidationHeatmapConfig {
+            enabled: true,
+            leverages: vec![10],
+            leverage_buffer: 0.0,
+            threshold: 0.0,
+            oi_weighting: true,
+            ..Default::default()
+        });
+        heatmap.on_candle(1000, 100.0, 101.0, 99.0, 100.0, 50.0, 50.0);
+        heatmap.on_candle(2000, 100.0, 101.0, 99.0, 100.0, 50.0, 50.0);
+        assert!(!heatmap.segments().is_empty());
     }
 
     #[test]

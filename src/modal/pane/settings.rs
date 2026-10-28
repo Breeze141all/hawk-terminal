@@ -953,16 +953,32 @@ fn indicator_settings_section<'a>(
                             Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
                         });
 
+                    let cb_liq_oi = checkbox(cfg.liq_weight_by_oi)
+                        .label("Weight by open interest increase")
+                        .on_toggle(move |val| {
+                            let mut new_cfg = cfg;
+                            new_cfg.liq_weight_by_oi = val;
+                            Message::VisualConfigChanged(pane, VisualConfig::Kline(new_cfg), false)
+                        });
+
                     column![
                         text("Liquidation Heatmap (estimated):").size(12),
                         text(
                             "Model only: assumes positions opened on every candle at \
-                             5x-100x leverage, weighted by that candle's volume. \
-                             Does not use open interest or real liquidations.",
+                             5x-100x leverage, each candle with equal weight. Not real \
+                             liquidations.",
                         )
                         .size(11),
                         cb_liq_bands,
                         cb_liq_hist,
+                        cb_liq_oi,
+                        text(
+                            "With OI weighting, only candles where open interest grew add \
+                             levels, scaled by the increase. Needs OI history (Binance, \
+                             Bybit and OKX perps, 5m-4h except 2h, last 30 days); \
+                             without it the equal weighting is kept.",
+                        )
+                        .size(11),
                     ]
                     .spacing(6)
                     .into()
