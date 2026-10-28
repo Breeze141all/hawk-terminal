@@ -190,7 +190,7 @@ impl PositionFlowIndicator {
             };
 
             let (regime, doi) = Self::classify_candle(delta_p, delta_oi, buy, sell);
-            let total_vol = if buy == -1.0 { sell } else { buy + sell };
+            let total_vol = Kline::total_volume((buy, sell));
 
             self.data.insert(
                 time,

@@ -768,6 +768,24 @@ pub struct Kline {
 }
 
 impl Kline {
+    /// Stored in `volume.0` when the exchange's klines carry only a total volume (Bybit,
+    /// Hyperliquid, MEXC); `volume.1` then holds that total. Read volumes through
+    /// [`Kline::buy_sell`] / [`Kline::total_volume`] rather than comparing with this value.
+    pub const NO_BUY_SELL_SPLIT: f32 = -1.0;
+
+    /// The `(buy, sell)` split of a `volume` pair, or `None` when only a total is known.
+    pub fn buy_sell(volume: (f32, f32)) -> Option<(f32, f32)> {
+        if volume.0 < 0.0 { None } else { Some(volume) }
+    }
+
+    /// Total traded volume of a `volume` pair, with or without a buy/sell split.
+    pub fn total_volume(volume: (f32, f32)) -> f32 {
+        match Self::buy_sell(volume) {
+            Some((buy, sell)) => buy + sell,
+            None => volume.1,
+        }
+    }
+
     pub fn new(
         time: u64,
         open: f32,

@@ -5642,8 +5642,8 @@ impl ImbalanceSide {
             .trades
             .get(&diagonal_price)
             .map(|group| match self {
-                ImbalanceSide::Buy => group.sell_qty as f64,
-                ImbalanceSide::Sell => group.buy_qty as f64,
+                ImbalanceSide::Buy => group.sell_qty,
+                ImbalanceSide::Sell => group.buy_qty,
             })
             .unwrap_or_default();
 
@@ -5915,17 +5915,17 @@ fn effective_cluster_qty(
         ClusterKind::BidAsk | ClusterKind::Table => footprint
             .trades
             .values()
-            .map(|group| group.buy_qty.max(group.sell_qty))
+            .map(|group| (group.buy_qty as f32).max(group.sell_qty as f32))
             .fold(0.0_f32, f32::max),
         ClusterKind::DeltaProfile => footprint
             .trades
             .values()
-            .map(|group| (group.buy_qty - group.sell_qty).abs())
+            .map(|group| group.delta_qty().abs())
             .fold(0.0_f32, f32::max),
         ClusterKind::VolumeProfile => footprint
             .trades
             .values()
-            .map(|group| group.buy_qty + group.sell_qty)
+            .map(|group| group.total_qty())
             .fold(0.0_f32, f32::max),
     };
 
@@ -6059,7 +6059,8 @@ fn draw_clusters(
 
                 match cluster_kind {
                     ClusterKind::VolumeProfile => {
-                        let (buy_qty, sell_qty, total_qty) = (g.buy_qty, g.sell_qty, g.total_qty());
+                        let (buy_qty, sell_qty, total_qty) =
+                            (g.buy_qty as f32, g.sell_qty as f32, g.total_qty());
 
                         if total_qty > 0.0 {
                             super::draw_volume_bar(
@@ -6152,7 +6153,7 @@ fn draw_clusters(
                         &price_to_y,
                         footprint,
                         price,
-                        g.sell_qty,
+                        g.sell_qty as f32,
                         higher_price,
                         threshold,
                         color_scale,
@@ -6221,7 +6222,7 @@ fn draw_clusters(
                     return;
                 }
                 let y = price_to_y(price);
-                let (buy_qty, sell_qty) = (g.buy_qty, g.sell_qty);
+                let (buy_qty, sell_qty) = (g.buy_qty as f32, g.sell_qty as f32);
 
                 if right_area_width > 0.0 {
                     if show_text {
@@ -6305,7 +6306,7 @@ fn draw_clusters(
                         &price_to_y,
                         footprint,
                         price,
-                        g.sell_qty,
+                        g.sell_qty as f32,
                         higher_price,
                         threshold,
                         color_scale,
@@ -6363,8 +6364,8 @@ fn draw_clusters(
                 if g.buy_qty <= 0.0 && g.sell_qty <= 0.0 {
                     return;
                 }
-                let buy_qty = g.buy_qty as f64;
-                let sell_qty = g.sell_qty as f64;
+                let buy_qty = g.buy_qty;
+                let sell_qty = g.sell_qty;
                 let y = price_to_y(price);
                 let row_top = y - (cell_height / 2.0);
 
@@ -6466,7 +6467,7 @@ fn draw_clusters(
                 if show_text {
                     draw_cluster_text(
                         frame,
-                        &abbr_large_numbers(g.sell_qty),
+                        &abbr_large_numbers(g.sell_qty as f32),
                         Point::new(area.table_left + half_width - 3.0, y),
                         text_size,
                         sell_text_color,
@@ -6475,7 +6476,7 @@ fn draw_clusters(
                     );
                     draw_cluster_text(
                         frame,
-                        &abbr_large_numbers(g.buy_qty),
+                        &abbr_large_numbers(g.buy_qty as f32),
                         Point::new(area.table_left + half_width + 3.0, y),
                         text_size,
                         buy_text_color,
@@ -6615,8 +6616,8 @@ fn draw_cluster_search_highlights(
     let is_thin = cell_width < (25.0 / scaling);
 
     for (price, group) in &footprint.trades {
-        let total_vol = group.buy_qty + group.sell_qty;
-        let delta = group.buy_qty - group.sell_qty;
+        let total_vol = group.total_qty();
+        let delta = group.delta_qty();
 
         if min_volume > 0.0 && total_vol < min_volume {
             continue;
@@ -6919,7 +6920,7 @@ fn draw_imbalance_markers(
     }
 
     if let Some(group) = footprint.trades.get(&higher_price) {
-        let diagonal_buy_qty = group.buy_qty;
+        let diagonal_buy_qty = group.buy_qty as f32;
 
         if ignore_zeros && diagonal_buy_qty <= 0.0 {
             return;
@@ -9966,8 +9967,8 @@ mod tests {
 
         // At price 100: buy_qty = 600, sell_qty = 100, total = 700, delta = +500
         let group = footprint.trades.get(&Price::from_f32(100.0)).unwrap();
-        let total_vol = group.buy_qty + group.sell_qty;
-        let delta = group.buy_qty - group.sell_qty;
+        let total_vol = group.total_qty();
+        let delta = group.delta_qty();
 
         assert_eq!(total_vol, 700.0);
         assert_eq!(delta, 500.0);
@@ -10269,7 +10270,7 @@ mod tests {
                 && let Some(dp) = ts.datapoints.get(&300_000)
                 && let Some(g) = dp.footprint.trades.get(&Price::from_f32(100.0))
             {
-                g.buy_qty
+                g.buy_qty as f32
             } else {
                 0.0
             }
@@ -10346,7 +10347,7 @@ mod tests {
                 && let Some(dp) = ts.datapoints.get(&bucket)
                 && let Some(g) = dp.footprint.trades.get(&Price::from_f32(100.0))
             {
-                g.buy_qty
+                g.buy_qty as f32
             } else {
                 0.0
             }
@@ -13376,12 +13377,7 @@ mod tests {
         // Verify active footprint has exactly 7.0 volume (no duplicate volume)
         if let PlotData::TimeBased(ref ts) = chart.data_source {
             let dp = ts.datapoints.get(&current_candle_start).unwrap();
-            let total_vol: f32 = dp
-                .footprint
-                .trades
-                .values()
-                .map(|b| b.buy_qty + b.sell_qty)
-                .sum();
+            let total_vol: f32 = dp.footprint.trades.values().map(|b| b.total_qty()).sum();
             assert_eq!(total_vol, 7.0);
 
             // 4. Verify loop prevention: stops suggesting once marked
@@ -13513,12 +13509,7 @@ mod tests {
                 "No more trades should be suggested once active candle is marked"
             );
             let dp = ts.datapoints.get(&current_candle_start).unwrap();
-            let total_vol: f32 = dp
-                .footprint
-                .trades
-                .values()
-                .map(|b| b.buy_qty + b.sell_qty)
-                .sum();
+            let total_vol: f32 = dp.footprint.trades.values().map(|b| b.total_qty()).sum();
             assert_eq!(total_vol, 7.0);
         }
     }
@@ -13664,12 +13655,7 @@ mod tests {
         // Verify footprint integrity
         if let PlotData::TimeBased(ref ts) = chart.data_source {
             let dp = ts.datapoints.get(&start_time).unwrap();
-            let vol: f32 = dp
-                .footprint
-                .trades
-                .values()
-                .map(|b| b.buy_qty + b.sell_qty)
-                .sum();
+            let vol: f32 = dp.footprint.trades.values().map(|b| b.total_qty()).sum();
             assert_eq!(vol, 5.0, "Footprint trades volume must be preserved");
         }
 

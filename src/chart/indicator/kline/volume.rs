@@ -35,10 +35,11 @@ impl VolumeIndicator {
         main_chart: &'a ViewState,
         visible_range: RangeInclusive<u64>,
     ) -> iced::Element<'a, Message> {
-        let tooltip = |&(buy, sell): &(f32, f32), _next: Option<&(f32, f32)>| {
-            if buy == -1.0 {
-                PlotTooltip::new(format!("Volume: {}", format_with_commas(sell)))
-            } else {
+        let tooltip = |&(buy, sell): &(f32, f32), _next: Option<&(f32, f32)>| match Kline::buy_sell(
+            (buy, sell),
+        ) {
+            None => PlotTooltip::new(format!("Volume: {}", format_with_commas(sell))),
+            Some((buy, sell)) => {
                 let buy_t = format!("Buy Volume: {}", format_with_commas(buy));
                 let sell_t = format!("Sell Volume: {}", format_with_commas(sell));
                 PlotTooltip::new(format!("{buy_t}\n{sell_t}"))
@@ -46,18 +47,17 @@ impl VolumeIndicator {
         };
 
         let bar_kind = |&(buy, sell): &(f32, f32)| {
-            if buy == -1.0 {
-                BarClass::Single // bybit workaround: single bar
-            } else {
-                BarClass::Overlay {
+            match Kline::buy_sell((buy, sell)) {
+                // total-only klines (Bybit, Hyperliquid, MEXC): a single bar
+                None => BarClass::Single,
+                // the overlay shows volume delta; its sign picks the up/down color
+                Some((buy, sell)) => BarClass::Overlay {
                     overlay: buy - sell,
-                } // use the overlay for volume delta, sign determines up/down color
+                },
             }
         };
 
-        let value_fn = |&(buy, sell): &(f32, f32)| {
-            if buy == -1.0 { sell } else { buy + sell }
-        };
+        let value_fn = |&(buy, sell): &(f32, f32)| Kline::total_volume((buy, sell));
 
         let plot = BarPlot::new(value_fn, bar_kind)
             .bar_width_factor(0.9)

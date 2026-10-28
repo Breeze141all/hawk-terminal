@@ -36,28 +36,29 @@ pub fn kline_to_indicator_frame_with_context(
         None
     };
 
-    let (volume, buy_qty, sell_qty, directional_volume_available) = if kline.volume.0 >= 0.0 {
-        let buy = kline.volume.0 as f64;
-        let sell = kline.volume.1 as f64;
-        let vol = buy + sell;
-        if vol == 0.0 {
-            if let Some(t) = trade.as_ref() {
-                let vol = t.buy_qty + t.sell_qty;
-                (Some(vol), t.buy_qty, t.sell_qty, true)
+    let (volume, buy_qty, sell_qty, directional_volume_available) =
+        if Kline::buy_sell(kline.volume).is_some() {
+            let buy = kline.volume.0 as f64;
+            let sell = kline.volume.1 as f64;
+            let vol = buy + sell;
+            if vol == 0.0 {
+                if let Some(t) = trade.as_ref() {
+                    let vol = t.buy_qty + t.sell_qty;
+                    (Some(vol), t.buy_qty, t.sell_qty, true)
+                } else {
+                    (Some(0.0), 0.0, 0.0, false)
+                }
             } else {
-                (Some(0.0), 0.0, 0.0, false)
+                (Some(vol), buy, sell, true)
             }
         } else {
-            (Some(vol), buy, sell, true)
-        }
-    } else {
-        let vol = kline.volume.1 as f64;
-        if let Some(ref t) = trade {
-            (Some(vol), t.buy_qty, t.sell_qty, true)
-        } else {
-            (Some(vol), 0.0, 0.0, false)
-        }
-    };
+            let vol = kline.volume.1 as f64;
+            if let Some(ref t) = trade {
+                (Some(vol), t.buy_qty, t.sell_qty, true)
+            } else {
+                (Some(vol), 0.0, 0.0, false)
+            }
+        };
 
     IndicatorFrame {
         index,

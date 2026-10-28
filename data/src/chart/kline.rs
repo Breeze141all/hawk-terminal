@@ -209,10 +209,15 @@ impl DataPoint for KlineDataPoint {
     }
 }
 
+/// Volume traded at one price level of a footprint.
+///
+/// Quantities are summed in `f64`: a busy level can reach tens of thousands of base units,
+/// where an `f32` step (~0.004 above 32k) would silently drop 0.001-size trades. Readers
+/// that draw or compare get `f32` through `total_qty`/`delta_qty` or an explicit cast.
 #[derive(Debug, Clone, Default)]
 pub struct GroupedTrades {
-    pub buy_qty: f32,
-    pub sell_qty: f32,
+    pub buy_qty: f64,
+    pub sell_qty: f64,
     pub first_time: u64,
     pub last_time: u64,
     pub buy_count: usize,
@@ -222,8 +227,16 @@ pub struct GroupedTrades {
 impl GroupedTrades {
     fn new(trade: &Trade) -> Self {
         Self {
-            buy_qty: if trade.is_sell { 0.0 } else { trade.qty },
-            sell_qty: if trade.is_sell { trade.qty } else { 0.0 },
+            buy_qty: if trade.is_sell {
+                0.0
+            } else {
+                f64::from(trade.qty)
+            },
+            sell_qty: if trade.is_sell {
+                f64::from(trade.qty)
+            } else {
+                0.0
+            },
             first_time: trade.time,
             last_time: trade.time,
             buy_count: if trade.is_sell { 0 } else { 1 },
@@ -233,21 +246,22 @@ impl GroupedTrades {
 
     fn add_trade(&mut self, trade: &Trade) {
         if trade.is_sell {
-            self.sell_qty += trade.qty;
+            self.sell_qty += f64::from(trade.qty);
             self.sell_count += 1;
         } else {
-            self.buy_qty += trade.qty;
+            self.buy_qty += f64::from(trade.qty);
             self.buy_count += 1;
         }
         self.last_time = trade.time;
     }
 
     pub fn total_qty(&self) -> f32 {
-        self.buy_qty + self.sell_qty
+        (self.buy_qty + self.sell_qty) as f32
     }
 
+    /// Computed in `f64` before narrowing, so a small delta between two large sides survives.
     pub fn delta_qty(&self) -> f32 {
-        self.buy_qty - self.sell_qty
+        (self.buy_qty - self.sell_qty) as f32
     }
 }
 
@@ -298,8 +312,8 @@ impl KlineTrades {
         for group in self.trades.values() {
             buy_count = buy_count.saturating_add(group.buy_count as u64);
             sell_count = sell_count.saturating_add(group.sell_count as u64);
-            buy_qty += group.buy_qty as f64;
-            sell_qty += group.sell_qty as f64;
+            buy_qty += group.buy_qty;
+            sell_qty += group.sell_qty;
         }
 
         Some(indicator_engine::TradeAggregate {
@@ -367,7 +381,7 @@ impl KlineTrades {
         let mut max_qty: f32 = 0.0;
         for (price, group) in &self.trades {
             if *price >= lowest && *price <= highest {
-                max_qty = max_qty.max(f(group.buy_qty, group.sell_qty));
+                max_qty = max_qty.max(f(group.buy_qty as f32, group.sell_qty as f32));
             }
         }
         max_qty
@@ -493,8 +507,8 @@ impl KlineTrades {
             let level_sell = raw_sells[i] * sell_scale;
 
             let group = footprint.trades.entry(*p).or_default();
-            group.buy_qty = level_buy;
-            group.sell_qty = level_sell;
+            group.buy_qty = f64::from(level_buy);
+            group.sell_qty = f64::from(level_sell);
             group.first_time = kline.time;
             group.last_time = kline.time;
             group.buy_count =
@@ -859,11 +873,11 @@ impl FootprintSummary {
         let (buy, sell) = footprint
             .trades
             .values()
-            .fold((0.0f32, 0.0f32), |(buy, sell), group| {
+            .fold((0.0f64, 0.0f64), |(buy, sell), group| {
                 (buy + group.buy_qty, sell + group.sell_qty)
             });
 
-        Some(Self::new(buy, sell))
+        Some(Self::new(buy as f32, sell as f32))
     }
 }
 
@@ -1560,8 +1574,9 @@ pub fn encode_footprint_datapoints(datapoints: &[(u64, KlineDataPoint)]) -> Vec<
 
         for (price, group) in &dp.footprint.trades {
             raw.extend_from_slice(&price.units.to_le_bytes());
-            raw.extend_from_slice(&group.buy_qty.to_le_bytes());
-            raw.extend_from_slice(&group.sell_qty.to_le_bytes());
+            // The cache format stores 4-byte f32 quantities; keep it so existing caches load.
+            raw.extend_from_slice(&(group.buy_qty as f32).to_le_bytes());
+            raw.extend_from_slice(&(group.sell_qty as f32).to_le_bytes());
             raw.extend_from_slice(&group.first_time.to_le_bytes());
             raw.extend_from_slice(&group.last_time.to_le_bytes());
             raw.extend_from_slice(&(group.buy_count as u32).to_le_bytes());
@@ -1707,8 +1722,8 @@ pub fn decode_footprint_datapoints(
             trades_map.insert(
                 Price { units: price_units },
                 GroupedTrades {
-                    buy_qty,
-                    sell_qty,
+                    buy_qty: f64::from(buy_qty),
+                    sell_qty: f64::from(sell_qty),
                     first_time,
                     last_time,
                     buy_count,
@@ -1865,6 +1880,43 @@ pub fn save_daily_footprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_footprint_level_keeps_small_trades_on_a_large_level() {
+        let step = PriceStep {
+            units: 100_00000000,
+        };
+        let trade = |qty: f32, is_sell: bool| Trade {
+            time: 1726210800000,
+            is_sell,
+            price: Price {
+                units: 58000_00000000,
+            },
+            qty,
+        };
+
+        let mut footprint = KlineTrades::new();
+        footprint.add_trade_to_nearest_bin(&trade(50_000.0, false), step);
+        for _ in 0..1_000_000 {
+            footprint.add_trade_to_nearest_bin(&trade(0.001, false), step);
+        }
+        footprint.add_trade_to_nearest_bin(&trade(50_000.0, true), step);
+
+        let level = footprint.trades.values().next().unwrap();
+        // The only error left is 0.001's own f32 representation, not the summing.
+        let expected_buy = 50_000.0 + 1_000_000.0 * f64::from(0.001f32);
+        assert!(
+            (level.buy_qty - expected_buy).abs() < 1e-6,
+            "buy {}",
+            level.buy_qty
+        );
+        // With f32 sums every 0.001 added to 50k rounded away and the delta read 0.
+        assert!(
+            (level.delta_qty() - 1000.0).abs() < 0.01,
+            "delta {}",
+            level.delta_qty()
+        );
+    }
 
     #[test]
     fn test_tpo_chart_kind_defaults_and_scaling() {
@@ -2209,8 +2261,8 @@ mod tests {
         );
 
         // Total buy must be ~60, total sell must be ~40
-        let total_buy: f32 = footprint.trades.values().map(|g| g.buy_qty).sum();
-        let total_sell: f32 = footprint.trades.values().map(|g| g.sell_qty).sum();
+        let total_buy: f64 = footprint.trades.values().map(|g| g.buy_qty).sum();
+        let total_sell: f64 = footprint.trades.values().map(|g| g.sell_qty).sum();
         assert!(
             (total_buy - 60.0).abs() < 1e-1,
             "total buy must equal ~60, got {total_buy}"

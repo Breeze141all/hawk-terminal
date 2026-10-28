@@ -73,8 +73,8 @@ fn test_adversarial_footprint_cluster_deep_immutability_250_levels() {
     // Deep snapshot of all 250 price bins
     #[derive(Clone, Debug, PartialEq)]
     struct BinSnapshot {
-        buy_qty: f32,
-        sell_qty: f32,
+        buy_qty: f64,
+        sell_qty: f64,
         buy_count: usize,
         sell_count: usize,
         first_time: u64,
@@ -556,7 +556,7 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover() {
         .footprint
         .trades
         .values()
-        .map(|b| b.buy_qty + b.sell_qty)
+        .map(|b| b.total_qty())
         .sum();
     assert!(
         (fp_vol - total_active_volume).abs() < 1e-2,
@@ -706,7 +706,7 @@ fn test_adversarial_high_frequency_burst_streaming_and_rapid_rollover_clean_life
         .footprint
         .trades
         .values()
-        .map(|b| b.buy_qty + b.sell_qty)
+        .map(|b| b.total_qty())
         .sum();
     assert!(
         (fp_vol - total_active_volume).abs() < 1e-2,

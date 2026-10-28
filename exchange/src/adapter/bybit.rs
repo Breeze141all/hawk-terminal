@@ -567,7 +567,7 @@ pub fn connect_kline_stream(
                                                 de_kline.high,
                                                 de_kline.low,
                                                 de_kline.close,
-                                                (-1.0, volume),
+                                                (Kline::NO_BUY_SELL_SPLIT, volume),
                                                 ticker_info.min_ticksize,
                                             );
 
@@ -865,7 +865,7 @@ pub async fn fetch_klines(
                 high,
                 low,
                 close,
-                (-1.0, volume),
+                (Kline::NO_BUY_SELL_SPLIT, volume),
                 ticker_info.min_ticksize,
             );
 

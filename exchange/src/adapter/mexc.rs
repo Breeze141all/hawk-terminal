@@ -582,7 +582,7 @@ pub async fn fetch_klines(
                         kline.high,
                         kline.low,
                         kline.close,
-                        (-1.0, volume),
+                        (Kline::NO_BUY_SELL_SPLIT, volume),
                         ticker_info.min_ticksize,
                     )
                 })

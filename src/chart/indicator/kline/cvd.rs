@@ -65,14 +65,16 @@ impl CvdIndicator {
 
     fn recalculate_from_pairs(&mut self, pairs: Vec<(u64, f32, f32)>) {
         self.data.clear();
-        let mut cum_delta = 0.0f32;
+        // Summed in f64: the running total grows without bound, and an f32 sum stops
+        // registering small per-bar deltas once it is large.
+        let mut cum_delta = 0.0f64;
         for (time, buy, sell) in pairs {
-            let delta = if buy == -1.0 { 0.0 } else { buy - sell };
-            cum_delta += delta;
+            let delta = Kline::buy_sell((buy, sell)).map_or(0.0, |(buy, sell)| buy - sell);
+            cum_delta += f64::from(delta);
             self.data.insert(
                 time,
                 CvdPoint {
-                    cvd: cum_delta,
+                    cvd: cum_delta as f32,
                     delta,
                     buy_vol: buy.max(0.0),
                     sell_vol: sell.max(0.0),
