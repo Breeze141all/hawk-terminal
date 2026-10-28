@@ -42,7 +42,8 @@
     2. У `release.yaml` додано job `test`; `build-macos`, `build-linux`, `build-windows` мають `needs: test`, тож падіння тестів блокує інсталятори, GitHub Release і `version.json` для апдейтера.
     3. Шість тестів, що ходять на живі біржі (Binance REST/WebSocket ×4, Hyperliquid ×2), позначено `#[ignore = "network: ..."]`; локально запускаються через `-- --include-ignored` (описано в `CLAUDE.md`).
     4. Перевірено локально: прогін з `--locked` і проксі, що веде в нікуди, — зелений, тобто решта тестів мережі не потребує.
-  - **Обмеження**: Linux-прогін локально не перевірено (немає WSL/Docker); перший запуск у GitHub Actions може виявити платформозалежні тести. Тести `test_get_hist_trades_*` / `test_benchmark_bin_vs_zip` у `exchange/src/lib.rs` читають локальний кеш `C:\Users\Breeze\...` і в CI мовчки повертаються без перевірок — кандидат на фікстури.
+    5. Перший прогін на Linux (GitHub Actions) упав на часовому бюджеті `test_adv_hf_tick_burst_50k_preview_open` (5.74 с при ліміті 5 с; локально 2.1 с). Усі wall-clock перевірки в `hawk-data` тепер беруть бюджет через `perf_budget_ms()`: ×4 при змінній `CI`, без змін локально. Після цього Test на Linux зелений (~3 хв).
+  - **Обмеження**: Тести `test_get_hist_trades_*` / `test_benchmark_bin_vs_zip` у `exchange/src/lib.rs` читають локальний кеш `C:\Users\Breeze\...` і в CI мовчки повертаються без перевірок — кандидат на фікстури.
 
 - [ ] **[#127] [P0] Чесне позиціонування: атрибуція upstream flowsurface та прибирання маркетингових перебільшень (DOC-01)**
   - **Файли**: `README.md`, тексти сайту `hawk-site`
