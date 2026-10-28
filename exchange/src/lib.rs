@@ -1007,7 +1007,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_hist_trades_sep12() {
+    async fn test_get_hist_trades_reads_a_full_day_from_the_binary_cache() {
+        // Writes a day file with the production encoder into a temp dir, so the test checks the
+        // read path everywhere (it used to read the developer's own cache and skip elsewhere).
         let ticker = Ticker::new("btcusdt", Exchange::BinanceLinear);
         let ticker_info = TickerInfo {
             ticker,
@@ -1015,44 +1017,51 @@ mod tests {
             min_qty: util::MinQtySize { power: -3 },
             contract_size: None,
         };
-        let mut data_path = std::path::PathBuf::from(
-            r"C:\Users\Breeze\AppData\Roaming\hawk-terminal\market_data\binance",
-        );
-        if !data_path.exists() {
-            data_path = std::path::PathBuf::from(
-                r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
-            );
-        }
-        if !data_path.exists() {
-            return;
-        }
+        let data_path = std::env::temp_dir().join(format!(
+            "hawk_hist_trades_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
-        let trades = adapter::binance::get_hist_trades(ticker_info, date, data_path.clone()).await;
-        match &trades {
-            Ok(t) => println!(
-                "Parsed {} trades, first: {:?}, last: {:?}",
-                t.len(),
-                t.first(),
-                t.last()
-            ),
-            Err(e) => println!("Error: {:?}", e),
-        }
-        assert!(trades.is_ok());
+        let day_start = 1789171200000u64; // 2026-09-12 00:00:00 UTC
+        let trades = vec![
+            Trade {
+                time: day_start + 1_000,
+                is_sell: false,
+                price: util::Price::from_f32(60_000.0),
+                qty: 0.5,
+            },
+            Trade {
+                time: day_start + 43_200_000,
+                is_sell: true,
+                price: util::Price::from_f32(60_100.0),
+                qty: 1.25,
+            },
+            Trade {
+                time: day_start + 86_399_000,
+                is_sell: false,
+                price: util::Price::from_f32(59_900.0),
+                qty: 0.001,
+            },
+        ];
+        crate::trades::cache::save_raw_trades_to_cache(&data_path, &ticker_info, date, &trades)
+            .expect("write fixture");
 
-        // Now test fetch_trades at 00:00:00 on Sep 12
-        let t0 = 1789171200000u64; // 2026-09-12 00:00:00
-        let res = adapter::binance::fetch_trades(ticker_info, t0, data_path).await;
-        match &res {
-            Ok((t, next_t)) => println!(
-                "fetch_trades Sep 12: {} trades, next_t: {}, first: {:?}, last: {:?}",
-                t.len(),
-                next_t,
-                t.first(),
-                t.last()
-            ),
-            Err(e) => println!("fetch_trades error: {:?}", e),
+        let loaded = adapter::binance::get_hist_trades(ticker_info, date, data_path.clone())
+            .await
+            .expect("read fixture");
+
+        assert_eq!(loaded.len(), trades.len());
+        for (got, want) in loaded.iter().zip(&trades) {
+            assert_eq!(got.time, want.time);
+            assert_eq!(got.is_sell, want.is_sell);
+            assert_eq!(got.price.units, want.price.units);
+            assert_eq!(got.qty, want.qty);
         }
-        assert!(res.is_ok());
+
+        let _ = std::fs::remove_dir_all(&data_path);
     }
 
     #[test]
@@ -1125,6 +1134,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "benchmark: needs a real market cache, set HAWK_MARKET_DATA to its binance dir"]
     async fn test_benchmark_bin_vs_zip() {
         let ticker = Ticker::new("btcusdt", Exchange::BinanceLinear);
         let ticker_info = TickerInfo {
@@ -1133,17 +1143,11 @@ mod tests {
             min_qty: util::MinQtySize { power: -3 },
             contract_size: None,
         };
-        let mut data_path = std::path::PathBuf::from(
-            r"C:\Users\Breeze\AppData\Roaming\hawk-terminal\market_data\binance",
-        );
-        if !data_path.exists() {
-            data_path = std::path::PathBuf::from(
-                r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
-            );
-        }
-        if !data_path.exists() {
+        let Some(data_path) = std::env::var_os("HAWK_MARKET_DATA").map(std::path::PathBuf::from)
+        else {
+            eprintln!("HAWK_MARKET_DATA is not set; nothing to benchmark");
             return;
-        }
+        };
         let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
 
         let t_start_bin = std::time::Instant::now();
@@ -1160,32 +1164,6 @@ mod tests {
         );
 
         assert!(!bin_trades.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_get_hist_trades_aug21() {
-        let ticker = Ticker::new("btcusdt", Exchange::BinanceLinear);
-        let ticker_info = TickerInfo {
-            ticker,
-            min_ticksize: util::MinTicksize { power: -1 },
-            min_qty: util::MinQtySize { power: -3 },
-            contract_size: None,
-        };
-        let mut data_path = std::path::PathBuf::from(
-            r"C:\Users\Breeze\AppData\Roaming\hawk-terminal\market_data\binance",
-        );
-        if !data_path.exists() {
-            data_path = std::path::PathBuf::from(
-                r"C:\Users\Breeze\AppData\Roaming\flowsurface\market_data\binance",
-            );
-        }
-        let date = chrono::NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
-        let trades = adapter::binance::get_hist_trades(ticker_info, date, data_path).await;
-        match &trades {
-            Ok(t) => println!("Aug 21 SUCCESS: {} trades", t.len()),
-            Err(e) => println!("Aug 21 ERROR: {:?}", e),
-        }
-        assert!(trades.is_ok());
     }
 
     #[test]
