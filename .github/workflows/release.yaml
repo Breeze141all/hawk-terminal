@@ -15,8 +15,29 @@ on:
       - "v*"
 
 jobs:
+  # Every build job waits for this, so a failing test blocks the release,
+  # the installers and the version.json the in-app updater reads.
+  test:
+    name: Test workspace
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libasound2-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo test
+        run: cargo test --workspace --locked --no-fail-fast
+
   build-macos:
     name: Build macOS Universal
+    needs: test
     runs-on: macos-latest
     steps:
       - name: Checkout code
@@ -38,6 +59,7 @@ jobs:
 
   build-linux:
     name: Build Linux x86_64
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -71,6 +93,7 @@ jobs:
 
   build-windows:
     name: Build Windows x86_64 Installer
+    needs: test
     runs-on: windows-latest
     steps:
       - name: Checkout code

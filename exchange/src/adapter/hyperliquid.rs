@@ -1616,6 +1616,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "network: queries the live Hyperliquid API"]
     async fn manual_depth_cfg() {
         let symbol = "BTC";
         let depth_config = DepthFeedConfig::new(Some(5), Some(1));
@@ -1630,6 +1631,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "network: queries the live Hyperliquid API"]
     async fn e2e_depth_config_precision() {
         let symbols = ["BTC", "ETH", "HYPE"];
         let multipliers = [1u16, 2u16, 5u16, 10u16, 25u16, 50u16, 100u16];
