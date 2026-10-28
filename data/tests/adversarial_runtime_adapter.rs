@@ -17,6 +17,16 @@ use indicator_engine::{
     StatementKind, TimeOrTick, compile,
 };
 
+/// Same rule as `perf_budget_ms` in `data/src/lib.rs`: CI runners are ~3x slower, so
+/// the wall-clock budget is widened there and stays strict locally.
+fn perf_budget_ms(local_ms: u128) -> u128 {
+    if std::env::var_os("CI").is_some() {
+        local_ms * 4
+    } else {
+        local_ms
+    }
+}
+
 fn ensure_catalog() {
     let _ = initialize_indicator_catalog();
 }
@@ -115,7 +125,7 @@ fn test_adv_hf_tick_burst_50k_preview_open() {
     let elapsed = start.elapsed();
     println!("50,000 preview ticks took {:?}", elapsed);
     assert!(
-        elapsed.as_millis() < 5000,
+        elapsed.as_millis() < perf_budget_ms(5000),
         "50,000 preview ticks exceeded 5.0s budget: {:?}",
         elapsed
     );
@@ -309,7 +319,7 @@ fn test_adv_100k_synthetic_bars_linear_time_and_bounded_memory() {
 
     // Total time for 100,000 bars in debug mode must be reasonable (linear time $O(N)$)
     assert!(
-        total_elapsed.as_millis() < 15_000,
+        total_elapsed.as_millis() < perf_budget_ms(15_000),
         "100k bars exceeded 15s in debug mode: {:?}",
         total_elapsed
     );
@@ -372,7 +382,7 @@ fn test_adv_100k_bars_indicator_host_dag_recalculate() {
         elapsed
     );
     assert!(
-        elapsed.as_millis() < 20_000,
+        elapsed.as_millis() < perf_budget_ms(20_000),
         "Host 100k frames took {:?}",
         elapsed
     );
@@ -720,7 +730,7 @@ fn test_adv_hf_preview_on_host_multi_indicator() {
         elapsed
     );
     assert!(
-        elapsed.as_millis() < 3000,
+        elapsed.as_millis() < perf_budget_ms(3000),
         "Multi-indicator preview exceeded 3s: {:?}",
         elapsed
     );

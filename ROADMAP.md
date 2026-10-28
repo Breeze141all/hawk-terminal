@@ -3,7 +3,7 @@
 Централізована система планування, архітектурного обліку завдань, критичних дефектів та беклогу функціоналу.
 Синхронізовано з GitHub Projects / Issues: **[Breeze141all/hawk-terminal](https://github.com/Breeze141all/hawk-terminal)**
 
-**Поточна версія**: `v0.9.8` | **Видання Rust**: `2024` | **GUI**: `Iced 0.14` | **Тести**: 570+ passing
+**Поточна версія**: `v0.9.8` | **Видання Rust**: `2024` | **GUI**: `Iced 0.14` | **Тести**: 678 passing (2026-10-28)
 
 ---
 
@@ -11,6 +11,7 @@
 
 | Категорія | Пріоритет | Кількість | Статус |
 | :--- | :---: | :---: | :--- |
+| **Аудит 2026-10-28: борг, точність, позиціонування** | P0–P2 | 9 | #126 виконано; відкрито #127–#135 |
 | **P0: Мережева стабільність, транспорт та паніки** | Критичний | 0 | Всі 9 виконано (0 в беклозі) |
 | **P1: Order Flow, Footprint та Графіка** | Високий | 0 | Всі 15 виконано (0 в беклозі) |
 | **P2: Оптимізація рантайму, надійність та UX** | Середній | 0 | Всі 3 виконано (0 в активному беклозі) |
@@ -24,6 +25,95 @@
 ---
 
 ## 1. Активний беклог (Active Backlog)
+
+### 1.0. Аудит коду від 2026-10-28: технічний борг, точність та чесність позиціонування
+
+Підсумок незалежного аудиту репозиторію. Стан на момент аудиту: `cargo test --workspace` — 678 passed / 0 failed, `clippy -D warnings` та `fmt --check` чисті. Проблеми нижче не ламають збірку, але б'ють по довірі, точності даних і вартості подальшої розробки. Номери впорядковано за пріоритетом виконання.
+
+- [x] **[#126] [P0] Запуск тестів у CI та тест-гейт перед релізом (CI-01)**
+  - **Файли**: `.github/workflows/test.yml` (новий), `.github/workflows/release.yaml`, `exchange/src/adapter/binance.rs`, `exchange/src/adapter/hyperliquid.rs`, `CLAUDE.md`
+  - **Проблема**: CI запускає лише `cargo fmt --check` та `cargo clippy`. Жоден із 678 тестів не виконується ні на push/PR, ні перед збіркою релізу: `release.yaml` робить `cargo build --release` без тестів, тож регресію можна випустити користувачам з «зеленим» CI.
+  - **Рішення**:
+    1. Додати крок `cargo test --workspace --no-fail-fast` у `lint.yml` (або окремий `test.yml`) для push/PR у `main`.
+    2. У `release.yaml` запускати тести перед `cargo build --release`; падіння тестів блокує публікацію `version.json` та інсталяторів.
+    3. Тести, що потребують мережі, позначити `#[ignore]` і не запускати в CI.
+  - **Виконано**:
+    1. Новий workflow `test.yml`: `cargo test --workspace --locked --no-fail-fast` на push/PR у `main` (Ubuntu, `libasound2-dev` — єдина нативна залежність для лінкування).
+    2. У `release.yaml` додано job `test`; `build-macos`, `build-linux`, `build-windows` мають `needs: test`, тож падіння тестів блокує інсталятори, GitHub Release і `version.json` для апдейтера.
+    3. Шість тестів, що ходять на живі біржі (Binance REST/WebSocket ×4, Hyperliquid ×2), позначено `#[ignore = "network: ..."]`; локально запускаються через `-- --include-ignored` (описано в `CLAUDE.md`).
+    4. Перевірено локально: прогін з `--locked` і проксі, що веде в нікуди, — зелений, тобто решта тестів мережі не потребує.
+    5. Перший прогін на Linux (GitHub Actions) упав на часовому бюджеті `test_adv_hf_tick_burst_50k_preview_open` (5.74 с при ліміті 5 с; локально 2.1 с). Усі wall-clock перевірки в `hawk-data` тепер беруть бюджет через `perf_budget_ms()`: ×4 при змінній `CI`, без змін локально. Після цього Test на Linux зелений (~3 хв).
+  - **Обмеження**: Тести `test_get_hist_trades_*` / `test_benchmark_bin_vs_zip` у `exchange/src/lib.rs` читають локальний кеш `C:\Users\Breeze\...` і в CI мовчки повертаються без перевірок — кандидат на фікстури.
+
+- [ ] **[#127] [P0] Чесне позиціонування: атрибуція upstream flowsurface та прибирання маркетингових перебільшень (DOC-01)**
+  - **Файли**: `README.md`, тексти сайту `hawk-site`
+  - **Проблема**:
+    1. Hawk Terminal — форк `flowsurface-rs/flowsurface` (на момент форку ~37 тис. рядків Rust; ~410 з ~470 комітів історії належать автору upstream), але README жодного разу не згадує flowsurface. Формулювання «Built entirely in bare-metal Rust» та «Sovereign Exchange Connectors» прямо вводять в оману.
+    2. «Bare-metal» фактично невірно: застосунок працює поверх `wgpu`, `tokio` та ОС.
+    3. Опис heatmap «Real-time calculated liquidation leverage bands from raw exchange streams» не відповідає реалізації (див. **#128**).
+  - **Рішення**:
+    1. Розділ «Based on / Credits» у README з посиланням на `flowsurface-rs/flowsurface` та автора; зберегти всі copyright-нотатки GPL.
+    2. Прибрати «bare-metal», «sovereign», «zero-latency»; описувати фактичні властивості (нативний Rust, без Electron, локальне зберігання).
+    3. Ті самі правки — на сайті `hawk-site`.
+
+- [ ] **[#128] [P1] Liquidation Heatmap: чесне маркування моделі та прив'язка до Open Interest (IND-14)**
+  - **Файли**: `data/src/chart/liquidation_heatmap.rs`, `src/chart/indicator/kline.rs`, `README.md`
+  - **Проблема**: Модуль сам себе описує як «Simulates»: він припускає, що на кожній свічці відкрито позиції з плечем 5/10/25/50/100x, і зважує рівні лише відношенням об'єму свічки до середнього. Open Interest і реальні ліквідації не використовуються, а маржа рахується ad-hoc (`offset = 1/L + buffer + 0.01/L`). Користувач бачить «рівні ліквідацій», яких на ринку може не бути.
+  - **Рішення**:
+    1. Перейменувати в UI на «Estimated Liquidation Levels (model)» з тултіпом, що пояснює припущення моделі.
+    2. Опційно зважувати рівні приростом Open Interest (історія OI вже завантажується адаптерами, напр. Binance `openInterestHist`) замість сирого об'єму.
+    3. Реальні ліквідації — окреме завдання **#118** (Icebox).
+
+- [ ] **[#129] [P1] Нормалізація line endings через `.gitattributes` (GIT-01)**
+  - **Файли**: `.gitattributes` (новий), `CLAUDE.md`
+  - **Проблема**: `.gitattributes` відсутній, файли змішані (`src/chart/kline.rs`, `ROADMAP.md`, `src/modal/volume_search.rs` — CRLF; `src/main.rs` — LF). Через це коміти перетасовують цілі файли: `8dc090b` «contextual mouse cursor» змінює 28 тис. рядків `kline.rs` при 71 рядку реальних змін, `546139d` — аналогічно. `git blame`, `bisect` та рев'ю стають марними.
+  - **Рішення**:
+    1. Додати `.gitattributes` (`* text=auto eol=lf`, бінарні типи `-text`).
+    2. Один окремий коміт `git add --renormalize .` без жодних логічних змін.
+    3. Оновити конвенцію в `CLAUDE.md` (замість «зберігати CRLF у файлах» — єдиний LF).
+    4. Надалі: один коміт = одна зміна; заголовок коміту відповідає змісту; номери `(#NNN)` — лише для реальних issues/PR.
+
+- [ ] **[#130] [P1] Точність накопичувачів об'єму: `f64` замість `f32` та відмова від сентинелу `-1.0` (DAT-22)**
+  - **Файли**: `data/src/chart/kline.rs` (`buy_qty`, `sell_qty`), `src/chart/indicator/kline/cvd.rs`, `src/chart/indicator/kline/cvd_divergence.rs`, `src/chart/indicator/kline/volume.rs`, `src/chart/indicator/kline/position_flow.rs`, `data/src/chart/heatmap.rs` (`qty_sum`), `exchange/src/lib.rs` (`Kline::volume`)
+  - **Проблема**:
+    1. Об'єми рівнів футпринту та CVD (`cum_delta: f32`) накопичуються у `f32`. Коли сума перевищує ~32 тис. одиниць, крок `f32` стає ~0.004, і угоди по 0.001 BTC губляться при додаванні; для мемкоїнів з об'ємами ~1e10 похибка — тисячі монет. Для order-flow інструменту це пряма похибка даних.
+    2. Відсутність розбивки buy/sell кодується магічним float-значенням `buy == -1.0` (5 місць в індикаторах).
+  - **Рішення**:
+    1. Перевести накопичувачі та агрегати (`buy_qty`, `sell_qty`, `qty_sum`, `cum_delta`, `Kline::volume`) на `f64`. **Не змінювати** `Trade::qty` у дискових кешах (`.bin`, `.fst`) без окремої міграції формату; інваріант **#115** (Base-одиниці) зберігається.
+    2. Замінити сентинел `-1.0` на `Option`/enum (`VolumeSplit::Total(f64)` | `VolumeSplit::BuySell(f64, f64)`).
+    3. Тест: 1 000 000 угод по 0.001 після додавання до рівня з 50 000 дають +1000 з похибкою < 1e-6.
+
+- [ ] **[#131] [P2] Декомпозиція god-файлів (ARCH-01)**
+  - **Файли**: `src/chart/kline.rs` (14 119 рядків), `src/screen/dashboard/pane.rs` (5 308), `src/modal/volume_search.rs` (4 648), `src/screen/dashboard.rs` (3 331)
+  - **Проблема**: У `kline.rs` функція `update` займає 1 124 рядки, `draw_clusters` — 652, `draw` — 625, `draw_chart_drawings` — 519, `draw_tpo_profiles` — 420, `evaluate_position_outcome` — 300; ~4.3 тис. рядків тестів (від `mod tests`) лежать у тому ж файлі. Кожна нова фіча в цьому файлі дорожча за попередню, а конфлікти злиття гарантовані.
+  - **Рішення**:
+    1. Розбити `kline.rs` на підмодулі за відповідальністю: `update/`, `draw/clusters.rs`, `draw/drawings.rs`, `draw/tpo.rs`, `position.rs`; тести — у `kline/tests.rs`.
+    2. `update` розкласти на обробники за групами `Message`.
+    3. Лише переміщення коду, без зміни логіки; один модуль — один коміт; повний `cargo test --workspace` після кожного кроку. Виконувати після **#129**, щоб diff був читабельним.
+
+- [ ] **[#132] [P2] WGPU `ShaderHeatmap`: feature flag або видалення (ARCH-02)**
+  - **Файли**: `src/widget/chart/heatmap/` (~2.6 тис. рядків), `src/screen/dashboard/pane.rs`, `data/src/layout/pane.rs`, `Cargo.toml`
+  - **Проблема**: Рендерер прихований з UI (**#109**), але компілюється і постачається в кожному бінарнику; ~49 посилань на `ShaderHeatmap` розкидані по коду.
+  - **Рішення**: Винести за cargo feature `shader-heatmap` (вимкнений за замовчуванням) або видалити разом із **#104**, **#105**. Інваріант «CPU Canvas heatmap за замовчуванням» зберігається. Пов'язано з **#35**, **#36** (51 `#[allow(dead_code)]` у коді).
+
+- [ ] **[#133] [P2] Бінарники релізів поза git-історією (GIT-02)**
+  - **Файли**: гілка `site-accuracy-fixes` / `gh-pages`, `.github/workflows/release.yaml`
+  - **Проблема**: Pack репозиторію — 244 МБ: в історії гілки сайту закомічено десяток `hawk-terminal-macos.tar.gz` по 26–31 МБ, Linux-архіви по ~20 МБ та Windows-інсталятори. Кожен клон тягне всі старі релізи.
+  - **Рішення**:
+    1. Публікувати бінарники лише як assets GitHub Releases; сайт посилається на них (updater уже обмежує URL шляхами GitHub release/site — перевірити, що інваріант **#5** CLAUDE.md не порушено).
+    2. Очищення історії (`git filter-repo`) потребує force-push у публічний репозиторій і ламає наявні клони — **окреме рішення власника**, не виконувати автоматично.
+
+- [ ] **[#134] [P2] Синхронізація застарілої документації (DOC-02)**
+  - **Файли**: `README.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`
+  - **Проблема**: Документація відстала від коду: README перелічує 4 біржі, а реалізовано 6 (MEXC, Coinbase не згадані); `CLAUDE.md` стверджує, що `cargo fmt --check` не чистий на `main`, хоча він уже чистий; кількість тестів у ROADMAP була «570+» при фактичних 678.
+  - **Рішення**: Оновити перелік бірж і модулів у README; прибрати застарілу примітку про fmt з `CLAUDE.md`; звести три файли інструкцій для агентів (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) до одного джерела правди з короткими посиланнями з інших.
+
+- [ ] **[#135] [P2] Залежність від поточної дати в тестах і в Bybit `fetch_trades` (TST-01)**
+  - **Файли**: `exchange/src/adapter/binance.rs` (тест ~рядок 2585), `exchange/src/adapter/bybit.rs` (`fetch_trades`, ~рядок 1389)
+  - **Проблема**: Тест кешу intraday-угод Binance будує дату від `chrono::Utc::now()`, що порушує конвенцію CLAUDE.md і може падати при запуску біля опівночі UTC. Bybit `fetch_trades` у продакшн-коді бере `Utc::now()` напряму, тоді як Binance використовує `clock::today_midnight_ms` — різна поведінка адаптерів на межі доби.
+  - **Рішення**: Фіксована дата в тестах (або ін'єкція годинника); Bybit перевести на `crate::clock::today_midnight_ms`, як Binance.
+
+---
 
 ### 1.1. Пріоритет P0: Мережева стабільність, транспорт та паніки (Critical / Stability)
 

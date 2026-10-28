@@ -1834,7 +1834,7 @@ mod tests {
         let elapsed = start_time.elapsed();
 
         assert!(
-            elapsed.as_millis() < 500,
+            elapsed.as_millis() < crate::perf_budget_ms(500),
             "TradeTpoCache must ingest 25,000 trades in sub-second time (took {}ms)",
             elapsed.as_millis()
         );

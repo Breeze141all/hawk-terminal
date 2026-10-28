@@ -1,0 +1,40 @@
+name: Test
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+    workflow_dispatch:
+
+jobs:
+    test:
+        if: ${{ github.actor != 'dependabot[bot]' && github.actor != 'dependabot-preview[bot]' }}
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Install Linux system dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y build-essential pkg-config libasound2-dev
+
+            - name: Install rust toolchain
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo registry & target
+              uses: actions/cache@v4
+              with:
+                  path: |
+                      ~/.cargo/registry
+                      ~/.cargo/git
+                      target
+                  key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+                  restore-keys: |
+                      ${{ runner.os }}-cargo-test-
+
+            # Tests that reach live exchanges are #[ignore]d, so this run needs no network
+            # beyond fetching crates. Run them locally with `-- --include-ignored`.
+            - name: Run cargo test
+              run: cargo test --workspace --locked --no-fail-fast

@@ -2648,6 +2648,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "network: queries the live Binance REST API"]
     async fn test_fetch_historical_oi_clamps_old_start_without_error() {
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
         let now_ms = std::time::SystemTime::now()
@@ -2663,6 +2664,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "network: connects to the live Binance websocket"]
     async fn test_connect_kline_stream_receives_kline() {
         use iced_futures::futures::StreamExt;
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
@@ -2693,6 +2695,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "network: connects to the live Binance websocket"]
     async fn test_connect_market_stream_receives_depth_and_trades() {
         use iced_futures::futures::StreamExt;
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
@@ -2799,6 +2802,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "network: queries the live Binance REST API"]
     async fn test_fetch_intraday_trades_raw_clamps_excessive_time_range() {
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
         let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
