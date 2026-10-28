@@ -610,10 +610,70 @@ pub fn timesales_cfg_view<'a>(
             .into()
     };
 
+    let liquidations_column = {
+        let cfg_toggle = cfg.clone();
+        let toggle = checkbox(cfg.show_liquidations)
+            .label("Show real liquidations (Binance, Bybit perps)")
+            .on_toggle(move |value| {
+                Message::VisualConfigChanged(
+                    pane,
+                    VisualConfig::TimeAndSales(timeandsales::Config {
+                        show_liquidations: value,
+                        ..cfg_toggle.clone()
+                    }),
+                    false,
+                )
+            });
+        let cfg_min = cfg.clone();
+        let min_list = pick_list(
+            data::panel::timeandsales::LIQUIDATION_MIN_USD_CHOICES.map(|v| {
+                if v == 0.0 {
+                    "All".to_string()
+                } else {
+                    format!("≥ ${}", data::util::format_with_commas(v))
+                }
+            }),
+            Some(if cfg.liquidation_min_usd <= 0.0 {
+                "All".to_string()
+            } else {
+                format!(
+                    "≥ ${}",
+                    data::util::format_with_commas(cfg.liquidation_min_usd)
+                )
+            }),
+            move |label: String| {
+                let value = data::panel::timeandsales::LIQUIDATION_MIN_USD_CHOICES
+                    .into_iter()
+                    .find(|v| {
+                        (*v == 0.0 && label == "All")
+                            || label == format!("≥ ${}", data::util::format_with_commas(*v))
+                    })
+                    .unwrap_or(0.0);
+                Message::VisualConfigChanged(
+                    pane,
+                    VisualConfig::TimeAndSales(timeandsales::Config {
+                        liquidation_min_usd: value,
+                        ..cfg_min.clone()
+                    }),
+                    false,
+                )
+            },
+        );
+        column![
+            text("Liquidations").size(14),
+            toggle,
+            row![text("Smallest shown").width(Length::Fill), min_list]
+                .spacing(4)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(8)
+    };
+
     let content = split_column![
         trade_size_column,
         history_column,
         stacked_bar,
+        liquidations_column,
         row![space::horizontal(), sync_all_button(pane, VisualConfig::TimeAndSales(cfg.clone()))],
         ; spacing = 12, align_x = Alignment::Start
     ];

@@ -90,6 +90,10 @@ struct HawkTerminal {
 enum Message {
     Sidebar(dashboard::sidebar::Message),
     MarketWsEvent(exchange::Event),
+    Liquidation(
+        exchange::TickerInfo,
+        exchange::liquidation::LiquidationEvent,
+    ),
     Dashboard {
         /// If `None`, the active layout is used for the event.
         layout_id: Option<uuid::Uuid>,
@@ -233,6 +237,11 @@ impl HawkTerminal {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Liquidation(ticker_info, event) => {
+                let main_window_id = self.main_window.id;
+                self.active_dashboard_mut()
+                    .ingest_liquidations(main_window_id, ticker_info, event);
+            }
             Message::MarketWsEvent(event) => {
                 let main_window_id = self.main_window.id;
                 let dashboard = self.active_dashboard_mut();
@@ -1251,6 +1260,11 @@ impl HawkTerminal {
             .market_subscriptions()
             .map(Message::MarketWsEvent);
 
+        let liquidation_streams = self
+            .active_dashboard()
+            .liquidation_subscriptions()
+            .map(|(ticker_info, event)| Message::Liquidation(ticker_info, event));
+
         let tick = iced::time::every(std::time::Duration::from_millis(50)).map(Message::Tick);
 
         let hotkeys = keyboard::listen().filter_map(|event| {
@@ -1306,6 +1320,7 @@ impl HawkTerminal {
 
         Subscription::batch(vec![
             exchange_streams,
+            liquidation_streams,
             sidebar,
             window_events,
             tick,

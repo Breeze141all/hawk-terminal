@@ -1817,6 +1817,57 @@ impl Dashboard {
         self.refresh_streams(main_window)
     }
 
+    /// One liquidation stream per supported ticker shown by a Time & Sales pane that has
+    /// liquidations turned on. Nothing is opened while no such pane exists.
+    pub fn liquidation_subscriptions(
+        &self,
+    ) -> Subscription<(TickerInfo, exchange::liquidation::LiquidationEvent)> {
+        use iced::futures::StreamExt;
+
+        let mut tickers: Vec<TickerInfo> = Vec::new();
+        let states = self.panes.iter().map(|(_, s)| s).chain(
+            self.popout
+                .values()
+                .flat_map(|(panes, _)| panes.iter().map(|(_, s)| s)),
+        );
+        for state in states {
+            if let pane::Content::TimeAndSales(Some(panel)) = &state.content
+                && panel.config.show_liquidations
+            {
+                for ti in panel.tickers() {
+                    if exchange::liquidation::is_supported(ti.exchange())
+                        && !tickers.iter().any(|t| t.ticker == ti.ticker)
+                    {
+                        tickers.push(*ti);
+                    }
+                }
+            }
+        }
+
+        Subscription::batch(tickers.into_iter().map(|ti| {
+            Subscription::run_with(ti, |ti: &TickerInfo| {
+                let ti = *ti;
+                exchange::liquidation::connect_liquidation_stream(ti).map(move |e| (ti, e))
+            })
+        }))
+    }
+
+    /// Hands a liquidation stream event to every Time & Sales pane showing that ticker.
+    pub fn ingest_liquidations(
+        &mut self,
+        main_window: window::Id,
+        ticker_info: TickerInfo,
+        event: exchange::liquidation::LiquidationEvent,
+    ) {
+        for (_, _, state) in self.iter_all_panes_mut(main_window) {
+            if let pane::Content::TimeAndSales(Some(panel)) = &mut state.content
+                && panel.wants_liquidations_for(&ticker_info)
+            {
+                panel.on_liquidation_event(ticker_info, event.clone());
+            }
+        }
+    }
+
     pub fn market_subscriptions(&self) -> Subscription<exchange::Event> {
         let unique_streams = self
             .streams

@@ -18,6 +18,19 @@ pub struct Config {
     pub additional_tickers: Vec<exchange::TickerInfo>,
     #[serde(default)]
     pub disabled_tickers: Vec<exchange::Ticker>,
+    /// Show the exchange's real forced liquidations above the tape (Binance and Bybit perps).
+    #[serde(default)]
+    pub show_liquidations: bool,
+    /// Hide liquidations smaller than this many USD.
+    #[serde(default = "default_liquidation_min_usd")]
+    pub liquidation_min_usd: f32,
+}
+
+/// Minimum liquidation sizes offered in the Time & Sales settings.
+pub const LIQUIDATION_MIN_USD_CHOICES: [f32; 5] = [0.0, 10_000.0, 50_000.0, 250_000.0, 1_000_000.0];
+
+fn default_liquidation_min_usd() -> f32 {
+    10_000.0
 }
 
 impl Default for Config {
@@ -28,6 +41,8 @@ impl Default for Config {
             stacked_bar: StackedBar::Compact(StackedBarRatio::default()).into(),
             additional_tickers: Vec::new(),
             disabled_tickers: Vec::new(),
+            show_liquidations: false,
+            liquidation_min_usd: default_liquidation_min_usd(),
         }
     }
 }
@@ -178,6 +193,18 @@ impl HistAgg {
 mod tests {
     use super::*;
     use exchange::util::Price;
+
+    #[test]
+    fn test_config_saved_before_liquidations_still_loads() {
+        let mut old = serde_json::to_value(Config::default()).unwrap();
+        let map = old.as_object_mut().unwrap();
+        map.remove("show_liquidations");
+        map.remove("liquidation_min_usd");
+
+        let cfg: Config = serde_json::from_value(old).unwrap();
+        assert!(!cfg.show_liquidations);
+        assert_eq!(cfg.liquidation_min_usd, 10_000.0);
+    }
 
     #[test]
     fn test_ter16_zero_alloc_tape_trade_and_hist_agg() {
