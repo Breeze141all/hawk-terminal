@@ -94,6 +94,7 @@ struct SonicTrade {
 struct FuturesDepthItem {
     pub price: f32,
     pub qty: f32,
+    // Third element of each [price, qty, count] depth array; kept so the arity matches.
     #[allow(dead_code)]
     pub order_count: Option<f32>,
 }
@@ -493,16 +494,14 @@ pub async fn fetch_ticker_prices(
 }
 
 #[derive(Deserialize, Debug)]
-#[allow(dead_code)]
 struct FuturesApiResponse {
-    success: bool,
-    code: u8,
     data: Value,
 }
 
 #[derive(Deserialize, Debug)]
+// Parsed positionally from MEXC's kline arrays, so every element keeps a field.
+#[allow(dead_code)]
 struct KlineSpot {
-    #[allow(dead_code)]
     open_ts: u64,
     open: f32,
     high: f32,
@@ -510,7 +509,6 @@ struct KlineSpot {
     close: f32,
     vol: f32,
     close_ts: u64,
-    #[allow(dead_code)]
     asset_vol: f32,
 }
 

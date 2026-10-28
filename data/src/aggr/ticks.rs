@@ -25,8 +25,16 @@ impl TickAccumulation {
             low: trade.price,
             close: trade.price,
             volume: (
-                if trade.is_sell { 0.0 } else { trade.qty },
-                if trade.is_sell { trade.qty } else { 0.0 },
+                if trade.is_sell {
+                    0.0
+                } else {
+                    f64::from(trade.qty)
+                },
+                if trade.is_sell {
+                    f64::from(trade.qty)
+                } else {
+                    0.0
+                },
             ),
         };
 
@@ -44,9 +52,9 @@ impl TickAccumulation {
         self.kline.close = trade.price;
 
         if trade.is_sell {
-            self.kline.volume.1 += trade.qty;
+            self.kline.volume.1 += f64::from(trade.qty);
         } else {
-            self.kline.volume.0 += trade.qty;
+            self.kline.volume.0 += f64::from(trade.qty);
         }
 
         self.add_trade(trade, step);
@@ -299,7 +307,7 @@ impl From<&TickAggr> for BTreeMap<u64, (f32, f32)> {
             .datapoints
             .iter()
             .enumerate()
-            .map(|(idx, dp)| (idx as u64, (dp.kline.volume.0, dp.kline.volume.1)))
+            .map(|(idx, dp)| (idx as u64, dp.kline.volume_f32()))
             .collect()
     }
 }

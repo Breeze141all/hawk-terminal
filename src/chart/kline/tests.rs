@@ -3855,7 +3855,7 @@ fn test_ter11_vwap_range_scan_datapoints() {
             let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
                 as f64
                 / 3.0;
-            let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+            let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
             (*t as i64, tp, vol)
         })
         .collect();
@@ -3894,7 +3894,7 @@ fn test_ter11_vwap_range_scan_datapoints() {
             let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
                 as f64
                 / 3.0;
-            let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+            let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
             (dp.kline.time as i64, tp, vol)
         })
         .collect();

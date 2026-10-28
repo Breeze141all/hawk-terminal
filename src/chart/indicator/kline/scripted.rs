@@ -285,26 +285,6 @@ pub fn draw_line_runs(
     }
 }
 
-/// Fills an area between a series curve and a baseline.
-#[allow(dead_code)]
-pub fn fill_indicator_area(frame: &mut Frame, points: &[Point], baseline: f32, color: Color) {
-    if points.len() < 2
-        || !baseline.is_finite()
-        || points.iter().any(|p| !p.x.is_finite() || !p.y.is_finite())
-    {
-        return;
-    }
-    let path = Path::new(|builder| {
-        builder.move_to(Point::new(points[0].x, baseline));
-        for pt in points {
-            builder.line_to(*pt);
-        }
-        builder.line_to(Point::new(points.last().unwrap().x, baseline));
-        builder.close();
-    });
-    frame.fill(&path, color);
-}
-
 /// Fills a ribbon/cloud between upper and lower curves.
 pub fn fill_indicator_band(
     frame: &mut Frame,

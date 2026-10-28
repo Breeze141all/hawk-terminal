@@ -993,7 +993,7 @@ impl From<&TimeSeries<KlineDataPoint>> for BTreeMap<u64, (f32, f32)> {
         timeseries
             .datapoints
             .iter()
-            .map(|(time, dp)| (*time, (dp.kline.volume.0, dp.kline.volume.1)))
+            .map(|(time, dp)| (*time, dp.kline.volume_f32()))
             .collect()
     }
 }

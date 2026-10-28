@@ -400,6 +400,11 @@ pub fn data_path(path_name: Option<&str>) -> PathBuf {
         std::env::var("HAWK_DATA_PATH").or_else(|_| std::env::var("FLOWSURFACE_DATA_PATH"))
     {
         PathBuf::from(path)
+    } else if let Some(test_dir) = cargo_test_data_dir() {
+        match path_name {
+            Some(path_name) => test_dir.join(path_name),
+            None => test_dir,
+        }
     } else {
         let data_dir = dirs_next::data_dir().unwrap_or_else(|| PathBuf::from("."));
         let hawk_dir = data_dir.join("hawk-terminal");
@@ -420,6 +425,23 @@ pub fn data_path(path_name: Option<&str>) -> PathBuf {
             base_dir
         }
     }
+}
+
+/// A per-process temp dir when this is a `cargo test` binary (it runs from `target/*/deps/`),
+/// so tests that touch the global drawing/alert/template stores never read or write the
+/// user's real data dir. The app itself (`cargo run`, installed builds) never runs from `deps/`.
+fn cargo_test_data_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let exe = std::env::current_exe().ok()?;
+        if exe.parent()?.file_name()? != "deps" {
+            return None;
+        }
+        let dir = std::env::temp_dir().join(format!("hawk-terminal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    })
+    .clone()
 }
 
 fn cleanup_directory(data_path: &PathBuf) -> usize {
@@ -506,6 +528,18 @@ pub(crate) fn perf_budget_ms(local_ms: u128) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_data_path_stays_out_of_the_user_dir_under_cargo_test() {
+        if std::env::var_os("HAWK_DATA_PATH").is_some()
+            || std::env::var_os("FLOWSURFACE_DATA_PATH").is_some()
+        {
+            return; // an explicit override wins, by design
+        }
+        // Tests used to load and save the user's real drawings.json/alerts.json.
+        let path = data_path(Some(DRAWINGS_PATH));
+        assert!(path.starts_with(std::env::temp_dir()), "{}", path.display());
+    }
 
     #[test]
     fn test_cleanup_directory_recognizes_bin_and_zip() {

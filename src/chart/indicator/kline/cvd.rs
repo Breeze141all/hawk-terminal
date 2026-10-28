@@ -112,13 +112,13 @@ impl KlineIndicatorImpl for CvdIndicator {
             PlotData::TimeBased(timeseries) => timeseries
                 .datapoints
                 .iter()
-                .map(|(t, dp)| (*t, dp.kline.volume.0, dp.kline.volume.1))
+                .map(|(t, dp)| (*t, dp.kline.volume_f32().0, dp.kline.volume_f32().1))
                 .collect(),
             PlotData::TickBased(tickseries) => tickseries
                 .datapoints
                 .iter()
                 .enumerate()
-                .map(|(idx, dp)| (idx as u64, dp.kline.volume.0, dp.kline.volume.1))
+                .map(|(idx, dp)| (idx as u64, dp.kline.volume_f32().0, dp.kline.volume_f32().1))
                 .collect(),
         };
         self.recalculate_from_pairs(pairs);

@@ -75,14 +75,11 @@ pub fn exact_multipliers_for_price(price: f32) -> &'static [u16] {
     }
 }
 
-#[allow(dead_code)]
 const LIMIT: usize = 1200; // Conservative rate limit
 
-#[allow(dead_code)]
 const REFILL_RATE: Duration = Duration::from_secs(60);
 const LIMITER_BUFFER_PCT: f32 = 0.05;
 
-#[allow(dead_code)]
 static HYPERLIQUID_LIMITER: LazyLock<Mutex<HyperliquidLimiter>> =
     LazyLock::new(|| Mutex::new(HyperliquidLimiter::new(LIMIT, REFILL_RATE)));
 
@@ -163,12 +160,9 @@ impl HyperliquidAssetContext {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct HyperliquidKline {
     #[serde(rename = "t")]
     time: u64,
-    #[serde(rename = "T")]
-    close_time: u64,
     #[serde(rename = "s")]
     symbol: String,
     #[serde(rename = "i")]
@@ -183,45 +177,30 @@ struct HyperliquidKline {
     close: f32,
     #[serde(rename = "v", deserialize_with = "de_string_to_f32")]
     volume: f32,
-    #[serde(rename = "n")]
-    trade_count: u64,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct HyperliquidDepth {
-    coin: String,
     levels: [Vec<HyperliquidLevel>; 2], // [bids, asks]
     time: u64,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct HyperliquidLevel {
     #[serde(deserialize_with = "de_string_to_f32")]
     px: f32,
     #[serde(deserialize_with = "de_string_to_f32")]
     sz: f32,
-    n: u32,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct HyperliquidTrade {
-    coin: String,
     side: String,
     #[serde(deserialize_with = "de_string_to_f32")]
     px: f32,
     #[serde(deserialize_with = "de_string_to_f32")]
     sz: f32,
     time: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct HyperliquidWSMessage {
-    channel: String,
-    data: Value,
 }
 
 enum StreamData {
@@ -1363,14 +1342,11 @@ async fn fetch_orderbook(
 }
 
 #[derive(serde::Deserialize, Debug)]
-#[allow(dead_code)]
 struct HlRecentTradeItem {
-    pub coin: String,
     pub side: String,
     pub sz: String,
     pub px: String,
     pub time: u64,
-    pub tid: u64,
 }
 
 pub async fn fetch_intraday_trades(

@@ -18,13 +18,17 @@ jobs:
   # Every build job waits for this, so a failing test blocks the release,
   # the installers and the version.json the in-app updater reads.
   test:
-    name: Test workspace
-    runs-on: ubuntu-latest
+    name: Test workspace (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libasound2-dev

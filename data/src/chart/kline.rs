@@ -86,9 +86,9 @@ impl KlineDataPoint {
         self.kline.close = trade.price;
 
         if trade.is_sell {
-            self.kline.volume.1 += trade.qty;
+            self.kline.volume.1 += f64::from(trade.qty);
         } else {
-            self.kline.volume.0 += trade.qty;
+            self.kline.volume.0 += f64::from(trade.qty);
         }
 
         self.footprint.add_trade_to_nearest_bin(trade, step);
@@ -433,8 +433,7 @@ impl KlineTrades {
     /// with delta distribution reflecting buy/sell aggression.
     pub fn simulate_from_kline(kline: &Kline, step: PriceStep) -> Self {
         let mut footprint = Self::new();
-        let total_buy = kline.volume.0;
-        let total_sell = kline.volume.1;
+        let (total_buy, total_sell) = kline.volume_f32();
         let total_vol = total_buy + total_sell;
         if total_vol <= 0.0 {
             return footprint;
@@ -1540,8 +1539,9 @@ pub fn encode_footprint_datapoints(datapoints: &[(u64, KlineDataPoint)]) -> Vec<
         raw.extend_from_slice(&dp.kline.high.units.to_le_bytes());
         raw.extend_from_slice(&dp.kline.low.units.to_le_bytes());
         raw.extend_from_slice(&dp.kline.close.units.to_le_bytes());
-        raw.extend_from_slice(&dp.kline.volume.0.to_le_bytes());
-        raw.extend_from_slice(&dp.kline.volume.1.to_le_bytes());
+        // The cache format stores 4-byte f32 volumes; keep it so existing caches load.
+        raw.extend_from_slice(&(dp.kline.volume.0 as f32).to_le_bytes());
+        raw.extend_from_slice(&(dp.kline.volume.1 as f32).to_le_bytes());
         raw.push(if dp.trades_fetched { 1 } else { 0 });
 
         raw.extend_from_slice(&dp.footprint.first_trade_t().unwrap_or(0).to_le_bytes());
@@ -1745,7 +1745,7 @@ pub fn decode_footprint_datapoints(
             high: Price { units: high_units },
             low: Price { units: low_units },
             close: Price { units: close_units },
-            volume: (vol_buy, vol_sell),
+            volume: (f64::from(vol_buy), f64::from(vol_sell)),
         };
 
         let valid_fetched =
@@ -1915,6 +1915,46 @@ mod tests {
             (level.delta_qty() - 1000.0).abs() < 0.01,
             "delta {}",
             level.delta_qty()
+        );
+    }
+
+    #[test]
+    fn test_candle_volume_keeps_small_trades_on_a_large_candle() {
+        let step = PriceStep {
+            units: 100_00000000,
+        };
+        let trade = |qty: f32| Trade {
+            time: 1726210800000,
+            is_sell: false,
+            price: Price {
+                units: 58000_00000000,
+            },
+            qty,
+        };
+        let mut dp = KlineDataPoint {
+            kline: Kline {
+                time: 1726210800000,
+                open: Price { units: 0 },
+                high: Price { units: 0 },
+                low: Price { units: 0 },
+                close: Price { units: 0 },
+                volume: (0.0, 0.0),
+            },
+            footprint: KlineTrades::new(),
+            trades_fetched: true,
+        };
+
+        dp.add_trade(&trade(50_000.0), step);
+        for _ in 0..1_000_000 {
+            dp.add_trade(&trade(0.001), step);
+        }
+
+        // With an f32 volume every 0.001 added to 50k rounded away.
+        let expected = 50_000.0 + 1_000_000.0 * f64::from(0.001f32);
+        assert!(
+            (dp.kline.volume.0 - expected).abs() < 1e-6,
+            "{}",
+            dp.kline.volume.0
         );
     }
 
@@ -2094,7 +2134,8 @@ mod tests {
         assert_eq!(dp_orig.kline.high.units, dp_dec.kline.high.units);
         assert_eq!(dp_orig.kline.low.units, dp_dec.kline.low.units);
         assert_eq!(dp_orig.kline.close.units, dp_dec.kline.close.units);
-        assert_eq!(dp_orig.kline.volume, dp_dec.kline.volume);
+        // The cache stores volumes as f32, so they round-trip at f32 precision.
+        assert_eq!(dp_orig.kline.volume_f32(), dp_dec.kline.volume_f32());
         assert_eq!(dp_orig.trades_fetched, dp_dec.trades_fetched);
 
         let poc_orig = dp_orig.footprint.poc.as_ref().unwrap();

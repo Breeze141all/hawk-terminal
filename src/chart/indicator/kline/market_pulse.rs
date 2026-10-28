@@ -18,7 +18,7 @@ use crate::chart::{
 use data::chart::{PlotData, kline::KlineDataPoint};
 use exchange::adapter::Exchange;
 use exchange::fetcher::FetchRange;
-use exchange::{FundingRate, Kline, SpotKline, Timeframe, Trade};
+use exchange::{Kline, Timeframe, Trade};
 
 use iced::widget::{center, text};
 use std::{collections::BTreeMap, ops::RangeInclusive};
@@ -165,7 +165,7 @@ impl MarketPulseIndicator {
             self.raw_volatility.insert(kline.time, volatility);
 
             // Volume: total volume
-            let volume = kline.volume.0 + kline.volume.1;
+            let volume = kline.volume_f32().0 + kline.volume_f32().1;
             self.raw_volume.insert(kline.time, volume);
 
             // Store futures close for basis calculation
@@ -271,26 +271,6 @@ impl MarketPulseIndicator {
     pub fn is_supported_timeframe(timeframe: Timeframe) -> bool {
         // Support 5m to 4h timeframes
         timeframe >= Timeframe::M5 && timeframe <= Timeframe::H4
-    }
-
-    /// Insert funding rate data (used via on_funding_rates trait method)
-    #[allow(dead_code)]
-    pub fn insert_funding_rates(&mut self, rates: &[FundingRate]) {
-        for rate in rates {
-            self.funding_rates.insert(rate.time, rate.rate);
-        }
-        self.forward_fill_funding();
-        self.recalculate();
-    }
-
-    /// Insert spot kline data for basis calculation (used via on_spot_klines trait method)
-    #[allow(dead_code)]
-    pub fn insert_spot_klines(&mut self, klines: &[SpotKline]) {
-        for kline in klines {
-            self.spot_klines.insert(kline.time, kline.close);
-        }
-        self.update_basis();
-        self.recalculate();
     }
 }
 

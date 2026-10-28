@@ -37,7 +37,7 @@ impl VwapCandle for Kline {
 
     #[inline]
     fn volume(&self) -> f64 {
-        (self.volume.0 + self.volume.1) as f64
+        self.volume.0 + self.volume.1
     }
 }
 
@@ -57,7 +57,7 @@ impl VwapCandle for &Kline {
 
     #[inline]
     fn volume(&self) -> f64 {
-        (self.volume.0 + self.volume.1) as f64
+        self.volume.0 + self.volume.1
     }
 }
 
@@ -77,7 +77,7 @@ impl VwapCandle for KlineDataPoint {
 
     #[inline]
     fn volume(&self) -> f64 {
-        (self.kline.volume.0 + self.kline.volume.1) as f64
+        self.kline.volume.0 + self.kline.volume.1
     }
 }
 
@@ -97,7 +97,7 @@ impl VwapCandle for &KlineDataPoint {
 
     #[inline]
     fn volume(&self) -> f64 {
-        (self.kline.volume.0 + self.kline.volume.1) as f64
+        self.kline.volume.0 + self.kline.volume.1
     }
 }
 

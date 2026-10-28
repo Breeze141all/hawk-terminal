@@ -8,15 +8,10 @@ use crate::chart::{
 };
 
 #[derive(Clone, Copy)]
-#[allow(unused)]
 /// How to anchor bar heights.
 pub enum Baseline {
     /// Use zero as baseline (classic volume). Extents: [0, max].
     Zero,
-    /// Use the minimum value in the visible range. Extents: [min, max].
-    Min,
-    /// Use a fixed numeric baseline.
-    Fixed(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -42,7 +37,6 @@ pub struct BarPlot<V, CL, T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-#[allow(dead_code)]
 impl<V, CL, T> BarPlot<V, CL, T> {
     pub fn new(value: V, classify: CL) -> Self {
         Self {
@@ -112,8 +106,6 @@ where
                 let high = max_v.max(0.0);
                 (low, high)
             }
-            Baseline::Min => (min_v, max_v.max(min_v + f32::EPSILON)),
-            Baseline::Fixed(v) => (min_v.min(v), max_v.max(v + f32::EPSILON)),
         };
 
         if lowest == highest {
@@ -146,8 +138,6 @@ where
 
         let baseline_value = match self.baseline {
             Baseline::Zero => 0.0,
-            Baseline::Min => scale.min, // extents min
-            Baseline::Fixed(v) => v,
         };
         let y_base = scale.to_y(baseline_value);
 

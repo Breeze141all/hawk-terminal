@@ -132,13 +132,13 @@ impl KlineIndicatorImpl for BidAskRatioIndicator {
         match source {
             PlotData::TimeBased(timeseries) => {
                 for (time, dp) in &timeseries.datapoints {
-                    let pt = Self::compute_point(dp.kline.volume.0, dp.kline.volume.1);
+                    let pt = Self::compute_point(dp.kline.volume_f32().0, dp.kline.volume_f32().1);
                     self.data.insert(*time, pt);
                 }
             }
             PlotData::TickBased(tickseries) => {
                 for (idx, dp) in tickseries.datapoints.iter().enumerate() {
-                    let pt = Self::compute_point(dp.kline.volume.0, dp.kline.volume.1);
+                    let pt = Self::compute_point(dp.kline.volume_f32().0, dp.kline.volume_f32().1);
                     self.data.insert(idx as u64, pt);
                 }
             }
@@ -148,7 +148,7 @@ impl KlineIndicatorImpl for BidAskRatioIndicator {
 
     fn on_insert_klines(&mut self, klines: &[Kline]) {
         for k in klines {
-            let pt = Self::compute_point(k.volume.0, k.volume.1);
+            let pt = Self::compute_point(k.volume_f32().0, k.volume_f32().1);
             self.data.insert(k.time, pt);
         }
         self.clear_all_caches();
@@ -165,7 +165,7 @@ impl KlineIndicatorImpl for BidAskRatioIndicator {
             PlotData::TickBased(tickseries) => {
                 let start_idx = old_dp_len.saturating_sub(1);
                 for (idx, dp) in tickseries.datapoints.iter().enumerate().skip(start_idx) {
-                    let pt = Self::compute_point(dp.kline.volume.0, dp.kline.volume.1);
+                    let pt = Self::compute_point(dp.kline.volume_f32().0, dp.kline.volume_f32().1);
                     self.data.insert(idx as u64, pt);
                 }
             }

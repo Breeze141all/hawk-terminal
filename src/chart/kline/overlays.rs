@@ -218,7 +218,7 @@ pub(super) fn draw_vwap_overlay(
                 let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
                     as f64
                     / 3.0;
-                let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
                 candles.push((*time as i64, tp, vol));
             }
         }
@@ -229,7 +229,7 @@ pub(super) fn draw_vwap_overlay(
                 let tp = (dp.kline.high.to_f32() + dp.kline.low.to_f32() + dp.kline.close.to_f32())
                     as f64
                     / 3.0;
-                let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
                 candles.push((dp.kline.time as i64, tp, vol));
             }
         }
@@ -440,7 +440,7 @@ pub(super) fn draw_rolling_vwap_overlay(
                         + dp.kline.low.to_f32()
                         + dp.kline.close.to_f32()) as f64
                         / 3.0;
-                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                    let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
                     candles.push((*time as i64, tp, vol));
                 }
             }
@@ -454,7 +454,7 @@ pub(super) fn draw_rolling_vwap_overlay(
                         + dp.kline.low.to_f32()
                         + dp.kline.close.to_f32()) as f64
                         / 3.0;
-                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                    let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
                     candles.push((dp.kline.time as i64, tp, vol));
                 }
             }

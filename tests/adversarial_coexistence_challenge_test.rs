@@ -16,7 +16,7 @@ fn make_candle(time: u64, open: f64, high: f64, low: f64, close: f64, vol: (f32,
         high: Price::from_f64(high),
         low: Price::from_f64(low),
         close: Price::from_f64(close),
-        volume: vol,
+        volume: (f64::from(vol.0), f64::from(vol.1)),
     }
 }
 

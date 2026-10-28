@@ -17,7 +17,7 @@ fn make_kline(open_time: i64, open: f64, high: f64, low: f64, close: f64, volume
         high: Price::from_f32(high as f32),
         low: Price::from_f32(low as f32),
         close: Price::from_f32(close as f32),
-        volume: (volume as f32 * 0.5, volume as f32 * 0.5),
+        volume: (volume * 0.5, volume * 0.5),
     }
 }
 

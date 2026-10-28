@@ -8,7 +8,6 @@ use iced::{Alignment, Point, Rectangle, Renderer, Size, Theme, Vector, mouse};
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
-pub mod area;
 pub mod bar;
 pub mod dual_area;
 pub mod line;

@@ -743,7 +743,6 @@ pub async fn fetch_historical_oi(
     Ok(open_interest)
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 struct ApiResponse {
     #[serde(rename = "retCode", default)]
@@ -754,13 +753,8 @@ struct ApiResponse {
     result: Option<ApiResult>,
 }
 
-#[allow(dead_code)]
 #[derive(Deserialize, Debug, Default)]
 struct ApiResult {
-    #[serde(default)]
-    symbol: String,
-    #[serde(default)]
-    category: String,
     #[serde(default)]
     list: Vec<Vec<Value>>,
 }
@@ -1052,7 +1046,6 @@ pub async fn fetch_ticker_prices(
 }
 
 #[derive(serde::Deserialize, Debug)]
-#[allow(dead_code)]
 struct BybitRecentTradeItem {
     pub price: String,
     pub size: String,
@@ -1061,14 +1054,12 @@ struct BybitRecentTradeItem {
 }
 
 #[derive(serde::Deserialize, Debug)]
-#[allow(dead_code)]
 struct BybitRecentTradeResult {
     #[serde(default)]
     pub list: Vec<BybitRecentTradeItem>,
 }
 
 #[derive(serde::Deserialize, Debug)]
-#[allow(dead_code)]
 struct BybitRecentTradeResponse {
     #[serde(rename = "retCode", default)]
     pub ret_code: i32,

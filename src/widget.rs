@@ -21,9 +21,6 @@ pub mod toast;
 
 pub use floating::DraggableOverlay;
 
-#[allow(dead_code)]
-pub const DEFAULT_TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
-
 pub fn tooltip<'a, Message: 'a>(
     content: impl Into<Element<'a, Message>>,
     tooltip: Option<&'a str>,
