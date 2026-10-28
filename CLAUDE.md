@@ -79,5 +79,5 @@ Hawk Terminal is a desktop crypto charting application built with Rust and the I
 - Do not `unwrap()` on data from the network or disk; return `AdapterError::ParseError` (the stream loops ignore `Err`).
 - Tests must not depend on the current date or hardcode "today"; test production functions, not copies of their logic.
 - A test that reaches a live exchange gets `#[ignore = "network: ..."]`. CI (`test.yml`, and the `test` job that gates every build in `release.yaml`) runs `cargo test --workspace --locked` without them.
-- Some files use CRLF line endings (e.g. `src/modal/volume_search.rs`). Preserve each file's existing endings so diffs stay small.
+- Line endings are LF everywhere, enforced by `.gitattributes` (`* text=auto eol=lf`). Do not write CRLF; if an editor does, `git add --renormalize .` fixes it. The one-off normalization commit is listed in `.git-blame-ignore-revs`.
 - `cargo fmt --check` is not clean on `main` today (pre-existing); format only the files you touch.
