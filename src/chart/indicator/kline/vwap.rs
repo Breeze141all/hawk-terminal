@@ -32,15 +32,6 @@ impl VwapIndicator {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_period(period: VwapPeriod) -> Self {
-        Self {
-            cache: Caches::default(),
-            data: BTreeMap::new(),
-            tracker: VwapTracker::new(period),
-        }
-    }
-
     fn indicator_elem<'a>(
         &'a self,
         main_chart: &'a ViewState,

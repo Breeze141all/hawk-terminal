@@ -1335,8 +1335,10 @@ fn calc_qty(qty: f32, price: f32, contract_size: Option<f32>, size_in_quote_ccy:
     }
 }
 
-#[allow(dead_code)]
+// One Binance kline array, parsed positionally: every element needs a field even when the
+// close time, quote volume, trade count or taker quote volume (6, 7, 8, 10, 11) go unread.
 #[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)]
 struct FetchedKlines(
     u64,
     #[serde(deserialize_with = "de_string_to_f32")] f32,

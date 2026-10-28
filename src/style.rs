@@ -22,15 +22,14 @@ pub const AZERET_MONO: Font = Font {
 
 pub const TITLE_PADDING_TOP: f32 = if cfg!(target_os = "macos") { 20.0 } else { 0.0 };
 
-#[allow(dead_code)]
+/// Text sizes of the WGPU heatmap overlay, its only user.
+#[cfg(feature = "shader-heatmap")]
 pub mod text_size {
     pub const SMALL: f32 = 11.0;
     pub const BODY: f32 = 12.0;
-    pub const SECTION: f32 = 14.0;
     pub const TITLE: f32 = 16.0;
 
     pub const TINY: f32 = SMALL - 1.0;
-    pub const EMPHASIS: f32 = BODY + 1.0;
 }
 
 pub enum Icon {

@@ -222,13 +222,11 @@ impl VolumeSearchModal {
     }
 
     /// Validates that both start and end inputs are valid YYYY-MM-DD dates and start <= end.
-    #[allow(dead_code)]
     pub fn is_date_range_valid(&self) -> bool {
         self.is_start_date_valid && self.is_end_date_valid && self.start_date <= self.end_date
     }
 
     /// Computes the contiguous sequence of calendar dates spanned by [start_date, end_date].
-    #[allow(dead_code)]
     pub fn target_dates(&self) -> Vec<NaiveDate> {
         if !self.is_date_range_valid() {
             return Vec::new();
@@ -259,17 +257,11 @@ impl VolumeSearchModal {
     }
 
     /// Inherits the active chart pane ticker if no ticker has been selected yet.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn inherit_active_pane_ticker(&mut self, ticker: Option<TickerInfo>) {
         if self.selected_ticker.is_none() {
             self.selected_ticker = ticker;
         }
-    }
-
-    /// Returns the currently selected instrument.
-    #[allow(dead_code)]
-    pub fn selected_ticker(&self) -> Option<TickerInfo> {
-        self.selected_ticker
     }
 
     pub fn current_query(&self) -> &str {
@@ -316,7 +308,7 @@ impl VolumeSearchModal {
         matched.into_iter().map(|(ti, _)| ti).collect()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn filtered_and_ranked_candidates(&self) -> Vec<TickerInfo> {
         let query = self.current_query();
         self.compute_filtered_tickers(query)

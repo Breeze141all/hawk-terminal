@@ -18,8 +18,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::ops::RangeInclusive;
 
 /// Depth percentage band around mid price
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+// 5% and 10% are reachable only from tests until the settings UI exposes them (ROADMAP #138).
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DepthBand {
     #[default]
     TwoPercent,
@@ -38,8 +39,9 @@ impl DepthBand {
 }
 
 /// Aggregation mode for depth imbalance calculations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+// `Twap` is reachable only from tests until the settings UI exposes it (ROADMAP #138).
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AggregationMode {
     #[default]
     Snapshot,
@@ -203,6 +205,8 @@ impl DepthImbalanceIndicator {
         }
     }
 
+    // The settings UI does not expose the band or the TWAP mode yet (ROADMAP #138), so only
+    // the tests reach these builders, the 5%/10% bands and `AggregationMode::Twap`.
     #[allow(dead_code)]
     pub fn with_band(mut self, band: DepthBand) -> Self {
         self.band = band;

@@ -35,7 +35,6 @@ pub struct DualAreaPlot<V1, V2, T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-#[allow(dead_code)]
 impl<V1, V2, T> DualAreaPlot<V1, V2, T> {
     pub fn new(value1: V1, value2: V2) -> Self {
         Self {
@@ -69,16 +68,6 @@ impl<V1, V2, T> DualAreaPlot<V1, V2, T> {
 
     pub fn fill_alpha(mut self, alpha: f32) -> Self {
         self.fill_alpha = alpha;
-        self
-    }
-
-    pub fn color1(mut self, c: Color) -> Self {
-        self.color1 = Some(c);
-        self
-    }
-
-    pub fn color2(mut self, c: Color) -> Self {
-        self.color2 = Some(c);
         self
     }
 

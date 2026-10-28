@@ -55,7 +55,6 @@ impl Default for LayoutManager {
 }
 
 impl LayoutManager {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         let hawk = data::default_hawk_layout();
         let default_layout = LayoutId {

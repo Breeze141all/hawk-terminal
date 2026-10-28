@@ -93,7 +93,7 @@ impl CvdDivergenceIndicator {
     }
 
     /// Record a spot bar delta (buy volume - sell volume)
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn insert_spot_delta(&mut self, time: u64, buy: f32, sell: f32) {
         let delta = if buy < 0.0 { 0.0 } else { buy - sell.max(0.0) };
         self.spot_deltas.insert(time, delta);

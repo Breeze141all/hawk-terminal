@@ -41,27 +41,8 @@ impl<V, T> MtmPlot<V, T> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn stroke_width(mut self, w: f32) -> Self {
         self.stroke_width = w;
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn line_color(mut self, c: Color) -> Self {
-        self.line_color = Some(c);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn threshold_color(mut self, c: Color) -> Self {
-        self.threshold_color = Some(c);
-        self
-    }
-
-    #[allow(dead_code)]
-    pub fn fill_area(mut self, fill: bool) -> Self {
-        self.fill_area = fill;
         self
     }
 

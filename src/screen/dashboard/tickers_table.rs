@@ -107,11 +107,6 @@ pub fn fetch_tickers_info_with_cache(metadata: &data::MarketMetadata) -> Task<Me
     Task::batch(tasks)
 }
 
-#[allow(dead_code)]
-pub fn fetch_tickers_info() -> Task<Message> {
-    fetch_tickers_info_with_cache(&data::MarketMetadata::default())
-}
-
 pub enum Action {
     TickerSelected(TickerInfo, Option<ContentKind>),
     ErrorOccurred(data::InternalError),

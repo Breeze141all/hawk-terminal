@@ -34,11 +34,6 @@ impl RollingVwapIndicator {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn with_window_hours(_hours: u32) -> Self {
-        Self::new()
-    }
-
     pub fn set_window_hours(&mut self, _hours: u32, _source: &PlotData<KlineDataPoint>) {
         // Multi-period rolling VWAP tracks fixed 7d, 30d, 90d, and 365d windows.
     }

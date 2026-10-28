@@ -15,14 +15,6 @@ use iced::{
     },
 };
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum Message {
-    SearchChanged(String),
-    ToggleIndicator(IndicatorId),
-    ToggleBuiltin(KlineIndicator),
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct State {
     pub search_query: String,
