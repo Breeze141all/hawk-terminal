@@ -17,30 +17,10 @@ use exchange::{Kline, Trade, depth::Depth};
 use std::collections::{BTreeMap, VecDeque};
 use std::ops::RangeInclusive;
 
-/// Depth percentage band around mid price
-// 5% and 10% are reachable only from tests until the settings UI exposes them (ROADMAP #138).
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DepthBand {
-    #[default]
-    TwoPercent,
-    FivePercent,
-    TenPercent,
-}
-
-impl DepthBand {
-    pub const fn percentage(&self) -> f32 {
-        match self {
-            DepthBand::TwoPercent => 0.02,
-            DepthBand::FivePercent => 0.05,
-            DepthBand::TenPercent => 0.10,
-        }
-    }
-}
+/// Depth percentage band around mid price (chosen in the indicator's settings card).
+pub use data::chart::kline::DepthImbalanceBand as DepthBand;
 
 /// Aggregation mode for depth imbalance calculations
-// `Twap` is reachable only from tests until the settings UI exposes it (ROADMAP #138).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AggregationMode {
     #[default]
@@ -205,18 +185,31 @@ impl DepthImbalanceIndicator {
         }
     }
 
-    // The settings UI does not expose the band or the TWAP mode yet (ROADMAP #138), so only
-    // the tests reach these builders, the 5%/10% bands and `AggregationMode::Twap`.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_band(mut self, band: DepthBand) -> Self {
         self.band = band;
         self
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_mode(mut self, mode: AggregationMode) -> Self {
         self.mode = mode;
         self
+    }
+
+    /// Switches band and smoothing. Earlier points were measured with the old settings and
+    /// the order book is not kept, so they are reset rather than mixed into one series.
+    pub fn set_settings(&mut self, band: DepthBand, mode: AggregationMode) {
+        if self.band == band && self.mode == mode {
+            return;
+        }
+        self.band = band;
+        self.mode = mode;
+        self.twap_window.clear();
+        for point in self.data.values_mut() {
+            *point = DepthImbalancePoint::new(0.0, 0.0, 0.0, 0.0, 0.0);
+        }
+        self.cache.clear_all();
     }
 
     pub fn on_depth_update(&mut self, time: u64, depth: &Depth) {
@@ -310,6 +303,20 @@ impl Default for DepthImbalanceIndicator {
     }
 }
 
+/// Applies the chart config's band and TWAP choice if `indi` is a Depth Imbalance indicator.
+pub fn apply_chart_config(indi: &mut dyn KlineIndicatorImpl, config: &data::chart::kline::Config) {
+    if let Some(any) = indi.as_any_mut()
+        && let Some(di) = any.downcast_mut::<DepthImbalanceIndicator>()
+    {
+        let mode = if config.depth_imbalance_twap {
+            AggregationMode::Twap
+        } else {
+            AggregationMode::Snapshot
+        };
+        di.set_settings(config.depth_imbalance_band, mode);
+    }
+}
+
 impl KlineIndicatorImpl for DepthImbalanceIndicator {
     fn clear_all_caches(&mut self) {
         self.cache.clear_all();
@@ -393,6 +400,54 @@ impl KlineIndicatorImpl for DepthImbalanceIndicator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn book(bid_qty: f32, ask_qty: f32) -> Depth {
+        let mut depth = Depth::default();
+        depth.bids.insert(exchange::Price::from_f32(99.0), bid_qty);
+        depth.asks.insert(exchange::Price::from_f32(101.0), ask_qty);
+        // 4% from mid: inside the 5% and 10% bands, outside 2%.
+        depth.asks.insert(exchange::Price::from_f32(104.0), 50.0);
+        depth
+    }
+
+    #[test]
+    fn test_chart_config_selects_band_and_twap() {
+        let mut indi: Box<dyn KlineIndicatorImpl> = Box::new(DepthImbalanceIndicator::new());
+        let mut config = data::chart::kline::Config::factory_default();
+        config.depth_imbalance_band = DepthBand::FivePercent;
+        config.depth_imbalance_twap = true;
+        apply_chart_config(indi.as_mut(), &config);
+
+        let di = indi
+            .as_any_mut()
+            .unwrap()
+            .downcast_mut::<DepthImbalanceIndicator>()
+            .unwrap();
+        assert_eq!(di.band, DepthBand::FivePercent);
+        assert_eq!(di.mode, AggregationMode::Twap);
+
+        // The 5% band sees the far ask level, so the book reads ask-heavy.
+        di.on_depth_update(1000, &book(10.0, 10.0));
+        assert!(di.data[&1000].ratio < 0.0, "{}", di.data[&1000].ratio);
+    }
+
+    #[test]
+    fn test_changing_settings_restarts_the_series() {
+        let mut di = DepthImbalanceIndicator::new();
+        di.on_depth_update(1000, &book(100.0, 1.0));
+        assert!(di.data[&1000].ratio > 0.5);
+
+        di.set_settings(DepthBand::TenPercent, AggregationMode::Snapshot);
+        // The earlier point was measured on the 2% band; it is cleared, not kept.
+        assert_eq!(di.data[&1000].ratio, 0.0);
+        assert_eq!(di.band, DepthBand::TenPercent);
+
+        // Same settings again: nothing is reset.
+        di.on_depth_update(2000, &book(100.0, 1.0));
+        let before = di.data[&2000].ratio;
+        di.set_settings(DepthBand::TenPercent, AggregationMode::Snapshot);
+        assert_eq!(di.data[&2000].ratio, before);
+    }
 
     #[test]
     fn test_compute_depth_imbalance_symmetric_balanced() {

@@ -998,6 +998,37 @@ impl RollingVwapColors {
     }
 }
 
+/// Order book band the Depth Imbalance indicator sums on each side of the mid price.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+pub enum DepthImbalanceBand {
+    #[default]
+    TwoPercent,
+    FivePercent,
+    TenPercent,
+}
+
+impl DepthImbalanceBand {
+    pub const ALL: [Self; 3] = [Self::TwoPercent, Self::FivePercent, Self::TenPercent];
+
+    pub const fn percentage(&self) -> f32 {
+        match self {
+            Self::TwoPercent => 0.02,
+            Self::FivePercent => 0.05,
+            Self::TenPercent => 0.10,
+        }
+    }
+}
+
+impl std::fmt::Display for DepthImbalanceBand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TwoPercent => write!(f, "±2% of mid"),
+            Self::FivePercent => write!(f, "±5% of mid"),
+            Self::TenPercent => write!(f, "±10% of mid"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
@@ -1020,6 +1051,9 @@ pub struct Config {
     pub liq_show_bands: bool,
     #[serde(default = "default_true")]
     pub liq_show_histogram: bool,
+    /// Weight the liquidation heatmap by open interest increases instead of volume.
+    #[serde(default = "default_false")]
+    pub liq_weight_by_oi: bool,
     #[serde(default = "default_true")]
     pub magnet_mode: bool,
     #[serde(default = "default_true")]
@@ -1028,6 +1062,12 @@ pub struct Config {
     pub show_footprint_summary: bool,
     #[serde(default = "default_false")]
     pub data_labels_always_visible: bool,
+    #[serde(default)]
+    pub depth_imbalance_band: DepthImbalanceBand,
+    /// Smooth Depth Imbalance with a moving average of the last snapshots instead of
+    /// plotting each snapshot.
+    #[serde(default = "default_false")]
+    pub depth_imbalance_twap: bool,
 }
 
 static USER_DEFAULT_CONFIG: std::sync::LazyLock<std::sync::RwLock<Option<Config>>> =
@@ -1056,10 +1096,13 @@ impl Config {
             rolling_vwap_show_panel: false,
             liq_show_bands: true,
             liq_show_histogram: true,
+            liq_weight_by_oi: false,
             magnet_mode: true,
             alert_drag_handle_only: true,
             show_footprint_summary: false,
             data_labels_always_visible: false,
+            depth_imbalance_band: DepthImbalanceBand::TwoPercent,
+            depth_imbalance_twap: false,
         }
     }
 }
@@ -1956,6 +1999,19 @@ mod tests {
             "{}",
             dp.kline.volume.0
         );
+    }
+
+    #[test]
+    fn test_kline_config_without_depth_imbalance_fields_still_loads() {
+        // A layout saved before the Depth Imbalance settings existed.
+        let json = serde_json::to_value(Config::factory_default()).unwrap();
+        let mut old = json.as_object().unwrap().clone();
+        old.remove("depth_imbalance_band");
+        old.remove("depth_imbalance_twap");
+
+        let cfg: Config = serde_json::from_value(serde_json::Value::Object(old)).unwrap();
+        assert_eq!(cfg.depth_imbalance_band, DepthImbalanceBand::TwoPercent);
+        assert!(!cfg.depth_imbalance_twap);
     }
 
     #[test]

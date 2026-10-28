@@ -3,6 +3,7 @@ use crate::style;
 use data::config::timezone::TimeLabelKind;
 pub use data::panel::timeandsales::Config;
 use data::panel::timeandsales::{HistAgg, StackedBar, StackedBarRatio, TapeTrade};
+use exchange::liquidation::{Liquidation, LiquidationEvent};
 use exchange::{TickerInfo, Trade, volume_size_unit};
 
 use iced::widget::canvas::{self, Text};
@@ -96,15 +97,24 @@ impl super::Panel for TimeAndSales {
     }
 
     fn view<'a>(&'a self, timezone: data::UserTimezone) -> iced::Element<'a, Message> {
-        iced::widget::canvas(TimeAndSalesView {
+        let tape = iced::widget::canvas(TimeAndSalesView {
             panel: self,
             timezone,
         })
         .height(iced::Length::Fill)
-        .width(iced::Length::Fill)
-        .into()
+        .width(iced::Length::Fill);
+
+        if self.config.show_liquidations {
+            iced::widget::column![self.liquidations_view(timezone), tape].into()
+        } else {
+            tape.into()
+        }
     }
 }
+
+/// Liquidations kept per panel; the strip shows the newest few.
+const LIQUIDATION_HISTORY: usize = 200;
+const LIQUIDATION_ROWS: usize = 6;
 
 pub struct TimeAndSales {
     recent_trades: VecDeque<TapeTrade>,
@@ -119,6 +129,10 @@ pub struct TimeAndSales {
     last_tick: Instant,
     scroll_offset: f32,
     pub trade_size_input: String,
+    /// Newest first: real liquidations from the exchange stream (see `exchange::liquidation`).
+    liquidations: VecDeque<(TickerInfo, Liquidation)>,
+    /// Last connection notice of the liquidation stream, shown in the strip header.
+    liquidation_status: Option<String>,
 }
 
 impl TimeAndSales {
@@ -145,7 +159,85 @@ impl TimeAndSales {
             last_tick: Instant::now(),
             scroll_offset: 0.0,
             trade_size_input,
+            liquidations: VecDeque::new(),
+            liquidation_status: None,
         }
+    }
+
+    /// Whether this panel wants the liquidation stream of `ti`.
+    pub fn wants_liquidations_for(&self, ti: &TickerInfo) -> bool {
+        self.config.show_liquidations && self.matches_ticker(ti)
+    }
+
+    pub fn on_liquidation_event(&mut self, ticker_info: TickerInfo, event: LiquidationEvent) {
+        match event {
+            LiquidationEvent::Connected => self.liquidation_status = None,
+            LiquidationEvent::Disconnected(reason) => self.liquidation_status = Some(reason),
+            LiquidationEvent::Received(liqs) => {
+                for liq in liqs {
+                    self.liquidations.push_front((ticker_info, liq));
+                }
+                self.liquidations.truncate(LIQUIDATION_HISTORY);
+            }
+        }
+    }
+
+    fn liquidations_view<'a>(&'a self, timezone: data::UserTimezone) -> iced::Element<'a, Message> {
+        use iced::widget::{column, container, text};
+
+        let min_usd = f64::from(self.config.liquidation_min_usd);
+        let supported = self
+            .tickers
+            .iter()
+            .any(|t| exchange::liquidation::is_supported(t.exchange()));
+        let header = match (&self.liquidation_status, supported) {
+            (_, false) => "Liquidations: only Binance and Bybit perps".to_string(),
+            (Some(reason), true) => format!("Liquidations: {reason}"),
+            (None, true) if min_usd > 0.0 => format!(
+                "Liquidations ≥ ${}",
+                data::util::format_with_commas(self.config.liquidation_min_usd)
+            ),
+            (None, true) => "Liquidations".to_string(),
+        };
+
+        let mut rows = column![text(header).size(11)].spacing(2);
+        let shown = self
+            .liquidations
+            .iter()
+            .filter(|(_, l)| l.notional_usd >= min_usd)
+            .take(LIQUIDATION_ROWS);
+        for (ti, liq) in shown {
+            let when = timezone
+                .format_with_kind(liq.time as i64, TimeLabelKind::Custom("%H:%M:%S"))
+                .unwrap_or_default();
+            let (side, is_long) = if liq.long_liquidated {
+                ("LONG", true)
+            } else {
+                ("SHORT", false)
+            };
+            let label = format!(
+                "{when}  {side} liq  {}  {}  ${}",
+                ti.ticker,
+                data::util::format_with_commas(liq.price),
+                data::util::format_with_commas(liq.notional_usd as f32),
+            );
+            rows = rows.push(text(label).size(11).style(move |theme: &Theme| {
+                let palette = theme.extended_palette();
+                iced::widget::text::Style {
+                    // A long liquidation is a forced sell; color it like a sell.
+                    color: Some(if is_long {
+                        palette.danger.base.color
+                    } else {
+                        palette.success.base.color
+                    }),
+                }
+            }));
+        }
+
+        container(rows)
+            .padding(iced::padding::left(6).right(6).top(4).bottom(4))
+            .width(iced::Length::Fill)
+            .into()
     }
 
     pub fn tickers(&self) -> &[TickerInfo] {
@@ -810,6 +902,50 @@ mod tests {
 
     fn dummy_ticker_info(ticker_str: &str, ex: Exchange) -> TickerInfo {
         TickerInfo::new(exchange::Ticker::new(ticker_str, ex), 0.1, 0.001, None)
+    }
+
+    fn liq(time: u64, notional_usd: f64) -> Liquidation {
+        Liquidation {
+            time,
+            price: 60_000.0,
+            qty: (notional_usd / 60_000.0) as f32,
+            notional_usd,
+            long_liquidated: true,
+        }
+    }
+
+    #[test]
+    fn test_liquidations_reach_only_panels_that_asked_for_them() {
+        let btc = dummy_ticker_info("BTCUSDT", Exchange::BinanceLinear);
+        let eth = dummy_ticker_info("ETHUSDT", Exchange::BinanceLinear);
+
+        let mut off = TimeAndSales::new(None, btc);
+        assert!(!off.wants_liquidations_for(&btc), "off by default");
+
+        off.config.show_liquidations = true;
+        assert!(off.wants_liquidations_for(&btc));
+        assert!(!off.wants_liquidations_for(&eth));
+    }
+
+    #[test]
+    fn test_liquidation_events_keep_newest_first_and_track_status() {
+        let btc = dummy_ticker_info("BTCUSDT", Exchange::BinanceLinear);
+        let mut tas = TimeAndSales::new(None, btc);
+        tas.config.show_liquidations = true;
+
+        tas.on_liquidation_event(btc, LiquidationEvent::Disconnected("Read error".into()));
+        assert_eq!(tas.liquidation_status.as_deref(), Some("Read error"));
+        tas.on_liquidation_event(btc, LiquidationEvent::Connected);
+        assert!(tas.liquidation_status.is_none());
+
+        tas.on_liquidation_event(btc, LiquidationEvent::Received(vec![liq(1, 5_000.0)]));
+        tas.on_liquidation_event(btc, LiquidationEvent::Received(vec![liq(2, 80_000.0)]));
+        assert_eq!(tas.liquidations.front().unwrap().1.time, 2);
+
+        for i in 0..(LIQUIDATION_HISTORY as u64 + 10) {
+            tas.on_liquidation_event(btc, LiquidationEvent::Received(vec![liq(10 + i, 1.0)]));
+        }
+        assert_eq!(tas.liquidations.len(), LIQUIDATION_HISTORY);
     }
 
     #[test]
