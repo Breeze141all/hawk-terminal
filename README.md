@@ -59,6 +59,9 @@ cargo build --release
 
 # Run terminal
 cargo run --release
+
+# Run the tests (CI runs the same on every push and pull request)
+cargo test --workspace
 ```
 
 Binary will be compiled directly to `target/release/hawk-terminal`.
@@ -70,7 +73,8 @@ Binary will be compiled directly to `target/release/hawk-terminal`.
 Hawk Terminal uses a multi-crate Cargo workspace architecture:
 - **`hawk-terminal`** (`src/`): Application entry point, Elm-inspired MVU GUI event loop via Iced, layout orchestration, canvas painters.
 - **`hawk-data`** (`data/`): Domain models, binary LZ4 tick caching, indicator math, session clusters, state serialization.
-- **`hawk-exchange`** (`exchange/`): Low-latency WebSocket actors (`fastwebsockets`), REST clients, normalized exchange adapters.
+- **`hawk-exchange`** (`exchange/`): WebSocket streams (`fastwebsockets`), REST clients and normalized adapters for the six exchanges above, plus API trade-history import.
+- **`indicator-engine`** (`indicator-engine/`): the scripted indicator language (parser, compiler, runtime), its CLI tools and the `catalog.json` generator.
 
 ---
 

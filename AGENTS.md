@@ -1,15 +1,7 @@
 # AGENTS.md
 
-Guidance and architectural constraints for AI Coding Agents (Antigravity, Claude, Codex, Cursor) working with Hawk Terminal.
+Guidance for AI coding agents (Claude, Codex, Cursor, Gemini/Antigravity) working on Hawk Terminal.
 
-Please refer to and strictly follow the invariants defined in:
-- [GEMINI.md](GEMINI.md)
-- [CLAUDE.md](CLAUDE.md)
-- [ROADMAP.md](ROADMAP.md)
+All build commands, architecture notes, invariants and conventions live in **[CLAUDE.md](CLAUDE.md)**; read it first and follow it. Tasks and their status are in [ROADMAP.md](ROADMAP.md).
 
-## Core Invariants Summary
-
-1. **Trade Cache Currency**: Strictly `SizeUnit::Base = 0`. Never multiply `qty * price` into disk cache files (`.bin`, `.fst`).
-2. **State & Installer Isolation**: `installer.iss` must never install files into `{userappdata}`.
-3. **Legacy Migration**: Always preserve `ensure_migration_from_legacy` in `data/src/lib.rs`.
-4. **Renderer**: Stable Canvas Heatmap is default; WGPU experimental Heatmap is disabled.
+This file intentionally repeats nothing, so the rules cannot drift apart.
