@@ -107,7 +107,7 @@ pub fn search_volume_candles(
             }
         }
 
-        let mut binned: FxHashMap<Price, (f32, f32)> = FxHashMap::default();
+        let mut binned: FxHashMap<Price, (f64, f64)> = FxHashMap::default();
         if !dp.footprint.is_empty() {
             for (price, grouped) in &dp.footprint.trades {
                 let rounded = price.round_to_step(effective_step);
@@ -124,7 +124,8 @@ pub fn search_volume_candles(
         let mut candle_sell_vol = 0.0_f32;
 
         if !binned.is_empty() {
-            for (p, (buy_vol, sell_vol)) in &binned {
+            for (p, &(buy_vol, sell_vol)) in &binned {
+                let (buy_vol, sell_vol) = (buy_vol as f32, sell_vol as f32);
                 let total = buy_vol + sell_vol;
                 candle_buy_vol += buy_vol;
                 candle_sell_vol += sell_vol;

@@ -1,0 +1,16 @@
+# One line ending everywhere: LF in the repository and in every checkout,
+# so an edit on Windows never rewrites a whole file (see ROADMAP #129).
+* text=auto eol=lf
+
+# Binary assets: never convert, never diff as text.
+*.png  binary
+*.ico  binary
+*.rgba binary
+*.ttf  binary
+*.otf  binary
+*.wav  binary
+*.gz   binary
+*.zip  binary
+*.exe  binary
+*.bin  binary
+*.fst  binary

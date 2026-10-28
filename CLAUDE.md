@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. It is the single source of agent guidance: `AGENTS.md` and `GEMINI.md` only point here, so change rules in this file.
 
 ## Build & Run Commands
 
@@ -14,6 +14,9 @@ cargo run --release
 # Build with hot-reload (debug feature)
 cargo build --features debug
 cargo run --features debug
+
+# Include the experimental WGPU heatmap (hidden from the UI)
+cargo build --features shader-heatmap
 
 # Tests (use --no-fail-fast to see every failing suite, not just the first)
 cargo test --workspace --no-fail-fast
@@ -61,16 +64,16 @@ Hawk Terminal is a desktop crypto charting application built with Rust and the I
 ### Code Style
 
 - Line width: 100 characters (rustfmt.toml)
-- Clippy thresholds: 16 function args, 5 enum variants (clippy.toml)
+- Clippy (`clippy.toml`): `too-many-arguments-threshold = 16`, `enum-variant-name-threshold = 5`
 - Uses `rustc-hash` (FxHashMap) and `sonic-rs` for performance
 
 ## Critical Invariants (DO NOT VIOLATE)
 
 1. **Trade cache currency**: `SizeUnit::Base = 0`. Tick caches (`.bin`, `.fst`), footprints and CVD are stored and computed in Base units (coin count). Never serialize `qty * price`; convert to Quote only at the presentation layer.
-2. **Installer isolation**: `installer.iss` must never write into `{userappdata}` (`saved-state.json`, `drawings.json`, `alerts.json`, ...).
-3. **Legacy migration**: keep `ensure_migration_from_legacy` in `data/src/lib.rs` (migrates `%APPDATA%\flowsurface` to `hawk-terminal`).
-4. **Heatmap renderer**: the CPU Canvas heatmap is the default; the experimental WGPU `ShaderHeatmap` stays hidden.
-5. **Updater trust**: `updater::download_installer_file` must keep refusing releases without a valid `sha256`, URLs outside the project's GitHub release/site paths, and checksum mismatches. `release.yaml` must keep writing `sha256` into `version.json`.
+2. **Installer isolation**: `installer.iss` must never write into `{userappdata}` (`saved-state.json`, `drawings.json`, `alerts.json`, ...). Initial state is created at runtime by `SavedState::default()` or migrated from the legacy folder.
+3. **Legacy migration**: keep `ensure_migration_from_legacy` in `data/src/lib.rs`. `data_path()` calls it: when `%APPDATA%\hawk-terminal` is missing or holds only empty stubs (<= 2 bytes), layouts, drawings, alerts, journal and cache are copied from `%APPDATA%\flowsurface`.
+4. **Heatmap renderer**: the CPU Canvas heatmap is the default; the experimental WGPU `ShaderHeatmap` stays hidden and is compiled only with the `shader-heatmap` cargo feature (off by default; `--all-features` in CI still builds it). Without the feature, saved or requested `ShaderHeatmap` panes open as the canvas heatmap.
+5. **Updater trust**: `updater::download_installer_file` must keep refusing releases without a valid `sha256`, URLs outside the project's GitHub release/site paths, and checksum mismatches. `release.yaml` must keep writing `sha256` into `version.json`. Installers and archives are published only as GitHub Release assets; never commit binaries to the site (`direct_site_url` stays `null`).
 6. **Secrets**: exchange API keys/secrets for trade import live in memory only. Never persist or log them; `ImportCredentials` has a redacting `Debug` impl, keep it.
 
 ## Conventions
@@ -79,5 +82,11 @@ Hawk Terminal is a desktop crypto charting application built with Rust and the I
 - Do not `unwrap()` on data from the network or disk; return `AdapterError::ParseError` (the stream loops ignore `Err`).
 - Tests must not depend on the current date or hardcode "today"; test production functions, not copies of their logic.
 - A test that reaches a live exchange gets `#[ignore = "network: ..."]`. CI (`test.yml`, and the `test` job that gates every build in `release.yaml`) runs `cargo test --workspace --locked` without them.
-- Some files use CRLF line endings (e.g. `src/modal/volume_search.rs`). Preserve each file's existing endings so diffs stay small.
-- `cargo fmt --check` is not clean on `main` today (pre-existing); format only the files you touch.
+- Line endings are LF everywhere, enforced by `.gitattributes` (`* text=auto eol=lf`). Do not write CRLF; if an editor does, `git add --renormalize .` fixes it. The one-off normalization commit is listed in `.git-blame-ignore-revs`.
+- `cargo fmt --all -- --check` is clean and CI enforces it; run `cargo fmt --all` before committing.
+- Large modules keep their unit tests in a sibling `tests.rs` (`mod tests;`), e.g. `src/chart/kline/tests.rs`; `src/chart/kline/` also holds the split-out drawing and event-handling code.
+
+## Roadmap
+
+- `ROADMAP.md` (Ukrainian) is the work queue: active tasks, decisions and release progress. Update its summary matrix when a task changes state.
+- `ROADMAP_ARCHIVE.md` holds the closed tickets; move finished items there instead of growing `ROADMAP.md`.

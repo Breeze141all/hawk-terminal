@@ -2,6 +2,9 @@ pub mod big_trades;
 pub mod comparison;
 pub mod drawing_selection_toolbar;
 pub mod drawing_toolbar;
+/// Experimental WGPU heatmap, hidden from the UI (ROADMAP #109) and compiled only with the
+/// `shader-heatmap` feature (#132). The CPU canvas heatmap in `crate::chart::heatmap` is the default.
+#[cfg(feature = "shader-heatmap")]
 pub mod heatmap;
 
 use chrono::{TimeZone, Utc};

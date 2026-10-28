@@ -127,7 +127,7 @@ impl TradeStore {
 
     pub fn trade_qty_at(&self, price: Price) -> (f32, f32) {
         if let Some(g) = self.grouped.trades.get(&price) {
-            (g.buy_qty, g.sell_qty)
+            (g.buy_qty as f32, g.sell_qty as f32)
         } else {
             (0.0, 0.0)
         }

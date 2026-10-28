@@ -42,11 +42,7 @@ fn test_footprint_cluster_immutability_during_indicator_recalc() {
     let initial_poc_price = footprint.poc.as_ref().map(|p| p.price);
     let initial_poc_vol = footprint.poc.as_ref().map(|p| p.volume);
     let initial_trades_len = footprint.trades.len();
-    let initial_volume: f32 = footprint
-        .trades
-        .values()
-        .map(|b| b.buy_qty + b.sell_qty)
-        .sum();
+    let initial_volume: f32 = footprint.trades.values().map(|b| b.total_qty()).sum();
 
     let dp = KlineDataPoint {
         kline: make_candle(1_700_000_000_000, 100.0, 106.0, 99.0, 104.0),
@@ -78,12 +74,7 @@ fn test_footprint_cluster_immutability_during_indicator_recalc() {
     );
     assert_eq!(dp.footprint.poc.as_ref().map(|p| p.volume), initial_poc_vol);
     assert_eq!(dp.footprint.trades.len(), initial_trades_len);
-    let post_volume: f32 = dp
-        .footprint
-        .trades
-        .values()
-        .map(|b| b.buy_qty + b.sell_qty)
-        .sum();
+    let post_volume: f32 = dp.footprint.trades.values().map(|b| b.total_qty()).sum();
     assert_eq!(post_volume, initial_volume);
     assert_eq!(dp.footprint.trades[&Price::from_f64(100.0)].buy_qty, 15.0);
     assert_eq!(dp.footprint.trades[&Price::from_f64(105.0)].sell_qty, 25.0);

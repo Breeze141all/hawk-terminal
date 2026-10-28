@@ -567,7 +567,7 @@ pub fn connect_kline_stream(
                                                 de_kline.high,
                                                 de_kline.low,
                                                 de_kline.close,
-                                                (-1.0, volume),
+                                                (Kline::NO_BUY_SELL_SPLIT, volume),
                                                 ticker_info.min_ticksize,
                                             );
 
@@ -865,7 +865,7 @@ pub async fn fetch_klines(
                 high,
                 low,
                 close,
-                (-1.0, volume),
+                (Kline::NO_BUY_SELL_SPLIT, volume),
                 ticker_info.min_ticksize,
             );
 
@@ -1386,10 +1386,14 @@ pub async fn fetch_trades(
     from_time: u64,
     data_path: PathBuf,
 ) -> Result<(Vec<Trade>, u64), AdapterError> {
-    let today_date = chrono::Utc::now().date_naive();
-    let today_midnight = today_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    // Day boundary from the exchange's clock (local time + measured skew), as in Binance, so
+    // a skewed local clock cannot route the first trades of a new day to the wrong cache.
+    let today_midnight = crate::clock::today_midnight_ms(Some(ticker_info.exchange()));
+    let today_date = chrono::DateTime::from_timestamp_millis(today_midnight as i64)
+        .map(|dt| dt.date_naive())
+        .unwrap_or_else(|| chrono::Utc::now().date_naive());
 
-    if from_time as i64 >= today_midnight.timestamp_millis() {
+    if from_time >= today_midnight {
         return fetch_trades_from_intraday_cache_or_rest(
             ticker_info,
             from_time,

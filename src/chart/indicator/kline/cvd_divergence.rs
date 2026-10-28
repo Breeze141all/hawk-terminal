@@ -114,17 +114,18 @@ impl CvdDivergenceIndicator {
         timestamps.sort_unstable();
         timestamps.dedup();
 
-        let mut cum_perp = 0.0f32;
-        let mut cum_spot = 0.0f32;
+        // Running totals in f64 for the same reason as the CVD indicator.
+        let mut cum_perp = 0.0f64;
+        let mut cum_spot = 0.0f64;
 
         for time in timestamps {
             let p_delta = self.perp_deltas.get(&time).copied().unwrap_or(0.0);
             let s_delta = self.spot_deltas.get(&time).copied().unwrap_or(0.0);
 
-            cum_perp += p_delta;
-            cum_spot += s_delta;
+            cum_perp += f64::from(p_delta);
+            cum_spot += f64::from(s_delta);
 
-            let pt = CvdDivergencePoint::new(cum_spot, cum_perp, s_delta, p_delta);
+            let pt = CvdDivergencePoint::new(cum_spot as f32, cum_perp as f32, s_delta, p_delta);
             self.data.insert(time, pt);
         }
 

@@ -812,7 +812,7 @@ pub async fn fetch_klines(
                 hl_kline.high,
                 hl_kline.low,
                 hl_kline.close,
-                (-1.0, volume),
+                (Kline::NO_BUY_SELL_SPLIT, volume),
                 ticker_info.min_ticksize,
             );
             klines.push(kline);
@@ -976,7 +976,7 @@ async fn handle_kline_payload<S>(
             hl_kline.high,
             hl_kline.low,
             hl_kline.close,
-            (-1.0, volume),
+            (Kline::NO_BUY_SELL_SPLIT, volume),
             ticker_info.min_ticksize,
         );
 
