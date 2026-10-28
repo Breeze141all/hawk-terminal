@@ -279,8 +279,8 @@ impl KlineIndicatorImpl for PositionFlowIndicator {
                         *t,
                         dp.kline.open.to_f32(),
                         dp.kline.close.to_f32(),
-                        dp.kline.volume.0,
-                        dp.kline.volume.1,
+                        dp.kline.volume_f32().0,
+                        dp.kline.volume_f32().1,
                     )
                 })
                 .collect(),
@@ -293,8 +293,8 @@ impl KlineIndicatorImpl for PositionFlowIndicator {
                         idx as u64,
                         dp.kline.open.to_f32(),
                         dp.kline.close.to_f32(),
-                        dp.kline.volume.0,
-                        dp.kline.volume.1,
+                        dp.kline.volume_f32().0,
+                        dp.kline.volume_f32().1,
                     )
                 })
                 .collect(),

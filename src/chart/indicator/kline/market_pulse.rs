@@ -165,7 +165,7 @@ impl MarketPulseIndicator {
             self.raw_volatility.insert(kline.time, volatility);
 
             // Volume: total volume
-            let volume = kline.volume.0 + kline.volume.1;
+            let volume = kline.volume_f32().0 + kline.volume_f32().1;
             self.raw_volume.insert(kline.time, volume);
 
             // Store futures close for basis calculation

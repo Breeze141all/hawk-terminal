@@ -1362,7 +1362,7 @@ impl From<FetchedKlines> for Kline {
             high: Price::from_f32(fetched.2),
             low: Price::from_f32(fetched.3),
             close: Price::from_f32(fetched.4),
-            volume: (fetched.9, sell_volume),
+            volume: (f64::from(fetched.9), f64::from(sell_volume)),
         }
     }
 }
@@ -1455,7 +1455,7 @@ pub async fn fetch_klines(
                     } else {
                         k.9
                     };
-                    (buy_volume, sell_volume)
+                    (f64::from(buy_volume), f64::from(sell_volume))
                 }
                 MarketKind::InversePerps => {
                     let contract_size = if symbol_str == "BTCUSD_PERP" {
@@ -1465,7 +1465,10 @@ pub async fn fetch_klines(
                     };
 
                     let sell_volume = k.5 - k.9;
-                    (k.9 * contract_size, sell_volume * contract_size)
+                    (
+                        f64::from(k.9 * contract_size),
+                        f64::from(sell_volume * contract_size),
+                    )
                 }
             },
         })

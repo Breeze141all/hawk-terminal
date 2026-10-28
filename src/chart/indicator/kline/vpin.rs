@@ -350,14 +350,12 @@ impl KlineIndicatorImpl for VpinIndicator {
         match source {
             PlotData::TimeBased(ts) => {
                 for (&time, dp) in &ts.datapoints {
-                    self.kline_data
-                        .insert(time, (dp.kline.volume.0, dp.kline.volume.1));
+                    self.kline_data.insert(time, dp.kline.volume_f32());
                 }
             }
             PlotData::TickBased(ta) => {
                 for (idx, dp) in ta.datapoints.iter().enumerate() {
-                    self.kline_data
-                        .insert(idx as u64, (dp.kline.volume.0, dp.kline.volume.1));
+                    self.kline_data.insert(idx as u64, dp.kline.volume_f32());
                 }
             }
         }
@@ -367,8 +365,7 @@ impl KlineIndicatorImpl for VpinIndicator {
 
     fn on_insert_klines(&mut self, klines: &[Kline]) {
         for kline in klines {
-            self.kline_data
-                .insert(kline.time, (kline.volume.0, kline.volume.1));
+            self.kline_data.insert(kline.time, kline.volume_f32());
         }
         self.recalculate();
     }

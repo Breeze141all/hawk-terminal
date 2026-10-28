@@ -218,12 +218,16 @@ impl KlineIndicatorImpl for CvdDivergenceIndicator {
         match source {
             PlotData::TimeBased(ts) => {
                 for (time, dp) in &ts.datapoints {
-                    self.insert_perp_delta(*time, dp.kline.volume.0, dp.kline.volume.1);
+                    self.insert_perp_delta(*time, dp.kline.volume_f32().0, dp.kline.volume_f32().1);
                 }
             }
             PlotData::TickBased(tb) => {
                 for (idx, dp) in tb.datapoints.iter().enumerate() {
-                    self.insert_perp_delta(idx as u64, dp.kline.volume.0, dp.kline.volume.1);
+                    self.insert_perp_delta(
+                        idx as u64,
+                        dp.kline.volume_f32().0,
+                        dp.kline.volume_f32().1,
+                    );
                 }
             }
         }
@@ -232,7 +236,7 @@ impl KlineIndicatorImpl for CvdDivergenceIndicator {
 
     fn on_insert_klines(&mut self, klines: &[Kline]) {
         for k in klines {
-            self.insert_perp_delta(k.time, k.volume.0, k.volume.1);
+            self.insert_perp_delta(k.time, k.volume_f32().0, k.volume_f32().1);
         }
         self.recalculate();
     }

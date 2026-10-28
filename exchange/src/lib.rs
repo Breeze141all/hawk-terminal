@@ -764,7 +764,10 @@ pub struct Kline {
     pub high: Price,
     pub low: Price,
     pub close: Price,
-    pub volume: (f32, f32),
+    /// `(buy, sell)` base volume. `f64` because candles built from trades add one trade at a
+    /// time, and an `f32` sum drops small trades once a candle holds tens of thousands of
+    /// units. Code that draws reads [`Kline::volume_f32`].
+    pub volume: (f64, f64),
 }
 
 impl Kline {
@@ -776,6 +779,11 @@ impl Kline {
     /// The `(buy, sell)` split of a `volume` pair, or `None` when only a total is known.
     pub fn buy_sell(volume: (f32, f32)) -> Option<(f32, f32)> {
         if volume.0 < 0.0 { None } else { Some(volume) }
+    }
+
+    /// `volume` narrowed to `f32` for drawing and for the per-bar `f32` indicator series.
+    pub fn volume_f32(&self) -> (f32, f32) {
+        (self.volume.0 as f32, self.volume.1 as f32)
     }
 
     /// Total traded volume of a `volume` pair, with or without a buy/sell split.
@@ -801,7 +809,7 @@ impl Kline {
             high: Price::from_f32(high).round_to_min_tick(MinTicksize::from(min_ticksize)),
             low: Price::from_f32(low).round_to_min_tick(MinTicksize::from(min_ticksize)),
             close: Price::from_f32(close).round_to_min_tick(MinTicksize::from(min_ticksize)),
-            volume,
+            volume: (f64::from(volume.0), f64::from(volume.1)),
         }
     }
 }

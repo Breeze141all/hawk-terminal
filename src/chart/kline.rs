@@ -548,8 +548,8 @@ impl KlineChart {
                                 dp.kline.high.to_f32(),
                                 dp.kline.low.to_f32(),
                                 dp.kline.close.to_f32(),
-                                dp.kline.volume.0,
-                                dp.kline.volume.1,
+                                dp.kline.volume_f32().0,
+                                dp.kline.volume_f32().1,
                             )
                         })
                         .collect();
@@ -752,8 +752,8 @@ impl KlineChart {
                         dp.kline.high.to_f32(),
                         dp.kline.low.to_f32(),
                         dp.kline.close.to_f32(),
-                        dp.kline.volume.0,
-                        dp.kline.volume.1,
+                        dp.kline.volume_f32().0,
+                        dp.kline.volume_f32().1,
                     )
                 })
                 .collect();
@@ -778,8 +778,8 @@ impl KlineChart {
                         kline.high.to_f32(),
                         kline.low.to_f32(),
                         kline.close.to_f32(),
-                        kline.volume.0,
-                        kline.volume.1,
+                        kline.volume_f32().0,
+                        kline.volume_f32().1,
                     );
                 }
 
@@ -988,7 +988,7 @@ impl KlineChart {
                                 86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
                             let is_day_complete = dps.len() >= expected_count
                                 && dps.iter().all(|(_, dp)| {
-                                    (dp.kline.volume.0 + dp.kline.volume.1) == 0.0
+                                    (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) == 0.0
                                         || !dp.footprint.is_empty()
                                 });
 
@@ -1015,7 +1015,7 @@ impl KlineChart {
                                     86_400_000u64.checked_div(interval_ms).unwrap_or(1) as usize;
                                 let is_day_complete = dps.len() >= expected_count
                                     && dps.iter().all(|(_, dp)| {
-                                        (dp.kline.volume.0 + dp.kline.volume.1) == 0.0
+                                        (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) == 0.0
                                             || !dp.footprint.is_empty()
                                     });
 
@@ -2804,7 +2804,7 @@ impl KlineChart {
                 let is_day_complete = dps.len() >= expected_count
                     && !dps.is_empty()
                     && dps.iter().all(|(_, dp)| {
-                        (dp.kline.volume.0 + dp.kline.volume.1) == 0.0
+                        (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) == 0.0
                             || (!dp.footprint.is_empty() && dp.trades_fetched)
                     });
 
@@ -3771,7 +3771,7 @@ impl canvas::Program<Message> for KlineChart {
                                 let sim_trades;
                                 let effective_trades = if is_replay
                                     && trades.is_empty()
-                                    && (kline.volume.0 + kline.volume.1) > 0.0
+                                    && (kline.volume_f32().0 + kline.volume_f32().1) > 0.0
                                 {
                                     sim_trades = self.get_or_simulate_footprint(
                                         kline,
@@ -3849,7 +3849,7 @@ impl canvas::Program<Message> for KlineChart {
                                 PlotData::TimeBased(ts) => ts
                                     .datapoints
                                     .range(earliest..=latest)
-                                    .map(|(_, dp)| dp.kline.volume.0 + dp.kline.volume.1)
+                                    .map(|(_, dp)| dp.kline.volume_f32().0 + dp.kline.volume_f32().1)
                                     .fold(0.0_f32, f32::max),
                                 PlotData::TickBased(ta) => {
                                     let e = earliest as usize;
@@ -3858,7 +3858,7 @@ impl canvas::Program<Message> for KlineChart {
                                         .iter()
                                         .enumerate()
                                         .filter(|(i, _)| *i >= e && *i <= l)
-                                        .map(|(_, dp)| dp.kline.volume.0 + dp.kline.volume.1)
+                                        .map(|(_, dp)| dp.kline.volume_f32().0 + dp.kline.volume_f32().1)
                                         .fold(0.0_f32, f32::max)
                                 }
                             }
@@ -3885,7 +3885,7 @@ impl canvas::Program<Message> for KlineChart {
                                 );
 
                                 if show_vol && max_vol > 0.0 {
-                                    let vol = kline.volume.0 + kline.volume.1;
+                                    let vol = kline.volume_f32().0 + kline.volume_f32().1;
                                     let h = (vol / max_vol) * max_vol_h;
                                     let vol_color = if kline.close >= kline.open {
                                         palette.success.base.color.scale_alpha(0.50)

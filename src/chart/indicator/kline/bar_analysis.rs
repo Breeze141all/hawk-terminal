@@ -67,7 +67,7 @@ impl BarAnalysisIndicator {
                 for (timestamp, dp) in &timeseries.datapoints {
                     let summary =
                         FootprintSummary::from_trades(&dp.footprint).unwrap_or_else(|| {
-                            FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1)
+                            FootprintSummary::new(dp.kline.volume_f32().0, dp.kline.volume_f32().1)
                         });
                     self.data.insert(*timestamp, summary);
                 }
@@ -76,7 +76,7 @@ impl BarAnalysisIndicator {
                 for (idx, dp) in tickseries.datapoints.iter().enumerate() {
                     let summary =
                         FootprintSummary::from_trades(&dp.footprint).unwrap_or_else(|| {
-                            FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1)
+                            FootprintSummary::new(dp.kline.volume_f32().0, dp.kline.volume_f32().1)
                         });
                     self.data.insert(idx as u64, summary);
                 }
@@ -119,7 +119,7 @@ impl super::KlineIndicatorImpl for BarAnalysisIndicator {
 
     fn on_insert_klines(&mut self, klines: &[Kline]) {
         for kline in klines {
-            let summary = FootprintSummary::new(kline.volume.0, kline.volume.1);
+            let summary = FootprintSummary::new(kline.volume_f32().0, kline.volume_f32().1);
             self.data.insert(kline.time, summary);
         }
         self.clear_all_caches();
@@ -150,7 +150,10 @@ impl super::KlineIndicatorImpl for BarAnalysisIndicator {
                             None => {
                                 self.data.insert(
                                     ts,
-                                    FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1),
+                                    FootprintSummary::new(
+                                        dp.kline.volume_f32().0,
+                                        dp.kline.volume_f32().1,
+                                    ),
                                 );
                             }
                         }
@@ -172,7 +175,10 @@ impl super::KlineIndicatorImpl for BarAnalysisIndicator {
                             None => {
                                 self.data.insert(
                                     idx as u64,
-                                    FootprintSummary::new(dp.kline.volume.0, dp.kline.volume.1),
+                                    FootprintSummary::new(
+                                        dp.kline.volume_f32().0,
+                                        dp.kline.volume_f32().1,
+                                    ),
                                 );
                             }
                         }

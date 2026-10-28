@@ -105,7 +105,7 @@ impl KlineIndicatorImpl for VwapIndicator {
                     let low = dp.kline.low.to_f32() as f64;
                     let close = dp.kline.close.to_f32() as f64;
                     let tp = (high + low + close) / 3.0;
-                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                    let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
 
                     if let Some(pt) = self.tracker.on_data_point(*time as i64, tp, vol) {
                         self.data.insert(*time, pt);
@@ -118,7 +118,7 @@ impl KlineIndicatorImpl for VwapIndicator {
                     let low = dp.kline.low.to_f32() as f64;
                     let close = dp.kline.close.to_f32() as f64;
                     let tp = (high + low + close) / 3.0;
-                    let vol = (dp.kline.volume.0 + dp.kline.volume.1) as f64;
+                    let vol = (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) as f64;
 
                     if let Some(pt) = self.tracker.on_data_point(dp.kline.time as i64, tp, vol) {
                         self.data.insert(idx as u64, pt);
@@ -135,7 +135,7 @@ impl KlineIndicatorImpl for VwapIndicator {
             let low = kline.low.to_f32() as f64;
             let close = kline.close.to_f32() as f64;
             let tp = (high + low + close) / 3.0;
-            let vol = (kline.volume.0 + kline.volume.1) as f64;
+            let vol = (kline.volume_f32().0 + kline.volume_f32().1) as f64;
 
             if let Some(pt) = self.tracker.on_data_point(kline.time as i64, tp, vol) {
                 self.data.insert(kline.time, pt);

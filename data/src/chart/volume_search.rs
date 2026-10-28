@@ -140,8 +140,7 @@ pub fn search_volume_candles(
             }
         } else {
             // Fallback to kline volumes if footprint empty
-            candle_buy_vol = dp.kline.volume.0;
-            candle_sell_vol = dp.kline.volume.1;
+            (candle_buy_vol, candle_sell_vol) = dp.kline.volume_f32();
             max_vol = candle_buy_vol + candle_sell_vol;
             poc_price = dp.kline.close;
         }

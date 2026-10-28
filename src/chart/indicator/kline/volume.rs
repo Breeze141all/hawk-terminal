@@ -98,8 +98,7 @@ impl KlineIndicatorImpl for VolumeIndicator {
 
     fn on_insert_klines(&mut self, klines: &[Kline]) {
         for kline in klines {
-            self.data
-                .insert(kline.time, (kline.volume.0, kline.volume.1));
+            self.data.insert(kline.time, kline.volume_f32());
         }
         self.clear_all_caches();
     }
@@ -115,8 +114,7 @@ impl KlineIndicatorImpl for VolumeIndicator {
             PlotData::TickBased(tickseries) => {
                 let start_idx = old_dp_len.saturating_sub(1);
                 for (idx, dp) in tickseries.datapoints.iter().enumerate().skip(start_idx) {
-                    self.data
-                        .insert(idx as u64, (dp.kline.volume.0, dp.kline.volume.1));
+                    self.data.insert(idx as u64, dp.kline.volume_f32());
                 }
             }
         }

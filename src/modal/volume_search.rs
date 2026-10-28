@@ -1763,7 +1763,8 @@ pub fn scan_local_cache_for_day(
                 86_400_000u64.checked_div(interval_ms).unwrap_or(1).max(1) as usize;
             let is_day_complete = dps.len() >= expected_count
                 && dps.iter().all(|(_, dp)| {
-                    (dp.kline.volume.0 + dp.kline.volume.1) == 0.0 || !dp.footprint.is_empty()
+                    (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) == 0.0
+                        || !dp.footprint.is_empty()
                 });
             if day < today && is_day_complete {
                 let _ = data::chart::kline::save_daily_footprint(&cache_path, &dps);
@@ -1944,7 +1945,8 @@ pub async fn download_and_cache_day(
         let expected_count = 86_400_000u64.checked_div(interval_ms).unwrap_or(1).max(1) as usize;
         let is_day_complete = dps.len() >= expected_count
             && dps.iter().all(|(_, dp)| {
-                (dp.kline.volume.0 + dp.kline.volume.1) == 0.0 || !dp.footprint.is_empty()
+                (dp.kline.volume_f32().0 + dp.kline.volume_f32().1) == 0.0
+                    || !dp.footprint.is_empty()
             });
         if day < today && is_day_complete {
             let _ = data::chart::kline::save_daily_footprint(&cache_path, &dps);
