@@ -59,7 +59,8 @@
     2. Прибрано «sovereign», «bare-metal», «zero-latency»; heatmap описано як «Estimated Liquidation Heatmap» — модель без OI і реальних ліквідацій (UI-перейменування лишається в **#128**).
     3. Список бірж у README виправлено за `exchange::adapter::Exchange`: додано MEXC, Coinbase та відсутні ринки (Binance COIN-M, Bybit Inverse, Hyperliquid/OKX Spot).
     4. Сайт: гілка `site-honest-positioning` у `Breeze141all/hawk-site` від `gh-pages` — ті самі правки в `index.html` (kicker, lead, футер з атрибуцією, meta description, опис heatmap, «microsecond loops»).
-  - **Лишилось**: `legacy.html` на сайті (не має посилань з головної, але публічно доступна й індексується) зберігає старі формулювання — видалити або закрити `noindex`, рішення власника. Картки MEXC і Coinbase на головній сайту не додано (потрібні тексти/посилання від власника).
+    5. Сайт: `legacy.html` (перша посадкова сторінка без посилань, але публічна й індексована, зі старими формулюваннями) видалено в тій самій гілці.
+  - **Лишилось**: картки MEXC і Coinbase на головній сайту не додано (потрібні тексти/посилання від власника). П'ять зображень, які використовувала лише `legacy.html` (`og-image.png`, `screenshot-*.png`), лишились в `assets/`.
 
 - [ ] **[#128] [P1] Liquidation Heatmap: чесне маркування моделі та прив'язка до Open Interest (IND-14)**
   - **Файли**: `data/src/chart/liquidation_heatmap.rs`, `src/chart/indicator/kline.rs`, `README.md`
