@@ -2582,8 +2582,10 @@ mod tests {
         ));
         let ticker = Ticker::new("BTCUSDT", Exchange::BinanceLinear);
         let ticker_info = TickerInfo::new(ticker, 0.1, 0.001, None);
-        let today_date = chrono::Utc::now().date_naive();
-        let base_t = today_date
+        // Fixed day: the intraday path is entered directly below, so the test does not
+        // depend on today's date (a run across UTC midnight used to route it elsewhere).
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 16).unwrap();
+        let base_t = day
             .and_hms_opt(0, 0, 0)
             .unwrap()
             .and_utc()
@@ -2617,12 +2619,18 @@ mod tests {
             },
         ];
 
-        save_intraday_trades_to_cache(&temp_dir, &ticker_info, today_date, &trades).unwrap();
+        save_intraday_trades_to_cache(&temp_dir, &ticker_info, day, &trades).unwrap();
 
         // 1. Fetching from base_t should return trades up to the gap at 00:00:10
-        let (batch1, next1) = fetch_trades(ticker_info, base_t, temp_dir.clone())
-            .await
-            .expect("fetch batch1 failed");
+        let (batch1, next1) = fetch_trades_from_intraday_cache_or_rest(
+            ticker_info,
+            base_t,
+            day,
+            &temp_dir,
+            base_t.saturating_add(crate::trades::cache::INTRADAY_MAX_GAP_MS),
+        )
+        .await
+        .expect("fetch batch1 failed");
         assert_eq!(batch1.len(), 2);
         assert_eq!(batch1[0].time, base_t);
         assert_eq!(batch1[1].time, base_t + 10_000);
